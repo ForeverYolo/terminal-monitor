@@ -10,7 +10,7 @@
 #
 # Target line format:  label|user|host|port|path
 
-PROJ_DIR="$(cd "$(dirname "$0") && pwd)"
+PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF="$PROJ_DIR/deploy.targets.conf"
 MAX_RETRIES=3
 RETRY_DELAY=5

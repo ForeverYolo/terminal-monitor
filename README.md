@@ -148,7 +148,13 @@ cp deploy.targets.example.conf deploy.targets.conf
 
 ./deploy.sh                                  # 推送默认文件集
 ./deploy.sh server.js public/index.html      # 推送指定文件
+
+# 重启指定目标上的远程服务（使用 install.sh 创建的 screen 会话）
+bash restart.sh server server                # label 为 server 的目标
+bash restart.sh client mywork gpu-box        # gpu-box 上的 swt-client-mywork
 ```
+
+`restart.sh` 必须指定 `deploy.targets.conf` 中的目标 label，只负责通过 SSH 重启进程，不会重新推送代码；客户端还必须指定对应的 Screen 会话名。
 
 ### 4.5 后台常驻
 
