@@ -1343,7 +1343,7 @@ function restartScreen(agentId) {
 
 // ========== Mode Switch ==========
 
-document.querySelectorAll('.mode-switch button').forEach(btn => {
+document.querySelectorAll('.mode-switch button[data-mode]').forEach(btn => {
   btn.addEventListener('click', () => {
     const mode = btn.dataset.mode;
     setMode(mode);
@@ -1352,7 +1352,7 @@ document.querySelectorAll('.mode-switch button').forEach(btn => {
 
 function setMode(mode) {
   currentMode = mode;
-  document.querySelectorAll('.mode-switch button').forEach(b => {
+  document.querySelectorAll('.mode-switch button[data-mode]').forEach(b => {
     b.classList.toggle('active', b.dataset.mode === mode);
   });
   const multiBar = document.getElementById('dash-multi-bar');
