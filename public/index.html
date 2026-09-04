@@ -488,14 +488,16 @@ let currentSort = localStorage.getItem('swt-sort') || 'name'; // 'name', 'id', '
 let selectedAgents = new Set(); // for multi-select mode
 let multiTerms = {}; // agentId -> { term, fitAddon, container }
 
-// Filter escape sequences that break scrollback visibility:
-// - \x1b[?1049h/l  (enter/leave alt screen — has no scrollback)
-// - \x1b[?1047h/l  (older alt screen variant)
-// - \x1b[3J        (clear scrollback buffer — wipes all history)
-function filterAltScreen(bytes) {
+// Virtualize the alternate screen so the browser can keep one scrollback
+// buffer.  On exit, clear only the visible viewport (not scrollback) and reset
+// SGR attributes; otherwise Claude's inverse-video notifications can remain on
+// the shell prompt after the TUI exits.
+function filterVirtualAltScreen(bytes) {
   const len = bytes.length;
   if (len < 4) return bytes;
-  const result = new Uint8Array(len);
+  // An 8-byte alt-screen exit is replaced by an 11-byte reset/clear/home
+  // sequence.  Twice the input size safely covers multiple exits in a chunk.
+  const result = new Uint8Array(len * 2);
   let out = 0;
   let i = 0;
   while (i < len) {
@@ -510,13 +512,78 @@ function filterAltScreen(bytes) {
         i += 4;
         continue;
       }
-      // ESC [ ? 1049 h/l  = alt screen mode (8 bytes)
-      // ESC [ ? 1047 h/l  = alt screen mode variant (8 bytes)
+      // ESC [ ? 1049 h/l = alternate screen (1047 is the older variant).
+      // Suppress entry to preserve scrollback.  When leaving, reset graphics
+      // and erase only the viewport, which keeps history scrollable while
+      // removing the temporary TUI/white inverse-video status blocks.
       if (i + 7 < len && bytes[i + 2] === 0x3f &&
           bytes[i + 3] === 0x31 && bytes[i + 4] === 0x30 && bytes[i + 5] === 0x34 &&
           (bytes[i + 6] === 0x39 || bytes[i + 6] === 0x37) &&
           (bytes[i + 7] === 0x68 || bytes[i + 7] === 0x6c)) {
+        if (bytes[i + 7] === 0x6c) {
+          // ESC[0m (reset SGR), ESC[2J (erase display), ESC[H (home).
+          result.set([0x1b, 0x5b, 0x30, 0x6d, 0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x48], out);
+          out += 11;
+        }
         i += 8;
+        continue;
+      }
+
+      // Claude uses reverse video and explicit ANSI background colours for
+      // transient badges/status bars.  In the virtual main buffer these become
+      // persistent white/red blocks in scrollback.  Keep text, foreground
+      // colours and other attributes, but remove background-related SGR flags.
+      let end = i + 2;
+      while (end < len && (bytes[end] < 0x40 || bytes[end] > 0x7e)) end++;
+      if (end < len && bytes[end] === 0x6d) { // CSI ... m
+        const params = String.fromCharCode(...bytes.slice(i + 2, end)).split(';');
+        const kept = [];
+        let changed = false;
+        for (let p = 0; p < params.length; p++) {
+          const value = params[p];
+          // Do not mistake indexed/true-colour values (for example 38;5;7)
+          // for the reverse-video flag.
+          if (value === '48' || value.startsWith('48:') ||
+              /^(4[0-9]|10[0-7])$/.test(value)) {
+            // 40-49/100-107 are standard backgrounds; 48 is extended
+            // background colour (48;5;n or 48;2;r;g;b).
+            changed = true;
+            if (value === '48') {
+              if (params[p + 1] === '5') {
+                p += Math.min(2, params.length - p - 1);
+              } else if (params[p + 1] === '2') {
+                p += Math.min(4, params.length - p - 1);
+              }
+            }
+          } else if (value === '38' || value === '58') {
+            kept.push(value);
+            if (params[p + 1] === '5') {
+              kept.push(params[++p]);
+              if (p + 1 < params.length) kept.push(params[++p]);
+            } else if (params[p + 1] === '2') {
+              kept.push(params[++p]);
+              for (let n = 0; n < 3 && p + 1 < params.length; n++) kept.push(params[++p]);
+            }
+          } else if (value === '7' || value === '27') {
+            changed = true;
+          } else {
+            kept.push(value);
+          }
+        }
+        if (changed && kept.length > 0) {
+          result.set([0x1b, 0x5b], out);
+          out += 2;
+          for (let p = 0; p < kept.length; p++) {
+            const value = kept[p];
+            for (const ch of value) result[out++] = ch.charCodeAt(0);
+            if (p < kept.length - 1) result[out++] = 0x3b;
+          }
+          result[out++] = 0x6d;
+        } else if (!changed) {
+          result.set(bytes.slice(i, end + 1), out);
+          out += end + 1 - i;
+        }
+        i = end + 1;
         continue;
       }
     }
@@ -620,11 +687,11 @@ function connect(username, password) {
     } else if (msg.type === 'data') {
       // Single terminal mode
       if (term && msg.agentId === currentAgentId) {
-        term.write(filterAltScreen(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
+        term.write(filterVirtualAltScreen(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
       }
       // Multi terminal mode
       if (multiTerms[msg.agentId]) {
-        multiTerms[msg.agentId].term.write(filterAltScreen(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
+        multiTerms[msg.agentId].term.write(filterVirtualAltScreen(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
       }
     } else if (msg.type === 'scrollback_info') {
       // Auto-load all remaining scrollback history
