@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+
+# Logs and runtime files
+*.log
+*.pid
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
