@@ -1,0 +1,23 @@
+{
+  "mode": "server",
+  "server": {
+    "port": 8080,
+    "password": "change-me",
+    "tokens": {
+      "REPLACE_WITH_YOUR_TOKEN": { "name": "default", "desc": "auto-generated", "user": "user" }
+    },
+    "supervisor": {
+      "enabled": false,
+      "summaryInterval": 300,
+      "idleTimeout": 600,
+      "webhook": ""
+    }
+  },
+  "client": {
+    "serverUrl": "ws://YOUR_PUBLIC_IP:8080",
+    "token": "REPLACE_WITH_YOUR_TOKEN",
+    "name": "change-me",
+    "screen": "main",
+    "attrs": {}
+  }
+}

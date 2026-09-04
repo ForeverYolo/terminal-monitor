@@ -1,0 +1,17 @@
+{
+  "mode": "client",
+  "server": {
+    "port": 8080,
+    "password": "unused"
+  },
+  "client": {
+    "serverUrl": "ws://YOUR_PUBLIC_IP:8080",
+    "token": "REPLACE_WITH_YOUR_TOKEN",
+    "name": "my-machine",
+    "screen": "main",
+    "screenMode": "auto",
+    "attrs": {
+      "tags": []
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "terminal-monitor",
+  "version": "1.0.0",
+  "description": "Web-based terminal relay: monitor and operate GNU Screen sessions on internal machines via browser, no inbound ports required.",
+  "main": "server.js",
+  "scripts": {
+    "server": "node server.js",
+    "client": "node client.js",
+    "overseer": "node ai-overseer.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "node-pty": "^1.0.0"
+  }
+}

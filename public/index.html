@@ -1,0 +1,1521 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Terminal Monitor</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* Login */
+#login-view { display: flex; justify-content: center; align-items: center; height: 100vh; }
+.login-box { background: #16213e; border-radius: 12px; padding: 40px; width: 90%; max-width: 360px; text-align: center; }
+.login-box h1 { margin-bottom: 8px; font-size: 22px; color: #fff; }
+.login-box p { margin-bottom: 24px; color: #888; font-size: 14px; }
+.login-box input { width: 100%; padding: 12px; border: 1px solid #333; border-radius: 6px; background: #0f0f23; color: #fff; font-size: 14px; margin-bottom: 16px; outline: none; }
+.login-box input:focus { border-color: #4a9eff; }
+.login-box button { width: 100%; padding: 12px; border: none; border-radius: 6px; background: #4a9eff; color: #fff; font-size: 15px; cursor: pointer; }
+.login-box button:hover { background: #3a8eef; }
+.login-error { color: #ff6b6b; font-size: 13px; margin-bottom: 12px; display: none; }
+
+/* Dashboard */
+#dash-view { display: none; flex-direction: column; height: 100vh; }
+#dash-header { background: #16213e; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #2a2a4a; }
+#dash-header h2 { font-size: 18px; color: #fff; }
+#dash-header .right-area { display: flex; align-items: center; gap: 12px; }
+#dash-header .logout { color: #888; cursor: pointer; font-size: 13px; }
+#dash-header .logout:hover { color: #4a9eff; }
+
+/* Mode switch */
+.mode-switch { display: flex; gap: 2px; background: #0f0f23; padding: 3px; border-radius: 6px; }
+.mode-switch button { background: transparent; border: none; color: #888; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; transition: all 0.2s; }
+.mode-switch button:hover { color: #fff; }
+.mode-switch button.active { background: #4a9eff; color: #fff; }
+
+#agent-list { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-wrap: wrap; gap: 12px; align-content: flex-start; }
+.agent-card { background: #16213e; border: 1px solid #2a2a4a; border-radius: 10px; padding: 16px; width: 100%; max-width: 400px; cursor: pointer; transition: border-color 0.2s; }
+.agent-card:hover { border-color: #4a9eff; }
+.agent-card .name-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.agent-card .name { font-size: 16px; font-weight: 600; color: #fff; }
+.agent-card .pin-btn { background: none; border: none; cursor: pointer; font-size: 14px; padding: 0 4px 0 0; opacity: 0.3; line-height: 1; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.agent-card .pin-btn.pinned { opacity: 1; }
+.agent-card .screen-badge { background: #1a3a5c; color: #4a9eff; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-family: monospace; }
+.agent-card .hostname { font-size: 11px; color: #666; margin-bottom: 10px; }
+.agent-card .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 8px; }
+.agent-card .info-item { font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-card .info-item span { color: #bbb; }
+.agent-card .bar-wrap { height: 4px; background: #2a2a4a; border-radius: 2px; margin: 2px 0 6px; }
+.agent-card .bar-fill { height: 100%; border-radius: 2px; }
+.agent-card .bar-label { font-size: 11px; color: #666; display: flex; justify-content: space-between; }
+.agent-card .gpu-list { margin-bottom: 6px; }
+.agent-card .gpu-item { font-size: 11px; color: #888; font-family: monospace; }
+.agent-card .tags { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+.agent-card .tag { background: #2a2a4a; color: #aaa; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.agent-card .status-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.agent-card .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.agent-card .status-dot.idle { background: #ff6b6b; } /* waiting for input */
+.agent-card .status-dot.busy { background: #4caf50; } /* running/outputting */
+.agent-card .status-text { font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 10px; color: #6a9955; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.no-agents { color: #555; font-size: 14px; padding-top: 40px; text-align: center; width: 100%; }
+
+/* Multi-select mode */
+.agent-card.selectable { cursor: pointer; position: relative; }
+.agent-card .card-checkbox { position: absolute; top: 12px; left: 12px; width: 18px; height: 18px; cursor: pointer; z-index: 1; display: none; }
+.agent-card.selectable .card-checkbox { display: block; }
+.agent-card.selectable.selected { border-color: #4a9eff; background: #1a2a4a; }
+
+/* Multi view */
+#multi-view { display: none; flex-direction: column; height: 100vh; }
+#multi-toolbar { background: #16213e; padding: 10px 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #2a2a4a; flex-shrink: 0; }
+#multi-toolbar .back { cursor: pointer; color: #4a9eff; font-size: 13px; }
+#multi-toolbar .title { font-size: 14px; color: #ccc; }
+#multi-toolbar .open-btn { background: #4a9eff; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+#multi-toolbar .open-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+#multi-container { flex: 1; display: flex; flex-wrap: wrap; gap: 2px; overflow: hidden; background: #000; }
+.multi-term-wrap { flex: 1; min-width: 400px; min-height: 200px; display: flex; flex-direction: column; background: #0f0f23; }
+.multi-term-header { background: #16213e; padding: 6px 12px; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.multi-term-header .name { font-size: 13px; color: #fff; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-term-header .close { color: #888; cursor: pointer; font-size: 12px; margin-left: 4px; }
+.multi-term-header .close:hover { color: #ff6b6b; }
+.multi-term-container { flex: 1; padding: 2px; overflow: hidden; min-height: 0; }
+
+/* Terminal */
+#term-view { display: none; flex-direction: column; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; }
+#term-header { display: none; }
+#term-container { flex: 1; background: #000; overflow: hidden; min-height: 0; }
+
+/* Floating overlay for agent name */
+#term-overlay {
+  display: none;
+  position: fixed;
+  top: 8px;
+  right: 12px;
+  z-index: 100;
+  background: rgba(15, 15, 35, 0.7);
+  color: #888;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 11px;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+
+/* Network disconnect overlay — shown on top of any view */
+#network-overlay {
+  display: none;
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  background: rgba(180, 40, 40, 0.92);
+  color: #fff;
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+
+/* Floating upload/download buttons in terminal view */
+#float-upload, #float-download {
+  display: none;
+  position: fixed;
+  top: 8px;
+  z-index: 100;
+  background: rgba(15, 15, 35, 0.6);
+  color: #4a9eff;
+  border: none;
+  border-radius: 16px;
+  padding: 4px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: opacity 0.3s, background 0.2s;
+}
+#float-upload { left: 72px; }
+#float-download { left: 120px; }
+#float-upload:hover, #float-download:hover { background: rgba(15, 15, 35, 0.9); }
+
+/* File browser modal */
+#file-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(0, 0, 0, 0.6);
+  align-items: center;
+  justify-content: center;
+}
+#file-modal.show { display: flex; }
+.file-modal-box {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  width: min(560px, 92vw);
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+.file-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #21262d;
+}
+.file-modal-title { color: #c9d1d9; font-size: 14px; font-weight: 600; }
+.file-modal-close {
+  background: none; border: none; color: #8b949e; font-size: 16px; cursor: pointer;
+  padding: 2px 8px; border-radius: 4px;
+}
+.file-modal-close:hover { color: #fff; background: #21262d; }
+.file-modal-path {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px; border-bottom: 1px solid #21262d;
+  font-size: 12px; color: #8b949e; font-family: monospace;
+}
+.file-modal-path button {
+  background: #21262d; color: #c9d1d9; border: none; border-radius: 4px;
+  padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.file-modal-path button:hover { background: #30363d; }
+.file-modal-list { flex: 1; overflow-y: auto; padding: 6px 8px; }
+.file-entry {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  color: #c9d1d9; user-select: none;
+}
+.file-entry:hover { background: #161b22; }
+.file-entry .fe-icon { width: 18px; text-align: center; }
+.file-entry .fe-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-entry .fe-size { color: #6e7681; font-size: 11px; font-family: monospace; }
+.file-entry.is-dir .fe-name { color: #58a6ff; }
+
+/* File transfer progress overlay */
+#file-progress {
+  display: none;
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 300;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px 16px;
+  width: 280px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  color: #c9d1d9;
+}
+#file-progress.show { display: block; }
+#file-progress-name { font-weight: 600; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-progress-bar {
+  height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; margin-bottom: 6px;
+}
+#file-progress-fill {
+  height: 100%; width: 0%; background: #4a9eff; transition: width 0.2s;
+}
+#file-progress-status { color: #8b949e; font-size: 11px; }
+#file-progress.success #file-progress-fill { background: #2ea043; }
+#file-progress.error #file-progress-fill { background: #da3633; }
+#file-progress.error #file-progress-status { color: #f85149; }
+
+/* Lightweight toast for quick feedback (copy/restart/mutex) */
+#toast {
+  display: none;
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 400;
+  background: rgba(30, 30, 50, 0.95);
+  color: #e6e6e6;
+  padding: 9px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  transition: opacity 0.25s;
+  max-width: 80vw;
+  text-align: center;
+}
+#toast.show { display: block; }
+#toast.error { background: rgba(80, 20, 20, 0.95); color: #ffb3b3; }
+
+/* Multi-view panel action buttons */
+.term-actions { display: flex; gap: 3px; align-items: center; }
+.term-actions button {
+  background: rgba(15, 15, 35, 0.6);
+  color: #4a9eff;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.4;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.term-actions button:hover { background: rgba(15, 15, 35, 0.95); }
+.term-actions button.restarting {
+  background: rgba(180, 40, 40, 0.7);
+  color: #fff;
+  animation: pulse 0.8s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* Floating back button */
+#float-back {
+  display: none;
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  background: rgba(15, 15, 35, 0.6);
+  color: #4a9eff;
+  border: none;
+  border-radius: 16px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: opacity 0.3s;
+}
+#float-back:hover { background: rgba(15, 15, 35, 0.9); }
+
+/* Mobile toolbar */
+#mobile-toolbar {
+  display: none;
+  background: #0d1117;
+  border-top: 1px solid #21262d;
+  padding: 4px 4px 8px;
+  flex-shrink: 0;
+}
+#mobile-toolbar .tb-row {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 3px;
+}
+#mobile-toolbar .tb-row:last-child { margin-bottom: 0; }
+#mobile-toolbar button {
+  flex: 1;
+  background: #21262d;
+  color: #c9d1d9;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  height: 34px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+#mobile-toolbar button:active { background: #4a9eff; color: #fff; }
+#mobile-toolbar button.active { background: #4a9eff; color: #fff; }
+
+/* Mobile input area */
+#mobile-input-area { display: none; margin-bottom: 4px; }
+#mobile-text-input {
+  width: 100%; height: 50px; max-height: 50px; overflow-y: auto;
+  background: #0f0f23; color: #fff;
+  border: 1px solid #333; border-radius: 4px; padding: 6px;
+  font-size: 16px; font-family: monospace; resize: none; outline: none;
+  line-height: 1.3;
+}
+#mobile-text-input:focus { border-color: #4a9eff; }
+.mobile-input-btns { display: flex; gap: 4px; margin-top: 4px; }
+.mobile-input-btns button { flex: 1; height: 28px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+
+/* Mobile responsive */
+@media (max-width: 600px) {
+  .login-box { padding: 28px 20px; }
+  #dash-header { padding: 12px 16px; }
+  #dash-header h2 { font-size: 16px; }
+  .agent-card { padding: 14px; }
+  .agent-card .info-grid { grid-template-columns: 1fr; }
+  #mobile-toolbar { display: block; }
+}
+</style>
+</head>
+<body>
+
+<!-- Network disconnect overlay -->
+<div id="network-overlay">网络断开，重连中...</div>
+
+<!-- Hidden file input for upload trigger -->
+<input type="file" id="file-input" style="display:none">
+
+<!-- File browser modal -->
+<div id="file-modal">
+  <div class="file-modal-box">
+    <div class="file-modal-header">
+      <span class="file-modal-title">📁 文件浏览器</span>
+      <button class="file-modal-close" onclick="closeFileBrowser()">✕</button>
+    </div>
+    <div class="file-modal-path">
+      <button onclick="fileBrowserUp()" id="file-up-btn">↑ 上级</button>
+      <span id="file-modal-cwd">/</span>
+    </div>
+    <div id="file-modal-list" class="file-modal-list"></div>
+  </div>
+</div>
+
+<!-- File transfer progress overlay -->
+<div id="file-progress">
+  <div id="file-progress-name"></div>
+  <div class="file-progress-bar"><div id="file-progress-fill"></div></div>
+  <div id="file-progress-status"></div>
+</div>
+
+<!-- Lightweight toast -->
+<div id="toast"></div>
+
+<!-- Login View -->
+<div id="login-view">
+  <div class="login-box">
+    <h1>Terminal Monitor</h1>
+    <p>Enter username and password to continue</p>
+    <div class="login-error" id="login-error"></div>
+    <input type="text" id="username-input" placeholder="Username">
+    <input type="password" id="password-input" placeholder="Password" autofocus>
+    <button onclick="doLogin()">Login</button>
+  </div>
+</div>
+
+<!-- Dashboard View -->
+<div id="dash-view">
+  <div id="dash-header">
+    <h2>Terminal Monitor</h2>
+    <div class="right-area">
+      <div class="mode-switch" id="sort-switch">
+        <button class="active" data-sort="name">名字</button>
+        <button data-sort="id">编号</button>
+        <button data-sort="recent">最近</button>
+      </div>
+      <div class="mode-switch">
+        <button class="active" data-mode="card">卡片</button>
+        <button data-mode="multi">多屏</button>
+      </div>
+      <span class="logout" onclick="doLogout()">Logout</span>
+    </div>
+  </div>
+  <div id="agent-list"></div>
+  <div id="dash-multi-bar" style="display:none; background:#0d1117; padding:8px 16px; border-top:1px solid #21262d; flex-shrink:0; align-items:center; gap:12px;">
+    <span style="color:#ccc; font-size:14px;" id="dash-multi-count">已选 0 台</span>
+    <button id="dash-multi-open" onclick="openMultiTerminal()" disabled style="background:#4a9eff; color:#fff; border:none; padding:8px 18px; border-radius:6px; cursor:pointer; font-size:13px;">打开多屏</button>
+    <button onclick="cancelMultiSelect()" style="background:#333; color:#aaa; border:none; padding:8px 14px; border-radius:6px; cursor:pointer; font-size:13px;">取消</button>
+  </div>
+</div>
+
+<!-- Multi View -->
+<div id="multi-view">
+  <div id="multi-toolbar">
+    <span class="back" onclick="closeMultiView()">&larr; 返回</span>
+    <span class="title" id="multi-title">已选 0 台设备</span>
+    <button class="open-btn" id="btn-open-multi" onclick="openMultiTerminal()" disabled>打开所选</button>
+  </div>
+  <div id="multi-container"></div>
+</div>
+
+<!-- Terminal View -->
+<div id="term-view">
+  <button id="float-back" onclick="closeTerminal()">&larr; Back</button>
+  <button id="float-upload" onclick="onUploadClickFor(currentAgentId)" title="上传文件到终端当前目录">📤</button>
+  <button id="float-download" onclick="openFileBrowserFor(currentAgentId)" title="从终端当前目录下载文件">📥</button>
+  <div id="term-overlay"></div>
+  <div id="term-container"></div>
+  <div id="mobile-toolbar">
+    <div id="mobile-input-area">
+      <textarea id="mobile-text-input" rows="1" wrap="soft" enterkeyhint="send" placeholder="输入或长按粘贴..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+      <div class="mobile-input-btns">
+        <button onclick="sendMobileInput(true)" style="background:#4a9eff; color:#fff;">发送↵</button>
+        <button onclick="sendMobileInput(false)" style="background:#2a4a6e; color:#fff;">发送</button>
+        <button onclick="closeMobileInput()" style="flex:0.5; background:#333; color:#aaa;">✕</button>
+      </div>
+    </div>
+    <div class="tb-row">
+      <button onclick="send('\x1bOA')">↑</button>
+      <button onclick="send('\x1bOB')">↓</button>
+      <button onclick="send('\x1bOC')">→</button>
+      <button onclick="send('\x1bOD')">←</button>
+      <button onclick="send('\t')">Tab</button>
+      <button onclick="send('\x1b')">Esc</button>
+    </div>
+    <div class="tb-row">
+      <button id="btn-ctrl" onclick="toggleCtrl()">Ctrl</button>
+      <button onclick="sendCtrl('c')">^C</button>
+      <button onclick="sendCtrl('d')">^D</button>
+      <button onclick="sendCtrl('z')">^Z</button>
+      <button onclick="sendCtrl('l')">^L</button>
+      <button onclick="sendCtrl('a')">^A</button>
+    </div>
+    <div class="tb-row">
+      <button onclick="send('\x1bOH')">Home</button>
+      <button onclick="send('\x1bOF')">End</button>
+      <button onclick="send('\x7f')">⌫</button>
+      <button onclick="toggleMobileInput()" id="btn-input">输入</button>
+    </div>
+  </div>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script>
+const views = { login: document.getElementById('login-view'), dash: document.getElementById('dash-view'), term: document.getElementById('term-view'), multi: document.getElementById('multi-view') };
+let ws = null, currentAgentId = null, term = null, fitAddon = null;
+let wasAuthenticated = false;     // true once auth_ok received — distinguishes "first connect" from "reconnect"
+let reconnectTimer = null;        // setTimeout handle for reconnect
+let isReconnecting = false;       // true while waiting for auth_ok after a drop
+let ctrlActive = false;
+
+// --- File transfer state ---
+const FILE_CHUNK_SIZE = 256 * 1024;   // 256KB raw per chunk (must match client)
+let fileBrowserCwd = '';               // current dir in file browser (relative to fileRoot)
+let fileBrowserAgentId = null;         // which agent the open file-browser targets
+let pendingUpload = null;              // { file, uploadId, index, acked, chunks, sentBytes }
+let activeDownload = null;             // { downloadId, name, size, totalChunks, chunks: [], received: 0 }
+const fileReqQueue = [];               // outstanding reqIds for ls requests (to validate)
+let fileReqCounter = 0;
+let currentMode = 'card'; // 'card', 'multi'
+let currentSort = localStorage.getItem('swt-sort') || 'name'; // 'name', 'id', 'recent'
+let selectedAgents = new Set(); // for multi-select mode
+let multiTerms = {}; // agentId -> { term, fitAddon, container }
+
+// Filter escape sequences that break scrollback visibility:
+// - \x1b[?1049h/l  (enter/leave alt screen — has no scrollback)
+// - \x1b[?1047h/l  (older alt screen variant)
+// - \x1b[3J        (clear scrollback buffer — wipes all history)
+function filterAltScreen(bytes) {
+  const len = bytes.length;
+  if (len < 4) return bytes;
+  const result = new Uint8Array(len);
+  let out = 0;
+  let i = 0;
+  while (i < len) {
+    if (bytes[i] !== 0x1b) {
+      result[out++] = bytes[i++];
+      continue;
+    }
+    // ESC [ = 0x1b 0x5b
+    if (i + 1 < len && bytes[i + 1] === 0x5b) {
+      // ESC [ 3 J  = clear scrollback (0x1b 0x5b 0x33 0x4a)
+      if (i + 3 < len && bytes[i + 2] === 0x33 && bytes[i + 3] === 0x4a) {
+        i += 4;
+        continue;
+      }
+      // ESC [ ? 1049 h/l  = alt screen mode (8 bytes)
+      // ESC [ ? 1047 h/l  = alt screen mode variant (8 bytes)
+      if (i + 7 < len && bytes[i + 2] === 0x3f &&
+          bytes[i + 3] === 0x31 && bytes[i + 4] === 0x30 && bytes[i + 5] === 0x34 &&
+          (bytes[i + 6] === 0x39 || bytes[i + 6] === 0x37) &&
+          (bytes[i + 7] === 0x68 || bytes[i + 7] === 0x6c)) {
+        i += 8;
+        continue;
+      }
+    }
+    result[out++] = bytes[i++];
+  }
+  return out === len ? bytes : result.slice(0, out);
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function showView(name) {
+  Object.values(views).forEach(v => v.style.display = 'none');
+  if (views[name]) views[name].style.display = 'flex';
+}
+
+// ========== Auth ==========
+
+function doLogin() {
+  const user = document.getElementById('username-input').value.trim() || 'user';
+  const pw = document.getElementById('password-input').value;
+  if (!pw) return;
+  localStorage.setItem('swt-user', user);
+  localStorage.setItem('swt-pw', pw);
+  connect(user, pw);
+}
+
+// Prefill username from saved value
+document.getElementById('username-input').value = localStorage.getItem('swt-user') || 'user';
+
+document.getElementById('password-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+
+function connect(username, password) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}`);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'auth', password, username }));
+  };
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    if (msg.type === 'auth_ok') {
+      const wasReconnecting = isReconnecting;
+      wasAuthenticated = true;
+      isReconnecting = false;
+      hideNetworkOverlay();
+
+      lastAgents = msg.agents || [];
+
+      const inTerm = views.term.style.display !== 'none';
+      const inMulti = views.multi.style.display !== 'none';
+
+      if (wasReconnecting && inTerm && currentAgentId) {
+        // Resume single terminal: re-subscribe without scrollback replay.
+        // Terminal content stays as-is; only new live output is forwarded.
+        if (term && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        }
+        ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, resume: true }));
+      } else if (wasReconnecting && inMulti) {
+        // Resume multi terminal: re-subscribe previously opened agents without replay.
+        const ids = Object.keys(multiTerms);
+        if (ids.length > 0) {
+          ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, resume: true }));
+        }
+      } else {
+        // Fresh login (or reconnect while not in a terminal): show dashboard.
+        document.getElementById('login-error').style.display = 'none';
+        showView('dash');
+        renderAgents(lastAgents);
+      }
+    } else if (msg.type === 'error') {
+      if (isReconnecting) {
+        // Auth rejected during reconnect (e.g. password changed): fall back to login.
+        isReconnecting = false;
+        wasAuthenticated = false;
+        hideNetworkOverlay();
+        localStorage.removeItem('swt-pw');
+        document.getElementById('username-input').style.display = '';
+        document.getElementById('password-input').style.display = '';
+        document.querySelector('.login-box button').style.display = '';
+        document.getElementById('login-error').textContent = msg.message || 'Auth failed, please login again';
+        document.getElementById('login-error').style.display = 'block';
+        showView('login');
+      } else if (views.login.style.display !== 'none') {
+        localStorage.removeItem('swt-pw');
+        document.getElementById('login-error').textContent = msg.message;
+        document.getElementById('login-error').style.display = 'block';
+      }
+    } else if (msg.type === 'agents') {
+      lastAgents = msg.agents || [];
+      renderAgents(lastAgents);
+    } else if (msg.type === 'data') {
+      // Single terminal mode
+      if (term && msg.agentId === currentAgentId) {
+        term.write(filterAltScreen(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
+      }
+      // Multi terminal mode
+      if (multiTerms[msg.agentId]) {
+        multiTerms[msg.agentId].term.write(filterAltScreen(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
+      }
+    } else if (msg.type === 'scrollback_info') {
+      // Auto-load all remaining scrollback history
+      if (msg.hasMore && msg.total > 0) {
+        ws.send(JSON.stringify({ type: 'scrollback_more', agentId: msg.agentId, fromIndex: msg.loadedFrom }));
+      }
+    } else if (msg.type === 'scrollback_data') {
+      // Received older history chunks — keep requesting if more available
+      if (msg.hasMore && msg.fromIndex > 0) {
+        ws.send(JSON.stringify({ type: 'scrollback_more', agentId: msg.agentId, fromIndex: msg.fromIndex }));
+      }
+    } else if (msg.type === 'scrollback_end') {
+      // All history written, user scrolls freely
+    } else if (typeof msg.type === 'string' && msg.type.startsWith('file_')) {
+      handleFileMsg(msg);
+    }
+  };
+
+  function handleFileMsg(msg) {
+    if (msg.type === 'file_ls_result') {
+      renderFileLsResult(msg);
+      return;
+    }
+    if (msg.type === 'file_upload_ack') {
+      if (pendingUpload && pendingUpload.uploadId === msg.uploadId) {
+        if (msg.ok) {
+          pendingUpload.acked = true;
+          pumpUploadChunks();
+        } else {
+          showFileProgress('上传被拒: ' + pendingUpload.file.name, 0, msg.error || 'rejected', 'error');
+          pendingUpload = null;
+        }
+      }
+      return;
+    }
+    if (msg.type === 'file_chunk_ack') {
+      // Progress-only signal from client; the pump runs independently.
+      if (pendingUpload && pendingUpload.uploadId === msg.uploadId) {
+        updateFileProgress(msg.received, pendingUpload.totalBytes, '上传中…');
+      }
+      return;
+    }
+    if (msg.type === 'file_upload_done') {
+      if (pendingUpload && pendingUpload.uploadId === msg.uploadId) {
+        if (msg.ok) {
+          showFileProgress('上传完成: ' + pendingUpload.file.name, 100,
+            '已保存' + (msg.savedPath ? ' → ' + msg.savedPath : ''), 'success');
+          setTimeout(hideFileProgress, 3000);
+        } else {
+          showFileProgress('上传失败: ' + pendingUpload.file.name, 0, msg.error || 'failed', 'error');
+        }
+        pendingUpload = null;
+      }
+      return;
+    }
+    if (msg.type === 'file_download_meta') {
+      if (activeDownload && activeDownload.downloadId === msg.downloadId) {
+        activeDownload.size = msg.size;
+        activeDownload.totalChunks = msg.totalChunks;
+        activeDownload.chunks = new Array(msg.totalChunks);
+        updateFileProgress(0, msg.size, '下载中… 0 / ' + humanSize(msg.size));
+      }
+      return;
+    }
+    if (msg.type === 'file_download_chunk') {
+      if (activeDownload && activeDownload.downloadId === msg.downloadId) {
+        activeDownload.chunks[msg.index] = msg.data;
+        activeDownload.received++;
+        const bytes = Math.min((msg.index + 1) * FILE_CHUNK_SIZE, activeDownload.size);
+        updateFileProgress(bytes, activeDownload.size, '下载中… ' + humanSize(bytes) + ' / ' + humanSize(activeDownload.size));
+      }
+      return;
+    }
+    if (msg.type === 'file_download_end') {
+      if (activeDownload && activeDownload.downloadId === msg.downloadId) {
+        if (msg.ok) {
+          // Assemble base64 chunks into a Blob and trigger download.
+          const parts = [];
+          for (let i = 0; i < activeDownload.chunks.length; i++) {
+            const b64 = activeDownload.chunks[i];
+            if (!b64) continue;
+            parts.push(Uint8Array.from(atob(b64), c => c.charCodeAt(0)));
+          }
+          const blob = new Blob(parts, { type: 'application/octet-stream' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = activeDownload.name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+          showFileProgress('下载完成: ' + activeDownload.name, 100, '已保存到浏览器下载目录', 'success');
+          setTimeout(hideFileProgress, 3000);
+        } else {
+          showFileProgress('下载失败: ' + activeDownload.name, 0, msg.error || 'failed', 'error');
+        }
+        activeDownload = null;
+      }
+      return;
+    }
+  }
+
+  ws.onclose = () => {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    // Abort any in-flight file transfer — uploadId/downloadId won't survive reconnect.
+    if (pendingUpload) {
+      showFileProgress('上传中断: ' + pendingUpload.file.name, 0, '连接断开，请重试', 'error');
+      pendingUpload = null;
+    }
+    if (activeDownload) {
+      showFileProgress('下载中断: ' + activeDownload.name, 0, '连接断开，请重试', 'error');
+      activeDownload = null;
+    }
+    const pw = localStorage.getItem('swt-pw');
+    const user = localStorage.getItem('swt-user') || 'user';
+    if (wasAuthenticated && pw) {
+      // Reconnect mode: keep current view + terminal content intact, show floating notice.
+      isReconnecting = true;
+      showNetworkOverlay();
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (localStorage.getItem('swt-pw')) {
+          connect(user, localStorage.getItem('swt-pw'));
+        }
+      }, 2000);
+    } else {
+      showView('login');
+      document.getElementById('login-error').textContent = 'Connection lost';
+      document.getElementById('login-error').style.display = 'block';
+    }
+  };
+}
+
+function showNetworkOverlay() {
+  const el = document.getElementById('network-overlay');
+  if (el) { el.style.display = 'block'; el.style.opacity = '1'; }
+}
+
+function hideNetworkOverlay() {
+  const el = document.getElementById('network-overlay');
+  if (el) { el.style.display = 'none'; el.style.opacity = ''; }
+}
+
+function doLogout() {
+  localStorage.removeItem('swt-pw');
+  wasAuthenticated = false;
+  isReconnecting = false;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  hideNetworkOverlay();
+  if (ws) ws.close();
+  document.getElementById('username-input').style.display = '';
+  document.getElementById('password-input').style.display = '';
+  document.querySelector('.login-box button').style.display = '';
+  showView('login');
+}
+
+const savedUser = localStorage.getItem('swt-user') || 'user';
+const savedPw = localStorage.getItem('swt-pw');
+if (savedPw) { connect(savedUser, savedPw); }
+
+// ========== Dashboard ==========
+
+function renderAgents(agents) {
+  if (agents) agents.sort((a, b) => {
+    // Pinned agents always sort first (regardless of currentSort)
+    const pa = isPinned(a.id) ? 1 : 0, pb = isPinned(b.id) ? 1 : 0;
+    if (pa !== pb) return pb - pa;
+    if (currentSort === 'id') {
+      return (a.id || '').localeCompare(b.id || '');
+    }
+    if (currentSort === 'recent') {
+      const ra = getRecentTime(a.id), rb = getRecentTime(b.id);
+      if (rb !== ra) return rb - ra; // most recent first
+    }
+    // default: by name, then screen
+    const cmp = (a.name || '').localeCompare(b.name || '');
+    return cmp !== 0 ? cmp : (a.screen || '').localeCompare(b.screen || '');
+  });
+  const c = document.getElementById('agent-list');
+  if (!agents || !agents.length) {
+    c.innerHTML = '<div class="no-agents">No machines online</div>';
+    return;
+  }
+  c.innerHTML = agents.map(a => {
+    const s = a.sys || {};
+    const tags = (a.attrs && a.attrs.tags) ? a.attrs.tags : [];
+    const ip = s.ips && s.ips.length ? s.ips.map(i => i.addr).join(', ') : '-';
+    const memPct = s.memTotal ? Math.round(s.memUsed / s.memTotal * 100) : 0;
+    const memColor = memPct > 85 ? '#ff6b6b' : memPct > 60 ? '#f0a500' : '#4caf50';
+    const memBar = s.memTotal ? `<div class="bar-label"><span>Memory</span><span>${s.memUsed}/${s.memTotal} MB (${memPct}%)</span></div><div class="bar-wrap"><div class="bar-fill" style="width:${memPct}%;background:${memColor}"></div></div>` : '';
+    const diskBar = s.diskPercent ? `<div class="bar-label"><span>Disk</span><span>${s.diskUsed}/${s.diskTotal} (${s.diskPercent})</span></div><div class="bar-wrap"><div class="bar-fill" style="width:${parseInt(s.diskPercent)}%;background:${parseInt(s.diskPercent)>85?'#ff6b6b':'#4caf50'}"></div></div>` : '';
+    const gpuHtml = s.gpu && s.gpu.length ? `<div class="gpu-list">${s.gpu.map(g => `<div class="gpu-item">GPU: ${g}</div>`).join('')}</div>` : '';
+    const loadStr = s.loadAvg ? s.loadAvg.join(' / ') : '';
+    const uptimeStr = s.uptime ? fmtUptime(s.uptime) : '';
+    const tagHtml = tags.length ? `<div class="tags">${tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>` : '';
+    const dotClass = a.needsInput ? 'idle' : 'busy';
+    const dotTitle = a.needsInput ? '等待输入' : '运行中';
+    const statusHtml = a.lastLines ? `<div class="status-row"><div class="status-dot ${dotClass}" title="${dotTitle}"></div><div class="status-text">${escapeHtml(a.lastLines.split('\n').pop())}</div></div>` : '';
+
+    // Multi-select mode adds checkbox
+    const isSelected = selectedAgents.has(a.id);
+    const checkboxHtml = currentMode === 'multi' ? `<input type="checkbox" class="card-checkbox" ${isSelected ? 'checked' : ''} onclick="event.stopPropagation(); toggleAgentSelect('${a.id}')">` : '';
+    const cardClass = `agent-card${currentMode === 'multi' ? ' selectable' : ''}${isSelected ? ' selected' : ''}`;
+    const clickHandler = currentMode === 'multi' ? `toggleAgentSelect('${a.id}')` : `openTerminal('${a.id}','${a.name.replace(/'/g,"\\'")}')`;
+
+    return `<div class="${cardClass}" onclick="${clickHandler}">
+      ${checkboxHtml}
+      <div class="name-row"><div class="name"><button class="pin-btn ${isPinned(a.id) ? 'pinned' : ''}" onclick="event.stopPropagation(); togglePin('${a.id}')" title="置顶">⭐</button>${a.name}</div>${a.screen ? `<span class="screen-badge">screen: ${a.screen}</span>` : ''}</div>
+      <div class="hostname">${s.hostname||''} &middot; ${s.username||''}@${ip}</div>
+      <div class="info-grid">
+        ${s.os ? `<div class="info-item">OS: <span>${s.os}</span></div>` : ''}
+        ${s.cpu ? `<div class="info-item">CPU: <span>${s.cpuCount}x ${s.cpu.substring(0,30)}</span></div>` : ''}
+        ${loadStr ? `<div class="info-item">Load: <span>${loadStr}</span></div>` : ''}
+        ${uptimeStr ? `<div class="info-item">Uptime: <span>${uptimeStr}</span></div>` : ''}
+      </div>
+      ${memBar}${diskBar}${gpuHtml}${tagHtml}${statusHtml}
+    </div>`;
+  }).join('');
+
+  // Update multi-select bar
+  if (currentMode === 'multi') {
+    document.getElementById('dash-multi-count').textContent = `已选 ${selectedAgents.size} 台`;
+    document.getElementById('dash-multi-open').disabled = selectedAgents.size === 0;
+  }
+}
+
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor(s%86400/3600);
+  if (d > 0) return `${d}d ${h}h`;
+  return `${h}h ${Math.floor(s%3600/60)}m`;
+}
+
+// ========== Sort ==========
+
+// Track recently opened agents (persisted in localStorage)
+function getRecentTime(agentId) {
+  const map = JSON.parse(localStorage.getItem('swt-recent') || '{}');
+  return map[agentId] || 0;
+}
+
+function markRecent(agentId) {
+  const map = JSON.parse(localStorage.getItem('swt-recent') || '{}');
+  map[agentId] = Date.now();
+  localStorage.setItem('swt-recent', JSON.stringify(map));
+}
+
+// Pinned agents (favorites) — persisted in localStorage, sorted first
+function isPinned(agentId) {
+  const arr = JSON.parse(localStorage.getItem('swt-pinned') || '[]');
+  return arr.indexOf(agentId) !== -1;
+}
+function togglePin(agentId) {
+  let arr = JSON.parse(localStorage.getItem('swt-pinned') || '[]');
+  if (arr.indexOf(agentId) === -1) arr.push(agentId);
+  else arr = arr.filter(x => x !== agentId);
+  localStorage.setItem('swt-pinned', JSON.stringify(arr));
+  renderAgents(lastAgents);
+}
+
+// Sort switch buttons
+document.querySelectorAll('#sort-switch button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    currentSort = btn.dataset.sort;
+    localStorage.setItem('swt-sort', currentSort);
+    document.querySelectorAll('#sort-switch button').forEach(b => {
+      b.classList.toggle('active', b.dataset.sort === currentSort);
+    });
+    renderAgents(lastAgents);
+  });
+});
+// Set initial active state from saved sort
+document.querySelectorAll('#sort-switch button').forEach(b => {
+  b.classList.toggle('active', b.dataset.sort === currentSort);
+});
+
+// ========== Terminal ==========
+
+function openTerminal(agentId, agentName) {
+  currentAgentId = agentId;
+  markRecent(agentId);
+  showView('term');
+
+  // Show floating controls
+  const floatBack = document.getElementById('float-back');
+  floatBack.style.display = 'block';
+  document.getElementById('float-upload').style.display = 'block';
+  document.getElementById('float-download').style.display = 'block';
+  const overlay = document.getElementById('term-overlay');
+  overlay.textContent = agentName;
+  overlay.style.display = 'block';
+  // Fade out overlay after 3s
+  setTimeout(() => { overlay.style.opacity = '0'; }, 3000);
+
+  const container = document.getElementById('term-container');
+  container.innerHTML = '';
+
+  const mobile = window.innerWidth < 600;
+  term = new Terminal({
+    theme: { background: '#0f0f23' },
+    fontSize: mobile ? 11 : 14,
+    cursorBlink: true,
+    scrollback: 200000
+  });
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(container);
+
+  // ResizeObserver: debounce BOTH fit() and the resize message.
+  // Mobile keyboard show/hide fires many resize events in quick succession —
+  // fitting each one makes xterm visibly jump/reflow. Debounce smooths it.
+  let resizeSendTimer = null;
+  let resizeFitTimer = null;
+  const resizeObserver = new ResizeObserver(() => {
+    if (!fitAddon || !term) return;
+    clearTimeout(resizeFitTimer);
+    resizeFitTimer = setTimeout(() => { fitAddon.fit(); }, 200);
+    clearTimeout(resizeSendTimer);
+    resizeSendTimer = setTimeout(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      }
+    }, 500);
+  });
+  resizeObserver.observe(container);
+  window._termResizeObs = resizeObserver;
+
+  // Initial fit + connect after layout settles
+  // Send resize BEFORE connect so server scrollback is sent at the right terminal size
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      fitAddon.fit();
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      setTimeout(() => {
+        ws.send(JSON.stringify({ type: 'connect', agentId }));
+      }, 100);
+    });
+  });
+
+  term.onData(data => {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !currentAgentId) return;
+    const bytes = new TextEncoder().encode(data);
+    let bin = '';
+    bytes.forEach(b => bin += String.fromCharCode(b));
+    ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId: currentAgentId }));
+  });
+}
+
+function closeTerminal() {
+  if (window._termResizeObs) { window._termResizeObs.disconnect(); window._termResizeObs = null; }
+  if (term) { term.dispose(); term = null; }
+  currentAgentId = null;
+  closeMobileInput();
+  closeFileBrowser();
+  hideFileProgress();
+  document.getElementById('float-back').style.display = 'none';
+  document.getElementById('float-upload').style.display = 'none';
+  document.getElementById('float-download').style.display = 'none';
+  document.getElementById('term-overlay').style.display = 'none';
+  document.getElementById('term-overlay').style.opacity = '';
+  ws.send(JSON.stringify({ type: 'connect', agentId: null }));
+  showView('dash');
+}
+
+// ========== File Transfer ==========
+
+// Hidden file input change handler — agentId captured at click time (see onUploadClickFor).
+document.getElementById('file-input').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';   // reset so selecting the same file again re-fires change
+  if (f && pendingUploadAgentId) {
+    startUpload(f, pendingUploadAgentId);
+    pendingUploadAgentId = null;
+  }
+});
+
+let pendingUploadAgentId = null;   // stashes agentId between upload-button click and file-picker callback
+
+function onUploadClickFor(agentId) {
+  if (!agentId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (pendingUpload || activeDownload) { flashToast('请等当前传输完成'); return; }
+  pendingUploadAgentId = agentId;
+  document.getElementById('file-input').click();
+}
+
+function startUpload(file, agentId) {
+  if (!agentId) return;
+  if (pendingUpload || activeDownload) { flashToast('请等当前传输完成'); return; }
+  const uploadId = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  pendingUpload = {
+    file,
+    uploadId,
+    agentId,
+    index: 0,
+    acked: false,
+    pumping: false,
+    totalChunks: Math.max(1, Math.ceil(file.size / FILE_CHUNK_SIZE)),
+    sentBytes: 0,
+    totalBytes: file.size
+  };
+  showFileProgress('上传: ' + file.name, 0, '准备中…');
+  ws.send(JSON.stringify({
+    type: 'file_upload_start',
+    agentId,
+    uploadId,
+    filename: file.name,
+    size: file.size
+  }));
+}
+
+// Stream chunks once the client acked the start.
+// Continuous send, throttled by ws.bufferedAmount to avoid saturating the socket.
+// file_chunk_ack messages only update progress — they don't drive the pump.
+async function pumpUploadChunks() {
+  if (!pendingUpload || !pendingUpload.acked || pendingUpload.pumping) return;
+  const up = pendingUpload;
+  up.pumping = true;
+  try {
+    while (up.index < up.totalChunks && pendingUpload === up) {
+      // Backpressure: if the socket buffer is large, wait for it to drain.
+      if (ws && ws.bufferedAmount > 2 * FILE_CHUNK_SIZE) {
+        await new Promise(r => setTimeout(r, 30));
+        continue;
+      }
+      const startByte = up.index * FILE_CHUNK_SIZE;
+      const endByte = Math.min(startByte + FILE_CHUNK_SIZE, up.totalBytes);
+      const slice = up.file.slice(startByte, endByte);
+      const buf = await sliceToArrayBuffer(slice);
+      up.index++;
+      up.sentBytes = endByte;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showFileProgress('上传中断: ' + up.file.name, 0, '连接已断开', 'error');
+        pendingUpload = null;
+        return;
+      }
+      ws.send(JSON.stringify({
+        type: 'file_chunk',
+        agentId: up.agentId,
+        uploadId: up.uploadId,
+        index: up.index - 1,
+        data: arrayBufferToBase64(buf)
+      }));
+      updateFileProgress(up.sentBytes, up.totalBytes, '上传中…');
+    }
+    // All chunks sent — tell client to finalize.
+    if (pendingUpload === up) {
+      ws.send(JSON.stringify({ type: 'file_upload_end', agentId: up.agentId, uploadId: up.uploadId }));
+    }
+  } catch (e) {
+    showFileProgress('上传失败: ' + up.file.name, 0, e.message || 'error', 'error');
+    pendingUpload = null;
+  } finally {
+    up.pumping = false;
+  }
+}
+
+function sliceToArrayBuffer(slice) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.onerror = () => rej(fr.error || new Error('read error'));
+    fr.readAsArrayBuffer(slice);
+  });
+}
+
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+// --- File browser ---
+function openFileBrowserFor(agentId) {
+  if (!agentId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (pendingUpload || activeDownload) { flashToast('请等当前传输完成'); return; }
+  fileBrowserAgentId = agentId;
+  fileBrowserCwd = '';
+  document.getElementById('file-modal').classList.add('show');
+  requestFileLs('');
+}
+
+function closeFileBrowser() {
+  document.getElementById('file-modal').classList.remove('show');
+  fileBrowserAgentId = null;
+}
+
+function fileBrowserUp() {
+  if (!fileBrowserCwd) return;   // already at root
+  const parts = fileBrowserCwd.split('/').filter(Boolean);
+  parts.pop();
+  fileBrowserCwd = parts.join('/');
+  requestFileLs(fileBrowserCwd);
+}
+
+function requestFileLs(dir) {
+  if (!fileBrowserAgentId) return;
+  const reqId = 'ls-' + (++fileReqCounter);
+  ws.send(JSON.stringify({ type: 'file_ls', agentId: fileBrowserAgentId, reqId, dir }));
+  document.getElementById('file-modal-cwd').textContent = '/ ' + (dir || '');
+  const list = document.getElementById('file-modal-list');
+  list.innerHTML = '<div class="file-entry" style="color:#6e7681;">加载中…</div>';
+}
+
+function shortenHome(p) {
+  // Display helper: replace /home/<user> with ~ for readability.
+  if (!p) return p;
+  const m = p.match(/^\/home\/[^/]+/);
+  return m ? '~' + p.slice(m[0].length) : p;
+}
+
+function renderFileLsResult(msg) {
+  if (msg.error) {
+    document.getElementById('file-modal-list').innerHTML =
+      '<div class="file-entry" style="color:#f85149;">无法打开: ' + escapeHtml(msg.error) + '</div>';
+    return;
+  }
+  fileBrowserCwd = msg.dir || '';
+  // Modal header shows the actual shell cwd; the path row shows where we are *within* it.
+  const titleEl = document.querySelector('.file-modal-title');
+  if (titleEl) titleEl.textContent = '📁 ' + shortenHome(msg.cwd || '');
+  const display = msg.displayPath || fileBrowserCwd || '.';
+  document.getElementById('file-modal-cwd').textContent = shortenHome((msg.cwd ? msg.cwd + '/' : '') + display).replace(/\/$/, '') || '~';
+  const upBtn = document.getElementById('file-up-btn');
+  upBtn.style.visibility = fileBrowserCwd ? 'visible' : 'hidden';
+  const list = document.getElementById('file-modal-list');
+  list.innerHTML = '';
+  const entries = msg.entries || [];
+  if (entries.length === 0) {
+    list.innerHTML = '<div class="file-entry" style="color:#6e7681;">（空文件夹）</div>';
+    return;
+  }
+  for (const ent of entries) {
+    const row = document.createElement('div');
+    row.className = 'file-entry' + (ent.isDir ? ' is-dir' : '');
+    row.innerHTML =
+      '<span class="fe-icon">' + (ent.isDir ? '📁' : '📄') + '</span>' +
+      '<span class="fe-name">' + escapeHtml(ent.name) + '</span>' +
+      '<span class="fe-size">' + (ent.isDir ? '' : humanSize(ent.size)) + '</span>';
+    row.onclick = () => {
+      if (ent.isDir) {
+        const next = fileBrowserCwd ? fileBrowserCwd + '/' + ent.name : ent.name;
+        requestFileLs(next);
+      } else {
+        startDownload(fileBrowserCwd ? fileBrowserCwd + '/' + ent.name : ent.name, ent.name, ent.size, fileBrowserAgentId);
+      }
+    };
+    list.appendChild(row);
+  }
+}
+
+function startDownload(relPath, displayName, knownSize, agentId) {
+  if (!agentId) return;
+  if (pendingUpload || activeDownload) { flashToast('请等当前传输完成'); return; }
+  const downloadId = 'dl-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  activeDownload = {
+    downloadId,
+    agentId,
+    name: displayName || relPath.split('/').pop(),
+    size: knownSize || 0,
+    totalChunks: 0,
+    chunks: [],
+    received: 0
+  };
+  showFileProgress('下载: ' + activeDownload.name, 0, '准备中…');
+  ws.send(JSON.stringify({
+    type: 'file_download_start',
+    agentId,
+    downloadId,
+    path: relPath
+  }));
+}
+
+function humanSize(n) {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+// --- Progress overlay ---
+function showFileProgress(name, pct, status, cls) {
+  const box = document.getElementById('file-progress');
+  box.classList.remove('success', 'error');
+  if (cls) box.classList.add(cls);
+  box.classList.add('show');
+  document.getElementById('file-progress-name').textContent = name;
+  document.getElementById('file-progress-fill').style.width = pct + '%';
+  document.getElementById('file-progress-status').textContent = status || '';
+}
+function updateFileProgress(done, total, status) {
+  const pct = total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0;
+  document.getElementById('file-progress-fill').style.width = pct + '%';
+  if (status) document.getElementById('file-progress-status').textContent = status;
+}
+function hideFileProgress() {
+  document.getElementById('file-progress').classList.remove('show');
+}
+
+// --- Toast (quick non-blocking feedback) ---
+let toastTimer = null;
+function flashToast(msg, kind) {
+  const el = document.getElementById('toast');
+  el.classList.remove('error');
+  if (kind === 'error') el.classList.add('error');
+  el.textContent = msg;
+  el.classList.add('show');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+// --- Copy SSH / SCP command for an agent ---
+function copySshCmd(agentId) {
+  const a = lastAgents.find(x => x.id === agentId);
+  if (!a || !a.sys) { flashToast('无系统信息', 'error'); return; }
+  const ip = a.sys.ips && a.sys.ips[0] ? a.sys.ips[0].addr : '';
+  const user = a.sys.username || 'user';
+  if (!ip) { flashToast('无 IP 信息', 'error'); return; }
+  const cmd = `ssh ${user}@${ip}`;
+  const done = () => flashToast('已复制: ' + cmd);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(cmd).then(done).catch(() => fallbackCopy(cmd, done));
+  } else {
+    fallbackCopy(cmd, done);
+  }
+}
+
+function fallbackCopy(text, cb) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    cb && cb();
+  } catch { flashToast('复制失败', 'error'); }
+}
+
+// --- Restart screen session on an agent (kills PTY → client re-attaches) ---
+function restartScreen(agentId) {
+  if (!agentId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'restart_screen', agentId }));
+  // Visual hint on the triggering panel button (if multi-view)
+  const btns = document.querySelectorAll('.term-actions .restart-btn[data-agent="' + agentId + '"]');
+  btns.forEach(b => { b.classList.add('restarting'); setTimeout(() => b.classList.remove('restarting'), 4000); });
+  flashToast('已请求重新 attach screen');
+}
+
+// ========== Mode Switch ==========
+
+document.querySelectorAll('.mode-switch button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.mode;
+    setMode(mode);
+  });
+});
+
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.mode-switch button').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  const multiBar = document.getElementById('dash-multi-bar');
+  if (mode === 'multi') {
+    selectedAgents.clear();
+    multiBar.style.display = 'flex';
+  } else {
+    multiBar.style.display = 'none';
+  }
+  renderAgents(lastAgents);
+}
+
+// ========== Multi Select ==========
+
+let lastAgents = [];
+
+function toggleAgentSelect(agentId) {
+  if (selectedAgents.has(agentId)) {
+    selectedAgents.delete(agentId);
+  } else {
+    selectedAgents.add(agentId);
+  }
+  renderAgents(lastAgents);
+}
+
+function cancelMultiSelect() {
+  selectedAgents.clear();
+  document.getElementById('dash-multi-bar').style.display = 'none';
+  setMode('card');
+}
+
+function openMultiTerminal() {
+  if (selectedAgents.size === 0) return;
+  showView('multi');
+  document.getElementById('multi-title').textContent = `已选 ${selectedAgents.size} 台设备`;
+
+  const container = document.getElementById('multi-container');
+  container.innerHTML = '';
+
+  // Close existing multi terms
+  Object.values(multiTerms).forEach(t => { if (t.term) t.term.dispose(); });
+  multiTerms = {};
+
+  // Subscribe to all selected agents
+  const agentIds = Array.from(selectedAgents);
+  ws.send(JSON.stringify({ type: 'connect_multi', agentIds }));
+
+  // Create terminal for each agent
+  agentIds.forEach(agentId => {
+    const agent = lastAgents.find(a => a.id === agentId);
+    const name = agent ? agent.name : agentId;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'multi-term-wrap';
+    wrap.innerHTML = `
+      <div class="multi-term-header">
+        <span class="name">${escapeHtml(name)}</span>
+        <div class="term-actions">
+          <button title="上传到终端当前目录" onclick="onUploadClickFor('${agentId}')">📤</button>
+          <button title="从终端当前目录下载" onclick="openFileBrowserFor('${agentId}')">📥</button>
+          <button title="复制SSH命令" onclick="copySshCmd('${agentId}')">🔗</button>
+          <button class="restart-btn" data-agent="${agentId}" title="重新attach screen会话" onclick="restartScreen('${agentId}')">🔄</button>
+        </div>
+        <span class="close" onclick="closeMultiTerm('${agentId}')">关闭</span>
+      </div>
+      <div class="multi-term-container" id="multi-term-${agentId}"></div>
+    `;
+    container.appendChild(wrap);
+
+    const term = new Terminal({
+      theme: { background: '#0f0f23' },
+      fontSize: 12,
+      cursorBlink: true,
+      scrollback: 50000
+    });
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(wrap.querySelector('.multi-term-container'));
+    setTimeout(() => fitAddon.fit(), 50);
+
+    multiTerms[agentId] = { term, fitAddon, container: wrap.querySelector('.multi-term-container') };
+
+    // Handle input
+    term.onData(data => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const bytes = new TextEncoder().encode(data);
+      let bin = '';
+      bytes.forEach(b => bin += String.fromCharCode(b));
+      ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId }));
+    });
+
+    // Handle resize
+    term.onResize(({ cols, rows }) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'resize', agentId, cols, rows }));
+    });
+  });
+
+  // Handle resize
+  window._multiResize = () => {
+    Object.values(multiTerms).forEach(t => { if (t.fitAddon) t.fitAddon.fit(); });
+  };
+  window.addEventListener('resize', window._multiResize);
+}
+
+function closeMultiTerm(agentId) {
+  if (multiTerms[agentId]) {
+    multiTerms[agentId].term.dispose();
+    delete multiTerms[agentId];
+  }
+  selectedAgents.delete(agentId);
+  if (Object.keys(multiTerms).length === 0) {
+    closeMultiView();
+  } else {
+    document.getElementById('multi-title').textContent = `已选 ${Object.keys(multiTerms).length} 台设备`;
+  }
+}
+
+function closeMultiView() {
+  if (window._multiResize) { window.removeEventListener('resize', window._multiResize); window._multiResize = null; }
+  Object.values(multiTerms).forEach(t => { if (t.term) t.term.dispose(); });
+  multiTerms = {};
+  selectedAgents.clear();
+  ws.send(JSON.stringify({ type: 'disconnect_multi' }));
+  showView('dash');
+  renderAgents(lastAgents);
+}
+
+// ========== Mobile toolbar ==========
+
+function sendRaw(data) {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !currentAgentId) return;
+  const bytes = new TextEncoder().encode(data);
+  let bin = '';
+  bytes.forEach(b => bin += String.fromCharCode(b));
+  ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId: currentAgentId }));
+}
+
+function send(seq) {
+  if (ctrlActive) {
+    const code = seq.charCodeAt(0);
+    if (code >= 97 && code <= 122) {
+      sendRaw(String.fromCharCode(code - 96));
+    } else {
+      sendRaw(seq);
+    }
+    clearCtrl();
+  } else {
+    sendRaw(seq);
+  }
+}
+
+function sendCtrl(letter) {
+  sendRaw(String.fromCharCode(letter.charCodeAt(0) - 96));
+  clearCtrl();
+}
+
+function toggleCtrl() {
+  ctrlActive = !ctrlActive;
+  document.getElementById('btn-ctrl').classList.toggle('active', ctrlActive);
+}
+
+function clearCtrl() {
+  ctrlActive = false;
+  document.getElementById('btn-ctrl').classList.remove('active');
+}
+
+function doPaste() {
+  // Legacy: try clipboard API (works on desktop), fallback to input area
+  navigator.clipboard.readText().then(t => { if (t) sendRaw(t); }).catch(() => {
+    toggleMobileInput();
+  });
+}
+
+function toggleMobileInput() {
+  const area = document.getElementById('mobile-input-area');
+  const btn = document.getElementById('btn-input');
+  if (area.style.display === 'none' || !area.style.display) {
+    area.style.display = 'block';
+    btn.classList.add('active');
+    document.getElementById('mobile-text-input').focus({ preventScroll: true });
+  } else {
+    closeMobileInput();
+  }
+}
+
+function closeMobileInput() {
+  const area = document.getElementById('mobile-input-area');
+  const btn = document.getElementById('btn-input');
+  area.style.display = 'none';
+  btn.classList.remove('active');
+  document.getElementById('mobile-text-input').value = '';
+}
+
+function sendMobileInput(withEnter) {
+  const input = document.getElementById('mobile-text-input');
+  const text = input.value;
+  if (!text) return;
+  sendRaw(text);
+  if (withEnter) sendRaw('\r');
+  input.value = '';
+  input.focus({ preventScroll: true });
+}
+
+// Send on newline: iOS IME's return key inserts \n directly and often does NOT
+// fire a JS keydown Enter — so we watch the input event instead. Any \n
+// (typed return, pasted multiline) triggers send immediately.
+document.getElementById('mobile-text-input').addEventListener('input', function() {
+  if (this.value.indexOf('\n') !== -1) {
+    sendMobileInput(true);
+  }
+});
+
+// iOS Safari keyboard adaptation: make #term-view follow the visualViewport
+// height so that when the soft keyboard pushes up, the terminal view (and the
+// mobile toolbar inside it) shrinks instead of being obscured. On desktop,
+// visualViewport.height === innerHeight, so this is a harmless no-op there.
+(function () {
+  const termView = document.getElementById('term-view');
+  if (!termView || !window.visualViewport) return;
+  const vv = window.visualViewport;
+  function syncTermHeight() {
+    termView.style.height = vv.height + 'px';
+    termView.style.bottom = 'auto';   // height drives sizing, not bottom:0
+    termView.style.top = vv.offsetTop + 'px';
+  }
+  vv.addEventListener('resize', syncTermHeight);
+  vv.addEventListener('scroll', syncTermHeight);
+  syncTermHeight();
+})();
+</script>
+</body>
+</html>

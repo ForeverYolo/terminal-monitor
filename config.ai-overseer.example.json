@@ -1,0 +1,22 @@
+{
+  "mode": "ai-overseer",
+  "aiOverseer": {
+    "serverUrl": "ws://YOUR_PUBLIC_IP:8080",
+    "password": "change-me",
+    "agentName": "target-agent-name",
+    "taskGoal": "Describe the task goal here, e.g.: check whether /tmp/test.log exists; if not, create it and write the current timestamp",
+    "idleTimeout": 30,
+    "checkInterval": 5,
+    "maxIterations": 50,
+    "maxHistoryLines": 150,
+    "llm": {
+      "provider": "openai",
+      "apiKey": "",
+      "model": "your-model-name",
+      "baseUrl": "http://YOUR_LLM_HOST:8000/v1",
+      "temperature": 0.3,
+      "maxTokens": 1000,
+      "jsonMode": false
+    }
+  }
+}
