@@ -486,57 +486,116 @@ let fileReqCounter = 0;
 let currentMode = 'card'; // 'card', 'multi'
 let currentSort = localStorage.getItem('swt-sort') || 'name'; // 'name', 'id', 'recent'
 let selectedAgents = new Set(); // for multi-select mode
-let multiTerms = {}; // agentId -> { term, fitAddon, container }
+let multiTerms = {}; // agentId -> { term, fitAddon, container, filter }
+let termFilter = createAltScreenFilter(); // alt-screen filter for the single terminal
 
 // Virtualize the alternate screen so the browser can keep one scrollback
 // buffer.  On exit, clear only the visible viewport (not scrollback) and reset
 // SGR attributes; otherwise Claude's inverse-video notifications can remain on
 // the shell prompt after the TUI exits.
-function filterVirtualAltScreen(bytes) {
-  const len = bytes.length;
-  if (len < 4) return bytes;
-  // An 8-byte alt-screen exit is replaced by an 11-byte reset/clear/home
-  // sequence.  Twice the input size safely covers multiple exits in a chunk.
-  const result = new Uint8Array(len * 2);
-  let out = 0;
-  let i = 0;
-  while (i < len) {
-    if (bytes[i] !== 0x1b) {
-      result[out++] = bytes[i++];
-      continue;
-    }
-    // ESC [ = 0x1b 0x5b
-    if (i + 1 < len && bytes[i + 1] === 0x5b) {
-      // ESC [ 3 J  = clear scrollback (0x1b 0x5b 0x33 0x4a)
-      if (i + 3 < len && bytes[i + 2] === 0x33 && bytes[i + 3] === 0x4a) {
-        i += 4;
-        continue;
-      }
-      // ESC [ ? 1049 h/l = alternate screen (1047 is the older variant).
-      // Suppress entry to preserve scrollback.  When leaving, reset graphics
-      // and erase only the viewport, which keeps history scrollable while
-      // removing the temporary TUI/white inverse-video status blocks.
-      if (i + 7 < len && bytes[i + 2] === 0x3f &&
-          bytes[i + 3] === 0x31 && bytes[i + 4] === 0x30 && bytes[i + 5] === 0x34 &&
-          (bytes[i + 6] === 0x39 || bytes[i + 6] === 0x37) &&
-          (bytes[i + 7] === 0x68 || bytes[i + 7] === 0x6c)) {
-        if (bytes[i + 7] === 0x6c) {
-          // ESC[0m (reset SGR), ESC[2J (erase display), ESC[H (home).
-          result.set([0x1b, 0x5b, 0x30, 0x6d, 0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x48], out);
-          out += 11;
-        }
-        i += 8;
-        continue;
-      }
+//
+// Each terminal stream needs its own filter instance (createAltScreenFilter).
+// The filter is stateful: an escape sequence split across two WebSocket chunks
+// is buffered until the rest arrives, then matched as a whole.  Without this,
+// a split sequence misses the exact match and passes through unfiltered, and
+// xterm switches buffers behind the TUI's back — every later incremental
+// redraw then lands on the wrong canvas and overlays old frames.
+// Private modes whose enable/disable switches we strip from the output stream:
+// normal(1000), button(1002), any-motion(1003), focus(1004), utf8(1005),
+// sgr(1006), alt-scroll(1007), urxvt(1015), sgtpix(1016).  xterm.js must never
+// enter mouse/focus tracking: TUI apps (claude) that enable it expect the
+// terminal to deliver events, but GNU screen between us and the app mangles
+// SGR mouse sequences — the app then receives coordinate tails like "31;6M"
+// as literal text.  With tracking suppressed, mouse actions stay native in
+// the browser (selection, wheel scroll) and no event bytes are ever produced.
+const MOUSE_REPORT_MODE = /^(100[0-7]|101[56])$/;
 
-      // Claude uses reverse video and explicit ANSI background colours for
-      // transient badges/status bars.  In the virtual main buffer these become
-      // persistent white/red blocks in scrollback.  Keep text, foreground
-      // colours and other attributes, but remove background-related SGR flags.
-      let end = i + 2;
-      while (end < len && (bytes[end] < 0x40 || bytes[end] > 0x7e)) end++;
-      if (end < len && bytes[end] === 0x6d) { // CSI ... m
-        const params = String.fromCharCode(...bytes.slice(i + 2, end)).split(';');
+function createAltScreenFilter() {
+  let pending = null;  // head of an escape sequence split across chunks
+  const PENDING_MAX = 4096;  // safety cap: a real sequence never gets this long
+
+  return function filter(bytes) {
+    let data = bytes;
+    if (pending && pending.length > 0) {
+      data = new Uint8Array(pending.length + bytes.length);
+      data.set(pending, 0);
+      data.set(bytes, pending.length);
+      pending = null;
+      // Cap guards against a corrupt stream keeping an unterminated sequence
+      // alive forever; past the cap we flush it through as literal text.
+      if (data.length > PENDING_MAX) {
+        data = data.slice(0, PENDING_MAX);
+        pending = null;
+      }
+    }
+    const len = data.length;
+    if (len === 0) return data;
+    // An 8-byte alt-screen exit is replaced by an 11-byte reset/clear/home
+    // sequence.  Twice the input size safely covers multiple exits in a chunk.
+    const result = new Uint8Array(len * 2 + 16);
+    let out = 0;
+    let i = 0;
+    while (i < len) {
+      if (data[i] !== 0x1b) {
+        result[out++] = data[i++];
+        continue;
+      }
+      if (i + 1 >= len) {
+        // Lone ESC as the last byte — could be the head of any sequence, so
+        // hold it for the next chunk rather than letting it through bare.
+        pending = data.slice(i);
+        break;
+      }
+      // ESC [ = 0x1b 0x5b
+      if (i + 1 < len && data[i + 1] === 0x5b) {
+        // Locate the final byte (0x40-0x7e) that terminates the sequence.
+        let end = i + 2;
+        while (end < len && (data[end] < 0x40 || data[end] > 0x7e)) end++;
+        if (end >= len) {
+          // Sequence runs past the end of this chunk — hold it and prepend to
+          // the next chunk instead of passing a half sequence through.
+          pending = data.slice(i);
+          break;
+        }
+        // ESC [ ? <mode> h/l — private mode switches.  Drop mouse/focus
+        // reporting switches (see MOUSE_REPORT_MODE above) so tracking is
+        // never enabled.  The enabling app simply never receives mouse bytes,
+        // which is the safest steady state on this relayed link.
+        if (data[i + 2] === 0x3f && (data[end] === 0x68 || data[end] === 0x6c)) {
+          const mode = String.fromCharCode(...data.slice(i + 3, end));
+          if (MOUSE_REPORT_MODE.test(mode)) {
+            i = end + 1;
+            continue;
+          }
+        }
+        // ESC [ 3 J  = clear scrollback (0x1b 0x5b 0x33 0x4a)
+        if (end === i + 3 && data[i + 2] === 0x33 && data[end] === 0x4a) {
+          i = end + 1;
+          continue;
+        }
+        // ESC [ ? 1049 h/l = alternate screen (1047 is the older variant).
+        // Suppress entry to preserve scrollback.  When leaving, reset graphics
+        // and erase only the viewport, which keeps history scrollable while
+        // removing the temporary TUI/white inverse-video status blocks.
+        if (end === i + 7 && data[i + 2] === 0x3f &&
+            data[i + 3] === 0x31 && data[i + 4] === 0x30 && data[i + 5] === 0x34 &&
+            (data[i + 6] === 0x39 || data[i + 6] === 0x37) &&
+            (data[i + 7] === 0x68 || data[i + 7] === 0x6c)) {
+          if (data[i + 7] === 0x6c) {
+            // ESC[0m (reset SGR), ESC[2J (erase display), ESC[H (home).
+            result.set([0x1b, 0x5b, 0x30, 0x6d, 0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x48], out);
+            out += 11;
+          }
+          i = end + 1;
+          continue;
+        }
+
+        // Claude uses reverse video and explicit ANSI background colours for
+        // transient badges/status bars.  In the virtual main buffer these become
+        // persistent white/red blocks in scrollback.  Keep text, foreground
+        // colours and other attributes, but remove background-related SGR flags.
+        if (data[end] === 0x6d) { // CSI ... m
+          const params = String.fromCharCode(...data.slice(i + 2, end)).split(';');
         const kept = [];
         let changed = false;
         for (let p = 0; p < params.length; p++) {
@@ -580,16 +639,70 @@ function filterVirtualAltScreen(bytes) {
           }
           result[out++] = 0x6d;
         } else if (!changed) {
-          result.set(bytes.slice(i, end + 1), out);
+          result.set(data.slice(i, end + 1), out);
           out += end + 1 - i;
         }
         i = end + 1;
         continue;
       }
-    }
-    result[out++] = bytes[i++];
+      }
+      // ESC ] = OSC.  GNU screen re-encodes the multibyte spinner characters in
+      // claude's window-title updates ("<spinner> Unfurling…") as mojibake whose
+      // payload contains raw LF.  xterm.js aborts an OSC on LF, so the tail of
+      // the payload lands on the glass as literal text (the "hbÑ"-style stair
+      // fragments next to the spinner).  The web terminal has its own UI and
+      // never uses the window title, so drop title updates (0/1/2) entirely and
+      // pass every other OSC through untouched.
+      if (data[i + 1] === 0x5d) {
+        let end = i + 2;
+        let term = -1;
+        while (end < len) {
+          if (data[end] === 0x07) { term = end + 1; break; }
+          if (data[end] === 0x1b) {
+            if (end + 1 >= len) { term = -1; break; }
+            if (data[end + 1] === 0x5c) { term = end + 2; break; }
+            // A bare ESC inside the payload aborts the OSC (xterm reprocesses
+            // it) — end our skip there and let the loop handle the ESC.
+            term = end;
+            break;
+          }
+          end++;
+        }
+        if (term < 0) {
+          // OSC runs past this chunk — hold it until the terminator arrives.
+          pending = data.slice(i);
+          break;
+        }
+        let d = i + 2;
+        let num = '';
+        while (d < end && data[d] >= 0x30 && data[d] <= 0x39) {
+          num += String.fromCharCode(data[d]);
+          d++;
+        }
+        if (num === '0' || num === '1' || num === '2') {
+          i = term;
+        } else {
+          for (; i < term; i++) result[out++] = data[i];
+        }
+        continue;
+      }
+    result[out++] = data[i++];
   }
-  return out === len ? bytes : result.slice(0, out);
+  return out === len ? data : result.slice(0, out);
+  };
+}
+
+// xterm answers OSC 10/11/12 colour queries itself.  onData also receives
+// those protocol replies, but forwarding a replayed reply into screen makes
+// the shell echo strings such as "11;rgb:0f0f/0f0f/2323".  These are never
+// user keystrokes, so remove only complete OSC colour-report replies.
+function stripTerminalColorReplies(data) {
+  data = data.replace(/\x1b]1[012];rgb:[0-9a-f]{1,4}\/[0-9a-f]{1,4}\/[0-9a-f]{1,4}(?:\x07|\x1b\\)/gi, '');
+  // Belt-and-braces: drop SGR / urxvt mouse-event reports in case tracking
+  // ever gets enabled despite the output-side suppression.  A user cannot
+  // type these sequences, so removing them never loses real keystrokes.
+  data = data.replace(/\x1b\[<?[0-9;]+[Mm]/g, '');
+  return data;
 }
 
 function escapeHtml(text) {
@@ -687,11 +800,11 @@ function connect(username, password) {
     } else if (msg.type === 'data') {
       // Single terminal mode
       if (term && msg.agentId === currentAgentId) {
-        term.write(filterVirtualAltScreen(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
+        term.write(termFilter(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
       }
       // Multi terminal mode
       if (multiTerms[msg.agentId]) {
-        multiTerms[msg.agentId].term.write(filterVirtualAltScreen(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
+        multiTerms[msg.agentId].term.write(multiTerms[msg.agentId].filter(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
       }
     } else if (msg.type === 'scrollback_info') {
       // Auto-load all remaining scrollback history
@@ -988,6 +1101,7 @@ function openTerminal(agentId, agentName) {
 
   const container = document.getElementById('term-container');
   container.innerHTML = '';
+  termFilter = createAltScreenFilter();
 
   const mobile = window.innerWidth < 600;
   term = new Terminal({
@@ -1032,6 +1146,8 @@ function openTerminal(agentId, agentName) {
   });
 
   term.onData(data => {
+    data = stripTerminalColorReplies(data);
+    if (!data) return;
     if (!ws || ws.readyState !== WebSocket.OPEN || !currentAgentId) return;
     const bytes = new TextEncoder().encode(data);
     let bin = '';
@@ -1433,10 +1549,12 @@ function openMultiTerminal() {
     term.open(wrap.querySelector('.multi-term-container'));
     setTimeout(() => fitAddon.fit(), 50);
 
-    multiTerms[agentId] = { term, fitAddon, container: wrap.querySelector('.multi-term-container') };
+    multiTerms[agentId] = { term, fitAddon, container: wrap.querySelector('.multi-term-container'), filter: createAltScreenFilter() };
 
     // Handle input
     term.onData(data => {
+      data = stripTerminalColorReplies(data);
+      if (!data) return;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const bytes = new TextEncoder().encode(data);
       let bin = '';
