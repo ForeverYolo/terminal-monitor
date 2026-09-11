@@ -75,6 +75,19 @@ if (!serverUrl || !token || !name) {
 
 const screenName = screenSession || 'main';
 
+// --- Debug byte-stream dump (toggle with --dump flag) ---
+// Dumps raw pty traffic to /tmp/swt-dump-<name>-{in,out}.bin so escape-sequence
+// flow (mouse mode switches, alt screen, etc.) can be inspected offline.
+const DEBUG_DUMP = process.argv.includes('--dump');
+const dumpStreams = {};
+function dumpStream(dir, data) {
+  let s = dumpStreams[dir];
+  if (!s) {
+    s = dumpStreams[dir] = fs.createWriteStream(`/tmp/swt-dump-${screenName}-${dir}.bin`, { flags: 'a' });
+  }
+  s.write(Buffer.from(data));
+}
+
 // --- File transfer config ---
 // The "base" used for file_ls / upload / download is the SHELL's current working
 // directory inside the screen session, not the node process's cwd. We query it
@@ -214,6 +227,8 @@ function stopHeartbeat() {
   hbTimeout = null;
 }
 
+let ptyGeneration = 0;  // incremented on every spawn; stale respawn timers no-op
+
 function connect() {
   console.log(`Connecting to ${serverUrl} ...`);
 
@@ -243,8 +258,11 @@ function connect() {
 
   function spawnPty() {
     if (ptyProcess) {
-      ptyProcess.kill();
+      try { ptyProcess.kill(); } catch {}
+      ptyProcess.removeAllListeners('data');
+      ptyProcess = null;
     }
+    const generation = ++ptyGeneration;
 
     ptyProcess = pty.spawn('screen', screenArgs, {
       name: 'xterm-256color',
@@ -254,6 +272,7 @@ function connect() {
     });
 
     console.log(`Attached to screen session: ${screenName} (PID: ${ptyProcess.pid})`);
+    const exitPid = ptyProcess.pid;
 
     // Increase screen scrollback (default is only 100 lines)
     setTimeout(() => {
@@ -264,6 +283,7 @@ function connect() {
     }, 500);
 
     ptyProcess.onData((data) => {
+      if (DEBUG_DUMP) dumpStream('OUT', data);
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'data', payload: Buffer.from(data).toString('base64') }));
       }
@@ -271,9 +291,12 @@ function connect() {
 
     ptyProcess.onExit(({ exitCode }) => {
       console.log(`screen exited with code ${exitCode}, respawning in 3s...`);
-      ptyProcess = null;
+      if (ptyProcess && ptyProcess.pid === exitPid) ptyProcess = null;
+      // Guard the respawn with the generation: if a newer pty was spawned in
+      // the meantime (reconnect race), this stale exit must not spawn another.
+      const myGeneration = generation;
       setTimeout(() => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
+        if (myGeneration === ptyGeneration && ws && ws.readyState === WebSocket.OPEN) {
           spawnPty();
         }
       }, 3000);
@@ -288,6 +311,7 @@ function connect() {
 
     if (msg.type === 'data' && ptyProcess) {
       const input = Buffer.from(msg.payload, 'base64').toString('utf8');
+      if (DEBUG_DUMP) dumpStream('IN', input);
       ptyProcess.write(input);
     }
 
@@ -526,6 +550,9 @@ function connect() {
       ptyProcess.kill();
       ptyProcess = null;
     }
+    // Invalidate any pending respawn timer from this connection's pty —
+    // the reconnect's spawnPty owns the next generation.
+    ptyGeneration++;
     // Abort any in-flight file transfers — streams won't survive a reconnect.
     for (const [, up] of activeUploads) { try { up.stream.destroy(); } catch {} }
     activeUploads.clear();
