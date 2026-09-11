@@ -15,3 +15,11 @@ node_modules/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local configs with server IPs / tokens
+deploy.targets.conf
+config.client-monitor-*.json
+
+# Debug artifacts
+backups/
+*.png
