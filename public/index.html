@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Terminal Monitor</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1141,6 +1143,16 @@ function openTerminal(agentId, agentName) {
       ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
       setTimeout(() => {
         ws.send(JSON.stringify({ type: 'connect', agentId }));
+        // The server drops resize messages that arrive before connect registers
+        // the agentId (browsers.agentIds is still empty), so the pre-connect
+        // resize above never reaches the PTY — the app inside screen then draws
+        // at the session's stale size while xterm renders at the real one
+        // (stair-stepped redraws).  Re-send after connect so the PTY resize
+        // actually lands.
+        setTimeout(() => {
+          fitAddon.fit();
+          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows, agentId }));
+        }, 50);
       }, 100);
     });
   });
