@@ -96,6 +96,10 @@ const httpServer = http.createServer((req, res) => {
     const file = path.join(__dirname, 'public', 'index.html');
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(fs.readFileSync(file));
+  } else if (req.url === '/favicon.ico' || req.url === '/favicon.svg') {
+    const file = path.join(__dirname, 'public', 'favicon.svg');
+    res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+    res.end(fs.readFileSync(file));
   } else if (req.url === '/api/agents') {
     // API: return agent status as JSON (for CLI monitoring / supervisor)
     const list = Array.from(agents.values()).map(a => {
