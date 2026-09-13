@@ -514,19 +514,27 @@ const MOUSE_REPORT_MODE = /^(100[0-7]|101[56])$/;
 
 function createAltScreenFilter() {
   let pending = null;  // head of an escape sequence split across chunks
+  let orphanTail = false;  // dropping a BEL-split title garbage tail across chunks
+  let orphanCount = 0;
   const PENDING_MAX = 4096;  // safety cap: a real sequence never gets this long
 
   return function filter(bytes) {
     let data = bytes;
     if (pending && pending.length > 0) {
-      data = new Uint8Array(pending.length + bytes.length);
-      data.set(pending, 0);
-      data.set(bytes, pending.length);
-      pending = null;
       // Cap guards against a corrupt stream keeping an unterminated sequence
-      // alive forever; past the cap we flush it through as literal text.
-      if (data.length > PENDING_MAX) {
-        data = data.slice(0, PENDING_MAX);
+      // alive forever: past the cap the held head is flushed as literal text
+      // (the cap applies to the held bytes, never to the incoming chunk —
+      // truncating pending+chunk would silently drop the chunk's tail).
+      if (pending.length > PENDING_MAX) {
+        data = new Uint8Array(pending.length + bytes.length);
+        data.set(pending, 0);
+        data.set(bytes, pending.length);
+        pending = null;
+      } else {
+        const merged = new Uint8Array(pending.length + bytes.length);
+        merged.set(pending, 0);
+        merged.set(bytes, pending.length);
+        data = merged;
         pending = null;
       }
     }
@@ -538,6 +546,19 @@ function createAltScreenFilter() {
     let out = 0;
     let i = 0;
     while (i < len) {
+      // GNU screen re-encodes claude's UTF-8 window titles into mojibake whose
+      // payload contains embedded BEL (0x07).  xterm.js terminates the OSC at
+      // that first BEL, and the remainder lands on the glass as literal text
+      // (the "ýå\î"-style fragments at the bottom of the screen).  After we
+      // drop a title OSC, the tail up to the next BEL is that garbage — drop it
+      // too, but ONLY when it contains no ESC (real redraw data interleaves
+      // between screen's title re-emits and must be kept).  State spans chunks.
+      if (orphanTail) {
+        if (data[i] === 0x07) { orphanTail = false; orphanCount = 0; }
+        else if (++orphanCount > 256) { orphanTail = false; orphanCount = 0; }  // BEL lost: stop dropping
+        i++;
+        continue;
+      }
       if (data[i] !== 0x1b) {
         result[out++] = data[i++];
         continue;
@@ -551,8 +572,12 @@ function createAltScreenFilter() {
       // ESC [ = 0x1b 0x5b
       if (i + 1 < len && data[i + 1] === 0x5b) {
         // Locate the final byte (0x40-0x7e) that terminates the sequence.
+        // 0x5b/0x5d ("[" / "]") are excluded: when a lone "ESC[" ends a chunk
+        // and the next chunk begins with an OSC ("]2;..."), concatenation
+        // yields "ESC[]2;..." — treating "]" as a CSI final byte would then
+        // pass the rest of screen's mangled title through as literal text.
         let end = i + 2;
-        while (end < len && (data[end] < 0x40 || data[end] > 0x7e)) end++;
+        while (end < len && (data[end] < 0x40 || data[end] > 0x7e || data[end] === 0x5b || data[end] === 0x5d)) end++;
         if (end >= len) {
           // Sequence runs past the end of this chunk — hold it and prepend to
           // the next chunk instead of passing a half sequence through.
@@ -683,6 +708,27 @@ function createAltScreenFilter() {
         }
         if (num === '0' || num === '1' || num === '2') {
           i = term;
+          // Belt-and-braces against GNU screen's BEL-split title re-emit (see
+          // orphanTail above): the garbage tail following a dropped title OSC
+          // runs up to the next BEL.  Drop it only when free of ESC — if an
+          // ESC appears, the "tail" is interleaved real redraw data.
+          if (i < len && data[i] !== 0x1b) {
+            let j = i;
+            let hasEsc = false;
+            while (j < len && data[j] !== 0x07) {
+              if (data[j] === 0x1b) { hasEsc = true; break; }
+              j++;
+            }
+            if (!hasEsc) {
+              if (j < len) {
+                i = j + 1;               // tail complete: consumed through BEL
+              } else {
+                // Tail continues into the next chunk; stay in orphan mode.
+                orphanTail = true;
+                i = len;
+              }
+            }
+          }
         } else {
           for (; i < term; i++) result[out++] = data[i];
         }
@@ -762,10 +808,13 @@ function connect(username, password) {
       if (wasReconnecting && inTerm && currentAgentId) {
         // Resume single terminal: re-subscribe without scrollback replay.
         // Terminal content stays as-is; only new live output is forwarded.
-        if (term && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-        }
+        // Send resize AFTER connect registers the agentId — the server drops
+        // resize messages for un-subscribed agents, so a pre-connect resize
+        // would never reach the PTY.
         ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, resume: true }));
+        if (term && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows, agentId: currentAgentId }));
+        }
       } else if (wasReconnecting && inMulti) {
         // Resume multi terminal: re-subscribe previously opened agents without replay.
         const ids = Object.keys(multiTerms);
@@ -1119,18 +1168,19 @@ function openTerminal(agentId, agentName) {
   // ResizeObserver: debounce BOTH fit() and the resize message.
   // Mobile keyboard show/hide fires many resize events in quick succession —
   // fitting each one makes xterm visibly jump/reflow. Debounce smooths it.
-  let resizeSendTimer = null;
-  let resizeFitTimer = null;
+  let resizeTimer = null;
   const resizeObserver = new ResizeObserver(() => {
     if (!fitAddon || !term) return;
-    clearTimeout(resizeFitTimer);
-    resizeFitTimer = setTimeout(() => { fitAddon.fit(); }, 200);
-    clearTimeout(resizeSendTimer);
-    resizeSendTimer = setTimeout(() => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      fitAddon.fit();
+      // Send the post-fit size. agentId is required — the server drops resize
+      // messages without it (browsers.agentIds membership check), which used to
+      // leave the PTY at the stale size and desync TUI apps like claude.
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows, agentId: currentAgentId }));
       }
-    }, 500);
+    }, 200);
   });
   resizeObserver.observe(container);
   window._termResizeObs = resizeObserver;
