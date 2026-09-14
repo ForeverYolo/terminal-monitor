@@ -13,8 +13,14 @@ set -u
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF="$PROJ_DIR/deploy.targets.conf"
 MODE="${1:-}"
-SCREEN_SESSION="${2:-}"
-TARGET_LABEL="${3:-}"
+# server mode:  bash restart.sh server <target-label>            → label is $2
+# client mode:  bash restart.sh client <screen-session> <label>  → label is $3
+if [ "$MODE" = "server" ]; then
+  TARGET_LABEL="${2:-}"
+else
+  SCREEN_SESSION="${2:-}"
+  TARGET_LABEL="${3:-}"
+fi
 
 if [ "$MODE" != "server" ] && [ "$MODE" != "client" ]; then
   echo "用法: bash restart.sh server <target-label>"
