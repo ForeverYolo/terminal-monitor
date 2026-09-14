@@ -1166,6 +1166,18 @@ function openTerminal(agentId, agentName) {
   term.loadAddon(fitAddon);
   term.open(container);
 
+  // Force application cursor keys (DECCKM) ON in the browser terminal.  Apps
+  // inside GNU screen (vim etc.) only recognise SS3 arrow keys (ESC O A, per
+  // the `screen` terminfo kcuu1/kcud1 entries), and screen swallows the app's
+  // smkx sequence instead of forwarding ESC[?1h to us — so the browser's
+  // DECCKM state depends on whether that one attach-time byte survives the
+  // server's 2MB scrollback replay.  When it doesn't, xterm.js emits CSI
+  // arrows (ESC [ A) which vim discards: the cursor stops moving.  Enable the
+  // mode locally so arrow keys are always SS3; screen translates them per
+  // window (shell readline and TUI apps both work).  This write is parsed by
+  // xterm itself and is never forwarded to the PTY.
+  term.write('\x1b[?1h');
+
   // ResizeObserver: debounce BOTH fit() and the resize message.
   // Mobile keyboard show/hide fires many resize events in quick succession —
   // fitting each one makes xterm visibly jump/reflow. Debounce smooths it.
@@ -1221,7 +1233,13 @@ function openTerminal(agentId, agentName) {
 
 function closeTerminal() {
   if (window._termResizeObs) { window._termResizeObs.disconnect(); window._termResizeObs = null; }
-  if (term) { term.dispose(); term = null; }
+  if (term) {
+    // Leave application cursor keys mode explicitly (dispose does not reset
+    // the page-global xterm state we forced on in openTerminal).
+    term.write('\x1b[?1l');
+    term.dispose();
+    term = null;
+  }
   currentAgentId = null;
   closeMobileInput();
   closeFileBrowser();
@@ -1610,6 +1628,8 @@ function openMultiTerminal() {
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(wrap.querySelector('.multi-term-container'));
+    // Same DECCKM rationale as openTerminal: keep arrows SS3 for screen apps.
+    term.write('\x1b[?1h');
     setTimeout(() => fitAddon.fit(), 50);
 
     multiTerms[agentId] = { term, fitAddon, container: wrap.querySelector('.multi-term-container'), filter: createAltScreenFilter() };
