@@ -86,14 +86,20 @@ for target in "${TARGETS[@]}"; do
   printf -v qpath '%q' "$path"
   printf -v qscreen '%q' "$screen_name"
   printf -v qlog '%q' "$log_file"
-  printf -v qstart '%q' "$start_cmd"
-  remote_cmd="cd $qpath && (screen -S $qscreen -X quit 2>/dev/null || true) && screen -dmS $qscreen bash -c \"$qstart 2>&1 | tee -a $qlog\""
+  # NOTE: qstart must NOT be %q-escaped — it is a full command line (spaces and
+  # all), not a single argument. %q would turn its spaces into "\ " and the
+  # remote bash would then treat the whole string as one command name
+  # ("command not found"). It is safely embedded inside double quotes below.
+  qstart="$start_cmd"
+  # sleep to let the old session's pty die before the new one attaches to the
+  # same screen session; then wait and verify the node process actually came up.
+  remote_cmd="cd $qpath && (screen -S $qscreen -X quit 2>/dev/null || true) && sleep 1 && screen -dmS $qscreen bash -c \"$qstart 2>&1 | tee -a $qlog\" && sleep 3 && pgrep -f \"$qstart\" > /dev/null"
 
   echo "=== Restarting $MODE on $label ($user@$host:$port) ==="
   if ssh -p "$port" "$user@$host" "$remote_cmd"; then
-    echo "  [OK] $screen_name restarted"
+    echo "  [OK] $screen_name restarted (process verified)"
   else
-    echo "  [FAIL] could not restart $screen_name"
+    echo "  [FAIL] could not restart $screen_name (see $log_file on target)"
     failed=$((failed + 1))
   fi
 done
