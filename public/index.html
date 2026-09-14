@@ -462,6 +462,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
       <button onclick="send('\x1bOH')">Home</button>
       <button onclick="send('\x1bOF')">End</button>
       <button onclick="send('\x7f')">⌫</button>
+      <button onclick="send('\r')" style="background:#4a9eff; color:#fff;">↵</button>
       <button onclick="toggleMobileInput()" id="btn-input">输入</button>
     </div>
   </div>
@@ -1742,6 +1743,18 @@ function sendMobileInput(withEnter) {
 // (typed return, pasted multiline) triggers send immediately.
 document.getElementById('mobile-text-input').addEventListener('input', function() {
   if (this.value.indexOf('\n') !== -1) {
+    sendMobileInput(true);
+  }
+});
+
+// Android keyboards honour enterkeyhint by firing a keydown Enter WITHOUT
+// inserting \n into the textarea (nothing is submitted — there is no form), so
+// the input-event path above never runs and pressing the keyboard's send key
+// appears to do nothing.  Handle keydown Enter for that case; clearing the
+// value first keeps the input-event fallback from double-sending.
+document.getElementById('mobile-text-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
     sendMobileInput(true);
   }
 });
