@@ -90,79 +90,92 @@ function dumpStream(dir, data) {
 
 // --- File transfer config ---
 // The "base" used for file_ls / upload / download is the SHELL's current working
-// directory inside the screen session, not the node process's cwd. We query it
-// on demand by sending `pwd` to the PTY and parsing the first absolute-path line
-// out of the response. A static `fileRoot` (from config) is kept only as a
-// fallback when the pwd query fails.
+// directory inside the screen session, not the node process's cwd. We track it
+// passively — never by writing to the PTY (writing `pwd` would leak into whatever
+// has keyboard focus, e.g. an AI dialog in codex/claude):
+//   1. OSC 7: shells whose PROMPT_COMMAND reports
+//      `printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD"` broadcast their
+//      cwd at every prompt; we listen on the PTY data stream and cache it.
+//      NOTE: GNU screen 4.09 swallows OSC 7 (verified) — this only fires when
+//      the PTY connects to the shell directly or a newer screen passes it.
+//   2. /proc (primary in practice): resolve the screen server pid via the
+//      socket dir, walk its descendants, read /proc/<pid>/cwd — always current,
+//      zero shell config. With multiple screen windows it may pick another
+//      window's shell; acceptable for a single-window monitoring setup.
+//   3. static `fileRoot` (from config) as the last resort.
 const staticFileRoot = path.resolve(config.client.fileRoot || process.cwd());
 const MAX_FILE_SIZE = 200 * 1024 * 1024;        // 200MB per file
 const CHUNK_SIZE = 256 * 1024;                  // 256KB raw per chunk
 const activeUploads = new Map();                // uploadId -> { stream, size, received, target }
 const activeDownloads = new Map();              // downloadId -> { rs, aborted }
-let lastKnownCwd = null;                        // cached shell cwd from last pwd query
+let oscCwd = null;                              // shell cwd from last OSC 7 report
 
-// --- pwd query state machine ---
-// pwd writes its result to the PTY and we intercept the next data chunk to
-// extract the path. Multiple concurrent callers are coalesced into a single
-// in-flight query; they all resolve/reject together when it completes.
-let pwdResolvers = [];     // [{ resolve, reject }]
-let pwdBuffer = '';
-let pwdTimer = null;
-let pwdDataListener = null;
+// Match an OSC 7 sequence: ESC ] 7 ; file://host/path terminated by BEL or ST.
+// Payload captured without the terminator; host is ignored (client is per-machine).
+const OSC7_RE = /\x1b\]7;file:\/\/([^\x07\x1b]*?)(?:\x07|\x1b\\)/;
 
-function queryShellCwd() {
-  return new Promise((resolve, reject) => {
-    if (!ptyProcess) {
-      reject(new Error('pty not running'));
-      return;
-    }
-    // Coalesce concurrent callers
-    if (pwdResolvers.length > 0) {
-      pwdResolvers.push({ resolve, reject });
-      return;
-    }
-    pwdResolvers.push({ resolve, reject });
-    pwdBuffer = '';
-
-    pwdTimer = setTimeout(() => {
-      finishPwdQuery(new Error('pwd query timeout (3s)'));
-    }, 3000);
-
-    pwdDataListener = (data) => {
-      pwdBuffer += data;
-      // Strip OSC sequences and CSI escapes so a colorful prompt doesn't confuse us.
-      const stripped = pwdBuffer
-        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
-      const lines = stripped.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-      for (const line of lines) {
-        if (/^[\/~]/.test(line)) {
-          let p = line;
-          if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1).replace(/^\//, ''));
-          finishPwdQuery(null, p);
-          return;
-        }
-      }
-    };
-
-    ptyProcess.on('data', pwdDataListener);
-    ptyProcess.write('pwd\n');
-  });
+// Feed PTY output through a small tail buffer so sequences split across chunks
+// are still recognized; on a match, decode the URL path into oscCwd.
+function trackOscCwd(tail, data) {
+  tail = (tail + data).slice(-1024);
+  const m = OSC7_RE.exec(tail);
+  if (m) {
+    const rest = m[1];                    // host/path
+    const slash = rest.indexOf('/');
+    let p = slash === -1 ? '/' : rest.slice(slash);
+    try { p = decodeURIComponent(p); } catch { /* keep raw path */ }
+    if (p.startsWith('/')) oscCwd = p;
+    tail = tail.slice(m.index + m[0].length);   // consume, avoid re-matching
+  }
+  return tail;
 }
 
-function finishPwdQuery(err, cwd) {
-  if (pwdTimer) { clearTimeout(pwdTimer); pwdTimer = null; }
-  if (pwdDataListener && ptyProcess) {
-    try { ptyProcess.removeListener('data', pwdDataListener); } catch {}
-    pwdDataListener = null;
-  }
-  const resolvers = pwdResolvers;
-  pwdResolvers = [];
-  pwdBuffer = '';
-  if (!err && cwd) lastKnownCwd = cwd;
-  for (const { resolve, reject } of resolvers) {
-    if (err) reject(err); else resolve(cwd);
-  }
+// Passive /proc lookup: server pid comes from the screen socket dir
+// (/var/run/screen/S-<user>/<serverpid>.<session>), then walk up to three
+// generations of descendants (server → window → shell) and return the first
+// readable /proc/<pid>/cwd, preferring the deepest (the shell itself).
+function readShellCwdFromProc() {
+  try {
+    const sockDir = `/var/run/screen/S-${os.userInfo().username}`;
+    const match = fs.readdirSync(sockDir).find(f => f.endsWith(`.${screenName}`));
+    if (!match) return null;
+    const serverPid = parseInt(match.split('.')[0], 10);
+    if (!Number.isFinite(serverPid)) return null;
+
+    const children = new Map();           // ppid -> [pid]
+    for (const ent of fs.readdirSync('/proc', { withFileTypes: true })) {
+      if (!/^\d+$/.test(ent.name)) continue;
+      try {
+        const stat = fs.readFileSync(`/proc/${ent.name}/stat`, 'utf8');
+        // comm (field 2) may contain spaces — parse after the last ')'
+        const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+        const ppid = parseInt(rest[1], 10);
+        if (!children.has(ppid)) children.set(ppid, []);
+        children.get(ppid).push(parseInt(ent.name, 10));
+      } catch { /* process vanished */ }
+    }
+
+    let frontier = [serverPid];
+    let found = null;
+    for (let depth = 0; depth < 3 && frontier.length; depth++) {
+      const next = [];
+      for (const pid of frontier) next.push(...(children.get(pid) || []));
+      for (const pid of next) {
+        try {
+          const cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+          if (cwd) found = cwd;           // keep the deepest hit
+        } catch { /* unreadable */ }
+      }
+      frontier = next;
+    }
+    return found;
+  } catch { return null; }
+}
+
+// Best-effort current shell cwd, without ever writing to the PTY.
+function getShellCwd() {
+  if (oscCwd) return oscCwd;                    // freshest: from the active shell's prompt
+  return readShellCwdFromProc() || staticFileRoot;
 }
 
 // Resolve a relative path against a base directory. Returns null if the result
@@ -196,6 +209,7 @@ const screenArgs = (screenMode || 'auto') === 'auto'
 
 let ws = null;
 let ptyProcess = null;
+let oscTail = '';   // carry-over bytes between onData chunks, for OSC 7 tracking
 let reconnectDelay = 1000;
 const MAX_DELAY = 30000;
 
@@ -284,6 +298,7 @@ function connect() {
 
     ptyProcess.onData((data) => {
       if (DEBUG_DUMP) dumpStream('OUT', data);
+      oscTail = trackOscCwd(oscTail, data);
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'data', payload: Buffer.from(data).toString('base64') }));
       }
@@ -360,16 +375,7 @@ function connect() {
 
   async function handleFileLs(msg) {
     console.log('[file] file_ls start, dir=', msg.dir);
-    let cwd;
-    try {
-      cwd = await queryShellCwd();
-      console.log('[file] pwd resolved:', cwd);
-    } catch (e) {
-      console.log('[file] pwd failed:', e.message);
-      // pwd failed — fall back to staticFileRoot so the user can still see files.
-      cwd = lastKnownCwd || staticFileRoot;
-    }
-    const base = cwd || staticFileRoot;
+    const base = getShellCwd();
     const target = safeResolveAgainst(base, msg.dir || '.');
     if (!target) {
       sendMsg({ type: 'file_ls_result', agentId: msg.agentId, reqId: msg.reqId, dir: msg.dir || '', error: '路径超出允许范围（仅限 $HOME 内）' });
@@ -418,13 +424,7 @@ function connect() {
       sendMsg({ type: 'file_upload_ack', agentId: msg.agentId, uploadId: msg.uploadId, ok: false, error: `Size out of range (max ${MAX_FILE_SIZE} bytes)` });
       return;
     }
-    let cwd;
-    try {
-      cwd = await queryShellCwd();
-    } catch (e) {
-      cwd = lastKnownCwd || staticFileRoot;
-    }
-    const base = cwd || staticFileRoot;
+    const base = getShellCwd();
     const target = safeResolveAgainst(base, filename);
     if (!target) {
       sendMsg({ type: 'file_upload_ack', agentId: msg.agentId, uploadId: msg.uploadId, ok: false, error: 'Invalid target path' });
@@ -474,13 +474,7 @@ function connect() {
 
   async function handleDownloadStart(msg) {
     const rel = msg.path || '';
-    let cwd;
-    try {
-      cwd = await queryShellCwd();
-    } catch (e) {
-      cwd = lastKnownCwd || staticFileRoot;
-    }
-    const base = cwd || staticFileRoot;
+    const base = getShellCwd();
     const target = safeResolveAgainst(base, rel);
     if (!target) {
       sendMsg({ type: 'file_download_end', agentId: msg.agentId, downloadId: msg.downloadId, ok: false, error: 'Invalid path' });

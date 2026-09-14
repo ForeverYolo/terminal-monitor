@@ -371,7 +371,7 @@ screen -S swt-client-mywork -X quit    # 停止某客户端
 
 | type | 方向 | 说明 |
 |------|------|------|
-| `file_ls` / `file_ls_result` | B→S / S→B | 列目录（基于 screen 内 shell 的 `pwd`，限 `$HOME` 内） |
+| `file_ls` / `file_ls_result` | B→S / S→B | 列目录（基于 screen 内 shell 的 cwd，经 `/proc/<pid>/cwd` 被动读取，限 `$HOME` 内） |
 | `file_upload_start` / `file_upload_ack` / `file_chunk` / `file_chunk_ack` / `file_upload_end` / `file_upload_done` | 双向 | 分块上传（256KB/块，≤200MB） |
 | `file_download_start` / `file_download_meta` / `file_download_chunk` / `file_download_end` | 双向 | 分块下载 |
 

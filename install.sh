@@ -106,7 +106,23 @@ EOF
 }
 
 # --- 部署客户端 ---
+# 让被监控 screen 里的 bash 在每次提示符出现时通过 OSC 7 播报 cwd，
+# client.js 被动监听即可获知上传/下载目标目录（无需往 PTY 写 pwd）。
+ensure_osc7_hook() {
+    local MARKER="# terminal-monitor OSC 7 cwd report"
+    local HOOK='printf '"'"'\033]7;file://%s%s\033\\'"'"' "$HOSTNAME" "$PWD"'
+    if ! grep -qF "$MARKER" ~/.bashrc 2>/dev/null; then
+        {
+            echo ""
+            echo "$MARKER"
+            echo "if [ -n \"\$PS1\" ]; then PROMPT_COMMAND=\"${HOOK}\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}\"; fi"
+        } >> ~/.bashrc
+        echo "[*] 已在 ~/.bashrc 添加 OSC 7 cwd 播报（文件传输定位用）"
+    fi
+}
+
 deploy_client() {
+    ensure_osc7_hook
     # 尝试读取已有配置作为默认值
     local DEFAULT_URL="" DEFAULT_TOKEN="" DEFAULT_NAME="" DEFAULT_SCREEN=""
     # 先读全局 config.json，再读 session 专属配置覆盖
