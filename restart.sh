@@ -82,18 +82,18 @@ if [ ${#TARGETS[@]} -eq 0 ]; then
   exit 1
 fi
 
-# Build a safely quoted remote command. The remote install layout is the one
-# created by install.sh: server uses swt-server; clients use swt-client-<session>.
+# Remote install layout is the one created by install.sh:
+#   server  → swt-server, server.js
+#   client  → swt-client-<session>, client.js --config=config.client-<session>.json
 if [ "$MODE" = "server" ]; then
   screen_name="swt-server"
   log_file="server.log"
-  start_cmd="node server.js"
+  node_args="server.js"
   scope="service"
 else
   screen_name="swt-client-$SCREEN_SESSION"
-  config_file="config.client-$SCREEN_SESSION.json"
   log_file="client-$SCREEN_SESSION.log"
-  start_cmd="node client.js --config=$config_file"
+  node_args="client.js --config=config.client-$SCREEN_SESSION.json"
   scope="$SCOPE"
 fi
 
@@ -115,44 +115,64 @@ for target in "${TARGETS[@]}"; do
   printf -v qscreen '%q' "$screen_name"
   printf -v qreal '%q' "$SCREEN_SESSION"
   printf -v qlog '%q' "$log_file"
-  # NOTE: qstart must NOT be %q-escaped — it is a full command line (spaces and
-  # all), not a single argument. %q would turn its spaces into "\ " and the
-  # remote bash would then treat the whole string as one command name
-  # ("command not found"). It is safely embedded inside double quotes below.
-  qstart="$start_cmd"
 
-  # Piece together the remote command from the requested scope:
-  #   - service part: quit the swt-client-<session> screen, then (unless the
-  #     real screen alone is requested) recreate it running node client.js.
-  #   - real part: quit the real <session> screen and recreate it empty with a
-  #     shell. Anything running inside it (shells, jobs) is killed — that is
-  #     the point of "real" scope. The recreated session is left DETACHED so
-  #     the client service can attach via `screen -x`.
-  # sleep 1 after each quit lets the old session's pty die before anything
-  # reattaches; the trailing pgrep verifies the node process actually came up.
-  svc_quit="(screen -S $qscreen -X quit 2>/dev/null || true)"
-  svc_start="screen -dmS $qscreen bash -c \"cd $qpath && $qstart 2>&1 | tee -a $qlog\""
-  real_quit="(screen -S $qreal -X quit 2>/dev/null || true)"
-  real_start="screen -dmS $qreal bash"
+  # The remote script is piped to `bash -s` via stdin instead of spliced into
+  # one giant `ssh host "..."` string. The node probe below is full of quotes;
+  # nesting those inside bash -c "..." inside ssh "..." produces quoting bugs
+  # ('client.js: command not found'). Via stdin there is no nesting.
+  #
+  # Node resolution: some hosts (2080-server) have an ancient system node (v12)
+  # that can't parse the app's optional-chaining syntax, with the real runtime
+  # in nvm. Non-interactive SSH doesn't load nvm (see NODE_RESOLVE comment), so
+  # bare `node` there means v12 → instant SyntaxError crash loop. The probe
+  # picks the first candidate that can actually parse the entry file
+  # (`node --check <file>` — evidence-based, not version guessing). NOTE the
+  # argument order: `node <file> --check` passes --check to the SCRIPT.
+  # NODE_RESOLVE is single-quoted: it must expand on the REMOTE side.
+  NODE_RESOLVE='NODE_BIN=""
+for P in "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node /usr/bin/node node; do
+  if [ "$P" = "node" ]; then
+    if command -v node >/dev/null 2>&1 && node --check client.js 2>/dev/null; then NODE_BIN=node; fi
+  elif [ -x "$P" ] && "$P" --check client.js 2>/dev/null; then
+    NODE_BIN="$P"
+  fi
+  [ -n "$NODE_BIN" ] && break
+done
+[ -n "$NODE_BIN" ] || { echo "[restart] no working node found" >&2; exit 1; }
+# Must EXPORT: plain shell variables are not inherited by the bash -c child
+# that screen spawns, and an empty $NODE_BIN there fails as `exec: : not found`.
+export NODE_BIN'
 
-  case "$scope" in
-    service)
-      remote_cmd="cd $qpath && $svc_quit && sleep 1 && $svc_start && sleep 3 && pgrep -f \"$qstart\" > /dev/null"
-      verify_desc="$screen_name restarted (process verified)"
-      ;;
-    real)
-      remote_cmd="$real_quit && sleep 1 && $real_start && sleep 1 && screen -list | grep -q \"[.]$qreal\""
-      verify_desc="real screen $SCREEN_SESSION recreated empty (was killed)"
-      ;;
-    all)
-      remote_cmd="cd $qpath && $svc_quit && $real_quit && sleep 1 && $real_start && sleep 1 && $svc_start && sleep 3 && pgrep -f \"$qstart\" > /dev/null"
-      verify_desc="$screen_name + real screen $SCREEN_SESSION restarted (process verified)"
-      ;;
-  esac
+  remote_script="cd $qpath || exit 1"
+  do_service=1; do_real=0
+  [ "$scope" = "real" ] && do_service=0
+  [ "$scope" = "all" ] && do_real=1
+  [ "$scope" = "real" ] && do_real=1
+
+  # --- service part: quit swt screen, resolve node, relaunch via screen ---
+  if [ "$do_service" = 1 ]; then
+    remote_script+="
+(screen -S $qscreen -X quit 2>/dev/null || true) && sleep 1"
+    remote_script+="
+$NODE_RESOLVE"
+    remote_script+="
+screen -dmS $qscreen bash -c 'cd $qpath && exec \"\$NODE_BIN\" $qpath/$node_args 2>&1 | tee -a $qpath/$qlog'
+sleep 3
+screen -ls | grep -q \"[.]$qscreen\" || { echo '[restart] screen did not come up, check $qlog' >&2; exit 1; }"
+  fi
+
+  # --- real part: quit the real screen, recreate it EMPTY with a shell ---
+  if [ "$do_real" = 1 ]; then
+    remote_script+="
+(screen -S $qreal -X quit 2>/dev/null || true) && sleep 1
+screen -dmS $qreal bash
+sleep 1
+screen -ls | grep -q \"[.]$qreal\" || { echo '[restart] real screen did not come up' >&2; exit 1; }"
+  fi
 
   echo "=== Restarting $MODE on $label ($user@$host:$port) [scope: $scope] ==="
-  if ssh -p "$port" "$user@$host" "$remote_cmd"; then
-    echo "  [OK] $verify_desc"
+  if ssh -p "$port" "$user@$host" "bash -s" <<< "$remote_script"; then
+    echo "  [OK] restarted (scope: $scope, screen session verified)"
   else
     echo "  [FAIL] could not restart (scope: $scope, see $log_file on target)"
     failed=$((failed + 1))
