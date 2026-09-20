@@ -34,7 +34,7 @@ const SCROLLBACK_INIT = config.server.scrollbackInit || 3000;
 // read) — so "last 3000 chunks" alone doesn't reliably bound how much data a
 // browser has to receive, base64-decode, and hand to xterm.js to parse/render
 // before the terminal feels ready. Whichever limit is hit first wins.
-const SCROLLBACK_INIT_BYTES = config.server.scrollbackInitBytes || 200000;
+const SCROLLBACK_INIT_BYTES = config.server.scrollbackInitBytes || 600000;
 const SCROLLBACK_PAGE = 500;    // chunks per lazy-load request
 // How many scrollback chunks to send per event-loop tick during replay. Node
 // is single-threaded — a tight loop sending thousands of chunks synchronously
@@ -85,8 +85,32 @@ function generateAgentId() {
 // unchanged — same `data`/`scrollback_info`/`scrollback_end` messages, just
 // paced. `done` fires when finished, including when there's nothing to send.
 function sendScrollbackReplay(ws, ainfo, done) {
+  const binfo = browsers.get(ws);
+  if (binfo) {
+    if (!binfo.replaying) binfo.replaying = new Set();
+    binfo.replaying.add(ainfo.id);
+  }
+  const finish = () => {
+    if (!binfo) return;
+    binfo.replaying.delete(ainfo.id);
+    const queued = binfo.pendingLive && binfo.pendingLive.get(ainfo.id);
+    if (binfo.pendingLive) binfo.pendingLive.delete(ainfo.id);
+    if (queued && ws.readyState === ws.OPEN) {
+      for (const p of queued) ws.send(p);
+    }
+  };
+
   const total = ainfo.scrollback.length;
-  if (total === 0) { done(); return; }
+  if (total === 0) {
+    // Empty buffer still reports info+end: browsers treat scrollback_end as
+    // "replay finished" to trigger their post-connect repaint; with no end
+    // message a fresh session's terminal would never get one.
+    ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total: 0, loadedFrom: 0, hasMore: false }));
+    ws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id }));
+    finish();
+    done();
+    return;
+  }
   // Walk back from the most recent chunk, stopping at whichever limit —
   // chunk count or total bytes — is hit first. Bounded to at most
   // SCROLLBACK_INIT iterations, so this is a cheap, one-time scan.
@@ -98,7 +122,7 @@ function sendScrollbackReplay(ws, ainfo, done) {
   }
   let i = start;
   function sendBatch() {
-    if (ws.readyState !== ws.OPEN) { done(); return; } // browser gone mid-replay
+    if (ws.readyState !== ws.OPEN) { finish(); done(); return; } // browser gone mid-replay
     const end = Math.min(i + SCROLLBACK_SEND_BATCH, total);
     for (; i < end; i++) {
       ws.send(JSON.stringify({ type: 'data', payload: ainfo.scrollback[i], agentId: ainfo.id }));
@@ -109,6 +133,7 @@ function sendScrollbackReplay(ws, ainfo, done) {
     }
     ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total, loadedFrom: start, hasMore: start > 0 }));
     ws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id }));
+    finish();
     done();
   }
   sendBatch();
@@ -398,10 +423,19 @@ wss.on('connection', (ws) => {
           agentInfo.scrollbackBytes -= freed;
         }
       }
-      // Forward to browsers (check both single-agent and multi-agent subscriptions)
+      // Forward to browsers (check both single-agent and multi-agent subscriptions).
+      // Replay is batched and yields to the event loop, so live frames can
+      // otherwise interleave with older frames still being replayed — the
+      // browser then draws history on top of the live screen. Hold this
+      // agent's live frames per-browser until its replay finishes.
       const payload = JSON.stringify({ type: 'data', payload: msg.payload, agentId: agentInfo.id });
       for (const [bws, binfo] of browsers) {
-        if (binfo.agentIds.has(agentInfo.id) && bws.readyState === bws.OPEN) {
+        if (!binfo.agentIds.has(agentInfo.id) || bws.readyState !== bws.OPEN) continue;
+        if (binfo.replaying && binfo.replaying.has(agentInfo.id)) {
+          if (!binfo.pendingLive) binfo.pendingLive = new Map();
+          if (!binfo.pendingLive.has(agentInfo.id)) binfo.pendingLive.set(agentInfo.id, []);
+          binfo.pendingLive.get(agentInfo.id).push(payload);
+        } else {
           bws.send(payload);
         }
       }

@@ -113,7 +113,7 @@ for target in "${TARGETS[@]}"; do
 
   printf -v qpath '%q' "$path"
   printf -v qscreen '%q' "$screen_name"
-  printf -v qreal '%q' "$SCREEN_SESSION"
+  printf -v qreal '%q' "${SCREEN_SESSION:-}"
   printf -v qlog '%q' "$log_file"
 
   # The remote script is piped to `bash -s` via stdin instead of spliced into

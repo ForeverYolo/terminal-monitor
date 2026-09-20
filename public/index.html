@@ -1088,17 +1088,28 @@ function connect(username, password) {
         feedStructured(msg.payload, msg.agentId);
       }
     } else if (msg.type === 'scrollback_info') {
-      // Auto-load all remaining scrollback history
-      if (msg.hasMore && msg.total > 0) {
-        ws.send(JSON.stringify({ type: 'scrollback_more', agentId: msg.agentId, fromIndex: msg.loadedFrom }));
-      }
-    } else if (msg.type === 'scrollback_data') {
-      // Received older history chunks — keep requesting if more available
-      if (msg.hasMore && msg.fromIndex > 0) {
-        ws.send(JSON.stringify({ type: 'scrollback_more', agentId: msg.agentId, fromIndex: msg.fromIndex }));
-      }
+      // hasMore=true just notes that older history exists beyond the initial
+      // replay window. We deliberately do NOT auto-load it: xterm.js writes
+      // sequentially and cannot prepend, so older pages would land BELOW the
+      // newer content — the chained pages end with the OLDEST chunk as the
+      // visible screen, burying the live output ("replay shows days-old
+      // content / latest output missing"). Loading arbitrary older history
+      // into a live xterm buffer correctly needs a different architecture
+      // (server-side rendered-text buffer), not this byte-stream replay.
     } else if (msg.type === 'scrollback_end') {
-      // All history written, user scrolls freely
+      // All history written. Replay draws with whatever PTY size the agent had;
+      // make sure the app inside repaints at OUR size: send one resize
+      // round-trip (shrink a row, restore after 250ms). The gap matters —
+      // back-to-back resizes (50ms) arrive faster than screen/codex can
+      // repaint, and the two overlapping redraws pile frames on the screen.
+      if (msg.agentId === currentAgentId && term && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'resize', agentId: msg.agentId, cols: term.cols, rows: Math.max(1, term.rows - 1) }));
+        setTimeout(() => {
+          if (ws && ws.readyState === WebSocket.OPEN && term) {
+            ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: term.cols, rows: term.rows }));
+          }
+        }, 250);
+      }
     } else if (typeof msg.type === 'string' && msg.type.startsWith('file_')) {
       handleFileMsg(msg);
     } else if (msg.type === 'claude_state') {
