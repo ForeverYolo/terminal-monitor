@@ -87,6 +87,11 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
 #term-view { display: none; flex-direction: column; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; }
 #term-header { display: none; }
 #term-container { flex: 1; background: #000; overflow: hidden; min-height: 0; }
+/* xterm.js's own scrollback viewport (xterm.css sets overflow-y:scroll on this
+   but not this) — without it, a nested scrollable div inside a position:fixed
+   ancestor (#term-view here) is notoriously unreliable to touch-drag-scroll on
+   iOS Safari, which is why swiping up never revealed scrollback on mobile. */
+#term-container .xterm-viewport { -webkit-overflow-scrolling: touch; }
 
 /* Floating overlay for agent name */
 #term-overlay {
@@ -103,6 +108,77 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
   pointer-events: none;
   transition: opacity 0.3s;
 }
+
+/* Claude state badge on agent cards */
+.claude-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  margin: 2px 4px 0 0;
+  border-radius: 10px;
+  font-size: 11px;
+  background: #2d1a4a;
+  color: #c896ff;
+  border: 1px solid #5a3a8e;
+}
+.claude-badge.kind-working { background:#1a3a4a; color:#7ad6ff; border-color:#2a5a8e; }
+.claude-badge.kind-yesno, .claude-badge.kind-bash { background:#4a2a2a; color:#ff9b9b; border-color:#8e3a3a; }
+.claude-badge.kind-option { background:#4a4218; color:#ffe27a; border-color:#8e7a2a; }
+.claude-badge.kind-input { background:#1a4a2a; color:#9bffb0; border-color:#2a8e4a; }
+
+/* Attention: a Claude session is waiting on yes/no, a permission prompt, or an
+   option list — pulse the card border so it's noticeable without staring at it. */
+@keyframes swt-attention-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0.55); border-color: #ff6b6b; }
+  50% { box-shadow: 0 0 0 6px rgba(255, 107, 107, 0); border-color: #ff9b9b; }
+}
+.agent-card.attention {
+  animation: swt-attention-pulse 1.6s ease-in-out infinite;
+}
+.mgmt-agent-row.attention {
+  animation: swt-attention-pulse 1.6s ease-in-out infinite;
+}
+#notif-toggle {
+  background: transparent; border: 1px solid #333; color: #888;
+  padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+#notif-toggle.on { color: #ffe27a; border-color: #8e7a2a; }
+
+/* Management panel client card */
+.mgmt-client {
+  background:#0d1117; border:1px solid #21262d; border-radius:8px; padding:12px;
+}
+.mgmt-client h4 { margin:0 0 8px 0; font-size:13px; color:#8b949e; }
+.mgmt-client .add-node-row { display:flex; gap:6px; margin:8px 0; align-items:center; flex-wrap:wrap; }
+.mgmt-client .add-node-row input {
+  background:#161b22; color:#c9d1d9; border:1px solid #30363d; border-radius:4px;
+  padding:4px 8px; font-size:12px; width:160px;
+}
+.mgmt-client .add-node-row select {
+  background:#161b22; color:#c9d1d9; border:1px solid #30363d; border-radius:4px;
+  padding:4px 8px; font-size:12px;
+}
+.mgmt-client .add-node-row button {
+  background:#238636; color:#fff; border:none; padding:6px 12px; border-radius:4px;
+  cursor:pointer; font-size:12px;
+}
+.mgmt-client .add-node-row button:disabled { background:#21262d; color:#6e7681; cursor:not-allowed; }
+.mgmt-agent-list { display:flex; flex-direction:column; gap:4px; }
+.mgmt-agent-row {
+  display:flex; align-items:center; gap:8px; padding:6px 8px; background:#161b22; border-radius:4px; font-size:12px;
+  border: 1px solid transparent;
+}
+.mgmt-agent-row .name { color:#c9d1d9; font-weight:600; }
+.mgmt-agent-row .screen { color:#8b949e; }
+.mgmt-agent-row .state { color:#a0a0a0; flex: 1; }
+.mgmt-agent-row .kill-btn {
+  background:#21262d; color:#c9d1d9; border:none; border-radius:4px;
+  padding:4px 8px; font-size:11px; cursor:pointer; flex-shrink:0;
+}
+.mgmt-agent-row .kill-btn:hover { background:#30363d; }
+.mgmt-agent-row .kill-btn.danger { background:#4a2222; color:#ff9b9b; }
+.mgmt-agent-row .kill-btn.danger:hover { background:#6e2f2f; }
 
 /* Network disconnect overlay — shown on top of any view */
 #network-overlay {
@@ -250,6 +326,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
 }
 #toast.show { display: block; }
 #toast.error { background: rgba(80, 20, 20, 0.95); color: #ffb3b3; }
+#toast.warn { background: rgba(74, 66, 24, 0.95); color: #ffe27a; }
 
 /* Multi-view panel action buttons */
 .term-actions { display: flex; gap: 3px; align-items: center; }
@@ -322,18 +399,88 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
 #mobile-toolbar button:active { background: #4a9eff; color: #fff; }
 #mobile-toolbar button.active { background: #4a9eff; color: #fff; }
 
-/* Mobile input area */
+/* Mobile live input bar */
 #mobile-input-area { display: none; margin-bottom: 4px; }
+#mobile-input-wrap { display: flex; gap: 4px; align-items: stretch; }
 #mobile-text-input {
-  width: 100%; height: 50px; max-height: 50px; overflow-y: auto;
+  flex: 1; min-height: 38px; max-height: 96px; overflow-y: auto;
   background: #0f0f23; color: #fff;
-  border: 1px solid #333; border-radius: 4px; padding: 6px;
+  border: 1px solid #333; border-radius: 4px; padding: 7px 8px;
   font-size: 16px; font-family: monospace; resize: none; outline: none;
   line-height: 1.3;
 }
 #mobile-text-input:focus { border-color: #4a9eff; }
-.mobile-input-btns { display: flex; gap: 4px; margin-top: 4px; }
-.mobile-input-btns button { flex: 1; height: 28px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+#mobile-send-btn {
+  flex: 0 0 44px; background: #4a9eff; color: #fff; border: none;
+  border-radius: 4px; font-size: 18px; touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+#mobile-send-btn:active { background: #2a7ad6; }
+
+/* ===== Mobile structured view (alternative to raw xterm) ===== */
+#structured-view {
+  display: none;
+  flex: 1; min-height: 0;
+  flex-direction: column;
+  background: #0f0f23;
+}
+#struct-transcript {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 10px 12px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.45; color: #d7dcec;
+  white-space: pre-wrap; word-break: break-word;
+  -webkit-overflow-scrolling: touch;
+}
+#struct-transcript .struct-line { margin: 0; }
+#struct-transcript .struct-dim { color: #6e7681; }
+#struct-actionbar {
+  display: none; flex-shrink: 0; padding: 6px 8px; gap: 6px;
+  flex-wrap: wrap; background: #0d1117; border-top: 1px solid #21262d;
+}
+#struct-actionbar button {
+  flex: 1 1 auto; min-width: 64px; padding: 10px 12px; font-size: 14px;
+  border: none; border-radius: 6px; background: #21262d; color: #c9d1d9;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+#struct-actionbar button.primary { background: #238636; color: #fff; }
+#struct-actionbar button.danger { background: #8e3a3a; color: #fff; }
+#struct-actionbar button:active { filter: brightness(1.2); }
+#struct-input-row {
+  display: flex; gap: 6px; padding: 6px 8px; flex-shrink: 0;
+  background: #0d1117; border-top: 1px solid #21262d;
+}
+#struct-input {
+  flex: 1; min-height: 38px; padding: 8px 10px;
+  background: #0f0f23; color: #fff; border: 1px solid #333; border-radius: 6px;
+  font-size: 16px; font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+#struct-input:focus { border-color: #4a9eff; outline: none; }
+#struct-send {
+  flex: 0 0 54px; background: #4a9eff; color: #fff; border: none; border-radius: 6px;
+  font-size: 15px; touch-action: manipulation;
+}
+#struct-quickkeys {
+  display: flex; gap: 4px; padding: 6px 8px 8px; flex-shrink: 0;
+  background: #0d1117; border-top: 1px solid #21262d; overflow-x: auto;
+}
+#struct-quickkeys button {
+  flex: 0 0 auto; padding: 9px 14px; font-size: 13px; border: none; border-radius: 5px;
+  background: #21262d; color: #c9d1d9; touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+#struct-quickkeys button:active { background: #4a9eff; color: #fff; }
+#float-toggle-view {
+  /* No `left`/`right` here previously meant it fell back to its static
+     position (near the left edge, since float-back/upload/download are all
+     position:fixed and removed from flow) — landing right on top of
+     #float-back. Anchored to the right instead, below #term-overlay's row
+     (top 8px) so it doesn't sit under the fading agent-name tag either. */
+  display: none; position: fixed; top: 44px; right: 8px; z-index: 100;
+  background: rgba(15,15,35,0.85); color: #4a9eff; border: none;
+  border-radius: 16px; padding: 4px 12px; font-size: 13px;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
 
 /* Mobile responsive */
 @media (max-width: 600px) {
@@ -343,6 +490,9 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
   .agent-card { padding: 14px; }
   .agent-card .info-grid { grid-template-columns: 1fr; }
   #mobile-toolbar { display: block; }
+  #mobile-input-area { display: block; }   /* live input bar always visible on mobile */
+  [data-mode="multi"] { display: none; }   /* multi-terminal grid doesn't fit a phone screen */
+  #notif-toggle { display: none; }         /* Notification API isn't usable on mobile Safari/Chrome-iOS */
 }
 </style>
 </head>
@@ -382,33 +532,88 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
 <!-- Login View -->
 <div id="login-view">
   <div class="login-box">
-    <h1>Terminal Monitor</h1>
+    <h1>Screen Web Terminal</h1>
     <p>Enter username and password to continue</p>
     <div class="login-error" id="login-error"></div>
     <input type="text" id="username-input" placeholder="Username">
     <input type="password" id="password-input" placeholder="Password" autofocus>
     <button onclick="doLogin()">Login</button>
+    <p style="margin:16px 0 0; font-size:12px;"><a href="/guide.html" target="_blank" style="color:#4a9eff; text-decoration:none;">📖 第一次用？看使用指南</a></p>
   </div>
 </div>
 
 <!-- Dashboard View -->
 <div id="dash-view">
   <div id="dash-header">
-    <h2>Terminal Monitor</h2>
+    <h2>Screen Web Terminal</h2>
     <div class="right-area">
       <div class="mode-switch" id="sort-switch">
         <button class="active" data-sort="name">名字</button>
         <button data-sort="id">编号</button>
         <button data-sort="recent">最近</button>
       </div>
-      <div class="mode-switch">
+      <div class="mode-switch" id="view-mode-switch">
         <button class="active" data-mode="card">卡片</button>
         <button data-mode="multi">多屏</button>
+        <button data-mode="mgmt" id="mode-mgmt-btn">管理</button>
       </div>
+      <button id="notif-toggle" onclick="toggleNotifications()" title="需要输入时桌面通知">🔔 通知</button>
+      <a href="/guide.html" target="_blank" class="logout" title="使用指南" style="text-decoration:none;">📖 指南</a>
       <span class="logout" onclick="doLogout()">Logout</span>
     </div>
   </div>
   <div id="agent-list"></div>
+  <div id="mgmt-panel" style="display:none; flex:1; overflow-y:auto; padding:16px; flex-direction:column; gap:16px;">
+    <details id="mgmt-settings" style="background:#0d1117; border:1px solid #21262d; border-radius:8px; padding:14px;">
+      <summary style="cursor:pointer; font-size:15px; font-weight:600; color:#fff;">督工设置</summary>
+      <div style="margin-top:12px; display:flex; flex-direction:column; gap:10px;">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#ccc;">
+          <input type="checkbox" id="sup-enabled"> 启用督工
+        </label>
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <label style="font-size:12px; color:#8b949e;">分析员 Agent（留空则只做摘要/空闲检测，不做 AI 分析）</label>
+          <select id="sup-analyzer" style="background:#161b22; color:#fff; border:1px solid #30363d; border-radius:4px; padding:6px;">
+            <option value="">（不使用分析员）</option>
+          </select>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+          <div>
+            <label style="font-size:12px; color:#8b949e;">摘要间隔(秒)</label>
+            <input type="number" id="sup-summaryInterval" min="10" max="86400" style="width:100%; box-sizing:border-box; background:#161b22; color:#fff; border:1px solid #30363d; border-radius:4px; padding:6px;">
+          </div>
+          <div>
+            <label style="font-size:12px; color:#8b949e;">空闲告警阈值(秒)</label>
+            <input type="number" id="sup-idleTimeout" min="10" max="86400" style="width:100%; box-sizing:border-box; background:#161b22; color:#fff; border:1px solid #30363d; border-radius:4px; padding:6px;">
+          </div>
+          <div>
+            <label style="font-size:12px; color:#8b949e;">分析间隔(秒)</label>
+            <input type="number" id="sup-analyzerInterval" min="10" max="86400" style="width:100%; box-sizing:border-box; background:#161b22; color:#fff; border:1px solid #30363d; border-radius:4px; padding:6px;">
+          </div>
+          <div>
+            <label style="font-size:12px; color:#8b949e;">分析超时(秒)</label>
+            <input type="number" id="sup-analyzerTimeout" min="5" max="3600" style="width:100%; box-sizing:border-box; background:#161b22; color:#fff; border:1px solid #30363d; border-radius:4px; padding:6px;">
+          </div>
+        </div>
+        <div>
+          <label style="font-size:12px; color:#8b949e;">Webhook URL（留空则不通知）</label>
+          <input type="text" id="sup-webhook" placeholder="https://..." style="width:100%; box-sizing:border-box; background:#161b22; color:#fff; border:1px solid #30363d; border-radius:4px; padding:6px;">
+        </div>
+        <div>
+          <button onclick="saveSupervisorConfig()" style="background:#2a6e4a; color:#fff; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-size:13px;">保存并应用</button>
+          <span id="sup-save-status" style="margin-left:10px; font-size:12px; color:#8b949e;"></span>
+        </div>
+      </div>
+    </details>
+    <div style="background:#0d1117; border:1px solid #21262d; border-radius:8px; padding:14px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <h3 style="margin:0; font-size:15px;">督工摘要 <span id="mgmt-summary-time" style="color:#6e7681; font-size:11px; font-weight:normal;"></span></h3>
+        <button onclick="requestLlmSummary()" style="background:#2a4a6e; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;">刷新 LLM 分析</button>
+      </div>
+      <div id="mgmt-summary-text" style="color:#ccc; font-size:13px; white-space:pre-wrap; line-height:1.5;">（等待督工事件…）</div>
+      <div id="mgmt-suggestions" style="margin-top:10px;"></div>
+    </div>
+    <div id="mgmt-clients" style="display:flex; flex-direction:column; gap:12px;"></div>
+  </div>
   <div id="dash-multi-bar" style="display:none; background:#0d1117; padding:8px 16px; border-top:1px solid #21262d; flex-shrink:0; align-items:center; gap:12px;">
     <span style="color:#ccc; font-size:14px;" id="dash-multi-count">已选 0 台</span>
     <button id="dash-multi-open" onclick="openMultiTerminal()" disabled style="background:#4a9eff; color:#fff; border:none; padding:8px 18px; border-radius:6px; cursor:pointer; font-size:13px;">打开多屏</button>
@@ -431,15 +636,30 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
   <button id="float-back" onclick="closeTerminal()">&larr; Back</button>
   <button id="float-upload" onclick="onUploadClickFor(currentAgentId)" title="上传文件到终端当前目录">📤</button>
   <button id="float-download" onclick="openFileBrowserFor(currentAgentId)" title="从终端当前目录下载文件">📥</button>
+  <button id="float-toggle-view" onclick="toggleTermView()">结构</button>
   <div id="term-overlay"></div>
   <div id="term-container"></div>
+  <div id="structured-view">
+    <div id="struct-transcript"></div>
+    <div id="struct-actionbar"></div>
+    <div id="struct-input-row">
+      <input id="struct-input" type="text" enterkeyhint="send" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="输入命令…">
+      <button id="struct-send" onclick="structSendInput()">发送</button>
+    </div>
+    <div id="struct-quickkeys">
+      <button onclick="structKey('ctrlc')">^C</button>
+      <button onclick="structKey('esc')">Esc</button>
+      <button onclick="structKey('tab')">Tab</button>
+      <button onclick="structKey('up')">↑</button>
+      <button onclick="structKey('down')">↓</button>
+      <button onclick="structKey('enter')">⏎</button>
+    </div>
+  </div>
   <div id="mobile-toolbar">
     <div id="mobile-input-area">
-      <textarea id="mobile-text-input" rows="1" wrap="soft" enterkeyhint="send" placeholder="输入或长按粘贴..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
-      <div class="mobile-input-btns">
-        <button onclick="sendMobileInput(true)" style="background:#4a9eff; color:#fff;">发送↵</button>
-        <button onclick="sendMobileInput(false)" style="background:#2a4a6e; color:#fff;">发送</button>
-        <button onclick="closeMobileInput()" style="flex:0.5; background:#333; color:#aaa;">✕</button>
+      <div id="mobile-input-wrap">
+        <textarea id="mobile-text-input" rows="1" wrap="soft" enterkeyhint="send" placeholder="点这里打字,回车发送…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        <button id="mobile-send-btn" onclick="mobileSendEnter()" title="发送回车">⏎</button>
       </div>
     </div>
     <div class="tb-row">
@@ -462,8 +682,12 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
       <button onclick="send('\x1bOH')">Home</button>
       <button onclick="send('\x1bOF')">End</button>
       <button onclick="send('\x7f')">⌫</button>
-      <button onclick="send('\r')">↵</button>
-      <button onclick="toggleMobileInput()" id="btn-input">输入</button>
+      <button onclick="focusMobileInput()" id="btn-input">键盘</button>
+    </div>
+    <div class="tb-row">
+      <button onclick="scrollTermPages(-1)" title="向上翻一页看历史">⇞ 上翻</button>
+      <button onclick="scrollTermPages(1)" title="向下翻一页">⇟ 下翻</button>
+      <button onclick="scrollTermToBottom()" title="回到最新输出">⤓ 最新</button>
     </div>
   </div>
 
@@ -768,7 +992,7 @@ function showView(name) {
 // ========== Auth ==========
 
 function doLogin() {
-  const user = document.getElementById('username-input').value.trim() || 'user';
+  const user = document.getElementById('username-input').value.trim() || 'zzb';
   const pw = document.getElementById('password-input').value;
   if (!pw) return;
   localStorage.setItem('swt-user', user);
@@ -777,7 +1001,7 @@ function doLogin() {
 }
 
 // Prefill username from saved value
-document.getElementById('username-input').value = localStorage.getItem('swt-user') || 'user';
+document.getElementById('username-input').value = localStorage.getItem('swt-user') || 'zzb';
 
 document.getElementById('password-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') doLogin();
@@ -802,6 +1026,8 @@ function connect(username, password) {
       hideNetworkOverlay();
 
       lastAgents = msg.agents || [];
+      syncAttentionFromAgents(lastAgents);
+      supervisorConfig = msg.supervisorConfig || {};
 
       const inTerm = views.term.style.display !== 'none';
       const inMulti = views.multi.style.display !== 'none';
@@ -809,13 +1035,10 @@ function connect(username, password) {
       if (wasReconnecting && inTerm && currentAgentId) {
         // Resume single terminal: re-subscribe without scrollback replay.
         // Terminal content stays as-is; only new live output is forwarded.
-        // Send resize AFTER connect registers the agentId — the server drops
-        // resize messages for un-subscribed agents, so a pre-connect resize
-        // would never reach the PTY.
-        ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, resume: true }));
         if (term && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows, agentId: currentAgentId }));
+          ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: term.cols, rows: term.rows }));
         }
+        ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, resume: true }));
       } else if (wasReconnecting && inMulti) {
         // Resume multi terminal: re-subscribe previously opened agents without replay.
         const ids = Object.keys(multiTerms);
@@ -848,7 +1071,9 @@ function connect(username, password) {
       }
     } else if (msg.type === 'agents') {
       lastAgents = msg.agents || [];
+      syncAttentionFromAgents(lastAgents);
       renderAgents(lastAgents);
+      if (currentMode === 'mgmt') { renderMgmtClients(); refreshAnalyzerOptions(); }
     } else if (msg.type === 'data') {
       // Single terminal mode
       if (term && msg.agentId === currentAgentId) {
@@ -857,6 +1082,10 @@ function connect(username, password) {
       // Multi terminal mode
       if (multiTerms[msg.agentId]) {
         multiTerms[msg.agentId].term.write(multiTerms[msg.agentId].filter(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
+      }
+      // Mobile structured view (also feeds when in structured mode)
+      if (msg.agentId === currentAgentId) {
+        feedStructured(msg.payload, msg.agentId);
       }
     } else if (msg.type === 'scrollback_info') {
       // Auto-load all remaining scrollback history
@@ -872,6 +1101,59 @@ function connect(username, password) {
       // All history written, user scrolls freely
     } else if (typeof msg.type === 'string' && msg.type.startsWith('file_')) {
       handleFileMsg(msg);
+    } else if (msg.type === 'claude_state') {
+      // Update single agent's claudeState in cache + re-render.
+      // Server only sends this on an actual kind/prompt change, so this is the
+      // authoritative transition point for the attention pulse + notification.
+      if (lastAgents && msg.agentId) {
+        const a = lastAgents.find(x => x.id === msg.agentId);
+        if (a) {
+          a.claudeState = msg.state;
+          setAgentAttention(a.id, a.name, a.claudeState);
+          updateTitleBadge();
+          if (currentMode === 'card') renderAgents(lastAgents);
+          if (currentMode === 'mgmt') renderMgmtClients();
+        }
+      }
+    } else if (msg.type === 'supervisor_event') {
+      lastSupervisorEvent = msg;
+      if (currentMode === 'mgmt') renderMgmtSummary();
+      startTitleFlash(supervisorFlashText(msg.event));
+    } else if (msg.type === 'supervisor_config') {
+      // Broadcast to all browsers whenever anyone saves settings, so every
+      // open management panel (including the one that just saved) stays in sync.
+      supervisorConfig = msg.config || {};
+      if (currentMode === 'mgmt') renderSupervisorSettings();
+    } else if (msg.type === 'supervisor_config_result') {
+      const statusEl = document.getElementById('sup-save-status');
+      if (msg.ok) {
+        if (statusEl) { statusEl.textContent = '已保存'; setTimeout(() => { if (statusEl.textContent === '已保存') statusEl.textContent = ''; }, 2500); }
+        flashToast('督工配置已保存');
+      } else {
+        if (statusEl) statusEl.textContent = '保存失败';
+        flashToast('保存失败: ' + (msg.error || 'unknown'), 'error');
+      }
+    } else if (msg.type === 'spawn_node_result') {
+      if (pendingSpawnReqs.has(msg.reqId)) pendingSpawnReqs.delete(msg.reqId);
+      const okMsg = msg.ok
+        ? `✓ 新增节点成功: ${msg.screenName} (PID ${msg.childPid||'?'})`
+        : `✗ 新增节点失败: ${msg.error || 'unknown'}`;
+      showFloatingNotice(okMsg);
+      // Refresh supervisor view (agent will register shortly)
+      setTimeout(() => { if (currentMode === 'mgmt') renderMgmtClients(); }, 1500);
+    } else if (msg.type === 'kill_node_result') {
+      // Success isn't acked further — the agent disappearing from the list
+      // (via its own disconnect, broadcast automatically) is the real
+      // confirmation. Only surface the failure case.
+      if (!msg.ok) flashToast('操作失败: ' + (msg.error || 'unknown'), 'error');
+    } else if (msg.type === 'list_screens_result') {
+      // Update node count for this client
+      if (lastAgents && msg.clientId) {
+        for (const a of lastAgents) {
+          if (a && (a.attrs && a.attrs.clientId) === msg.clientId) a.reportedNodeCount = (msg.screens||[]).length;
+        }
+        if (currentMode === 'mgmt') renderMgmtClients();
+      }
     }
   };
 
@@ -972,7 +1254,7 @@ function connect(username, password) {
       activeDownload = null;
     }
     const pw = localStorage.getItem('swt-pw');
-    const user = localStorage.getItem('swt-user') || 'user';
+    const user = localStorage.getItem('swt-user') || 'zzb';
     if (wasAuthenticated && pw) {
       // Reconnect mode: keep current view + terminal content intact, show floating notice.
       isReconnecting = true;
@@ -1014,7 +1296,7 @@ function doLogout() {
   showView('login');
 }
 
-const savedUser = localStorage.getItem('swt-user') || 'user';
+const savedUser = localStorage.getItem('swt-user') || 'zzb';
 const savedPw = localStorage.getItem('swt-pw');
 if (savedPw) { connect(savedUser, savedPw); }
 
@@ -1057,10 +1339,14 @@ function renderAgents(agents) {
     const dotTitle = a.needsInput ? '等待输入' : '运行中';
     const statusHtml = a.lastLines ? `<div class="status-row"><div class="status-dot ${dotClass}" title="${dotTitle}"></div><div class="status-text">${escapeHtml(a.lastLines.split('\n').pop())}</div></div>` : '';
 
+    // Claude state badge
+    const cs = a.claudeState;
+    const claudeBadgeHtml = (cs && cs.running) ? `<div><span class="claude-badge kind-${cs.kind}" title="${escapeHtml(cs.prompt||'')}">claude:${cs.kind}${cs.prompt ? ' — ' + escapeHtml(cs.prompt.substring(0,50)) : ''}</span></div>` : '';
+
     // Multi-select mode adds checkbox
     const isSelected = selectedAgents.has(a.id);
     const checkboxHtml = currentMode === 'multi' ? `<input type="checkbox" class="card-checkbox" ${isSelected ? 'checked' : ''} onclick="event.stopPropagation(); toggleAgentSelect('${a.id}')">` : '';
-    const cardClass = `agent-card${currentMode === 'multi' ? ' selectable' : ''}${isSelected ? ' selected' : ''}`;
+    const cardClass = `agent-card${currentMode === 'multi' ? ' selectable' : ''}${isSelected ? ' selected' : ''}${attentionAgents.has(a.id) ? ' attention' : ''}`;
     const clickHandler = currentMode === 'multi' ? `toggleAgentSelect('${a.id}')` : `openTerminal('${a.id}','${a.name.replace(/'/g,"\\'")}')`;
 
     return `<div class="${cardClass}" onclick="${clickHandler}">
@@ -1073,7 +1359,7 @@ function renderAgents(agents) {
         ${loadStr ? `<div class="info-item">Load: <span>${loadStr}</span></div>` : ''}
         ${uptimeStr ? `<div class="info-item">Uptime: <span>${uptimeStr}</span></div>` : ''}
       </div>
-      ${memBar}${diskBar}${gpuHtml}${tagHtml}${statusHtml}
+      ${memBar}${diskBar}${gpuHtml}${tagHtml}${statusHtml}${claudeBadgeHtml}
     </div>`;
   }).join('');
 
@@ -1155,12 +1441,35 @@ function openTerminal(agentId, agentName) {
   container.innerHTML = '';
   termFilter = createAltScreenFilter();
 
+  // Reset structured-view state for this agent
+  structBuf = '';
+  structAgentId = agentId;
+  structUserScrolled = false;
+
   const mobile = window.innerWidth < 600;
+  // Default to the real terminal (xterm) even on mobile — 'structured' is a flattened,
+  // ANSI-stripped text log with no cursor/redraw model, so it can't actually render a
+  // full-screen TUI (vim, htop, Claude's interactive panels, ...); it only reads well
+  // for Claude's plain chat-style output. Keep it reachable via the toggle for that case.
+  const toggle = document.getElementById('float-toggle-view');
+  if (mobile) {
+    toggle.style.display = 'block';
+    setTermViewMode('xterm');
+  } else {
+    toggle.style.display = 'none';
+    setTermViewMode('xterm');
+  }
   term = new Terminal({
     theme: { background: '#0f0f23' },
     fontSize: mobile ? 11 : 14,
     cursorBlink: true,
-    scrollback: 200000
+    scrollback: 200000,
+    // Mirrors Terminal.app/iTerm2: holding Option while clicking/dragging forces
+    // a normal text selection even when the program inside (vim, screen, Claude
+    // Code) has grabbed the mouse for its own reporting — without this, an
+    // Option-drag on the terminal falls through to whatever that program does
+    // with a click instead of just selecting text.
+    macOptionClickForcesSelection: true
   });
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
@@ -1180,49 +1489,54 @@ function openTerminal(agentId, agentName) {
 
   // ResizeObserver: debounce BOTH fit() and the resize message.
   // Mobile keyboard show/hide fires many resize events in quick succession —
-  // fitting each one makes xterm visibly jump/reflow. Debounce smooths it.
-  let resizeTimer = null;
+  // fit() is given a SHORT debounce on mobile so the terminal reflows promptly
+  // when the soft keyboard appears (longer on desktop where it just smooths
+  // window drags). The resize-*send* is debounced longer in both cases.
+  let resizeSendTimer = null;
+  let resizeFitTimer = null;
   const resizeObserver = new ResizeObserver(() => {
     if (!fitAddon || !term) return;
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      fitAddon.fit();
-      // Send the post-fit size. agentId is required — the server drops resize
-      // messages without it (browsers.agentIds membership check), which used to
-      // leave the PTY at the stale size and desync TUI apps like claude.
+    // Skip while the xterm container is hidden (structured-view active) — fitting
+    // a 0×0 box would produce a degenerate size and send a bogus resize to the PTY.
+    if (termViewMode === 'structured') return;
+    if (container.clientWidth === 0 || container.clientHeight === 0) return;
+    clearTimeout(resizeFitTimer);
+    resizeFitTimer = setTimeout(() => { fitAddon.fit(); }, mobile ? 60 : 200);
+    clearTimeout(resizeSendTimer);
+    resizeSendTimer = setTimeout(() => {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows, agentId: currentAgentId }));
+        ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: term.cols, rows: term.rows }));
       }
-    }, 200);
+    }, mobile ? 200 : 500);
   });
   resizeObserver.observe(container);
   window._termResizeObs = resizeObserver;
 
-  // Initial fit + connect after layout settles
-  // Send resize BEFORE connect so server scrollback is sent at the right terminal size
+  // Mobile: tap anywhere on the terminal → focus the live input bar → keyboard pops.
+  if (mobile) {
+    container.addEventListener('click', () => {
+      const mi = document.getElementById('mobile-text-input');
+      if (mi) mi.focus({ preventScroll: true });
+    });
+  }
+
+  // Initial fit + connect after layout settles.
+  // connect MUST come before resize: the server only forwards a resize for an
+  // agent the browser has already subscribed to via connect (binfo.agentIds) —
+  // sending resize first meant it was silently dropped, so the PTY never
+  // actually matched the browser's real viewport size (stayed at whatever
+  // size it registered with, e.g. 200x50), which is what caused misaligned
+  // layout/garbled wide-character output for anything that queries terminal
+  // size (a TUI banner, a fancy prompt, etc.).
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       fitAddon.fit();
-      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-      setTimeout(() => {
-        ws.send(JSON.stringify({ type: 'connect', agentId }));
-        // The server drops resize messages that arrive before connect registers
-        // the agentId (browsers.agentIds is still empty), so the pre-connect
-        // resize above never reaches the PTY — the app inside screen then draws
-        // at the session's stale size while xterm renders at the real one
-        // (stair-stepped redraws).  Re-send after connect so the PTY resize
-        // actually lands.
-        setTimeout(() => {
-          fitAddon.fit();
-          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows, agentId }));
-        }, 50);
-      }, 100);
+      ws.send(JSON.stringify({ type: 'connect', agentId }));
+      ws.send(JSON.stringify({ type: 'resize', agentId, cols: term.cols, rows: term.rows }));
     });
   });
 
   term.onData(data => {
-    data = stripTerminalColorReplies(data);
-    if (!data) return;
     if (!ws || ws.readyState !== WebSocket.OPEN || !currentAgentId) return;
     const bytes = new TextEncoder().encode(data);
     let bin = '';
@@ -1233,13 +1547,7 @@ function openTerminal(agentId, agentName) {
 
 function closeTerminal() {
   if (window._termResizeObs) { window._termResizeObs.disconnect(); window._termResizeObs = null; }
-  if (term) {
-    // Leave application cursor keys mode explicitly (dispose does not reset
-    // the page-global xterm state we forced on in openTerminal).
-    term.write('\x1b[?1l');
-    term.dispose();
-    term = null;
-  }
+  if (term) { term.dispose(); term = null; }
   currentAgentId = null;
   closeMobileInput();
   closeFileBrowser();
@@ -1493,20 +1801,165 @@ function hideFileProgress() {
 let toastTimer = null;
 function flashToast(msg, kind) {
   const el = document.getElementById('toast');
-  el.classList.remove('error');
-  if (kind === 'error') el.classList.add('error');
+  el.classList.remove('error', 'warn');
+  if (kind === 'error' || kind === 'warn') el.classList.add(kind);
   el.textContent = msg;
   el.classList.add('show');
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
 }
 
+// ========== Attention: pulse + notify when a Claude session needs input ==========
+// "Needs input" is a deterministic fact from claudeState.kind — no LLM involved.
+// Card/row pulsing (CSS) always reflects current membership in attentionAgents;
+// the one-shot alert (desktop notification + toast) fires only on a genuinely
+// NEW attention state per agent, tracked via notifiedKinds, so the periodic
+// 10s `agents` snapshot re-broadcast doesn't re-alert for a still-pending prompt.
+const ATTENTION_KINDS = new Set(['yesno', 'bash', 'option']);
+const attentionAgents = new Set();     // agentIds currently needing attention
+const notifiedKinds = new Map();       // agentId -> kind already alerted for
+const BASE_TITLE = document.title;
+
+function isAttentionState(cs) {
+  return !!(cs && cs.running && ATTENTION_KINDS.has(cs.kind));
+}
+
+function setAgentAttention(agentId, agentName, cs) {
+  if (isAttentionState(cs)) {
+    attentionAgents.add(agentId);
+    if (notifiedKinds.get(agentId) !== cs.kind) {
+      notifiedKinds.set(agentId, cs.kind);
+      notifyAttention(agentId, agentName, cs);
+    }
+  } else {
+    attentionAgents.delete(agentId);
+    notifiedKinds.delete(agentId);
+  }
+}
+
+// Re-derive attention state for the whole fleet from a full agents snapshot
+// (auth_ok / periodic broadcast) — also drops agents that disconnected.
+function syncAttentionFromAgents(agents) {
+  const currentIds = new Set(agents.map(a => a.id));
+  for (const id of Array.from(attentionAgents)) {
+    if (!currentIds.has(id)) { attentionAgents.delete(id); notifiedKinds.delete(id); }
+  }
+  for (const a of agents) setAgentAttention(a.id, a.name, a.claudeState);
+  updateTitleBadge();
+}
+
+function currentBaseTitle() {
+  return attentionAgents.size > 0 ? `(${attentionAgents.size}) ${BASE_TITLE}` : BASE_TITLE;
+}
+
+function updateTitleBadge() {
+  if (titleFlashTimer) return; // a flash is owning document.title until the tab is seen
+  document.title = currentBaseTitle();
+}
+
+// ========== Tab-title flashing: catches the eye when a new attention or
+// supervisor message arrives while this tab isn't the one being looked at.
+// Alternates document.title between a short description and the normal
+// (badge-aware) title. Keeps flashing indefinitely while the tab is hidden;
+// if it's already visible, flashes briefly (the toast already covers that
+// case) then settles back down on its own. Either way it stops the moment
+// the user actually looks at the tab.
+let titleFlashTimer = null;
+let titleFlashBurstTimer = null;
+let titleFlashOn = false;
+
+function startTitleFlash(text) {
+  if (!text) return;
+  if (titleFlashBurstTimer) { clearTimeout(titleFlashBurstTimer); titleFlashBurstTimer = null; }
+  if (!titleFlashTimer) {
+    titleFlashOn = false;
+    titleFlashTimer = setInterval(() => {
+      titleFlashOn = !titleFlashOn;
+      document.title = titleFlashOn ? text : currentBaseTitle();
+    }, 1000);
+  }
+  titleFlashText = text;
+  if (!document.hidden) titleFlashBurstTimer = setTimeout(stopTitleFlash, 5000);
+}
+let titleFlashText = '';
+
+function stopTitleFlash() {
+  if (titleFlashTimer) { clearInterval(titleFlashTimer); titleFlashTimer = null; }
+  if (titleFlashBurstTimer) { clearTimeout(titleFlashBurstTimer); titleFlashBurstTimer = null; }
+  titleFlashOn = false;
+  document.title = currentBaseTitle();
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden) stopTitleFlash(); });
+window.addEventListener('focus', stopTitleFlash);
+
+const ATTENTION_LABELS = { yesno: '需要确认', bash: '请求执行权限', option: '需要选择' };
+
+function notifyAttention(agentId, agentName, cs) {
+  const label = ATTENTION_LABELS[cs.kind] || '需要输入';
+  const body = (cs.prompt || '').substring(0, 120);
+  try {
+    if (window.Notification && Notification.permission === 'granted') {
+      const n = new Notification(`${agentName} ${label}`, { body, tag: 'attn-' + agentId });
+      n.onclick = () => {
+        window.focus();
+        if (currentMode !== 'multi') openTerminal(agentId, agentName);
+        n.close();
+      };
+    }
+  } catch { /* Notification not available/blocked — toast still fires below */ }
+  flashToast(`${agentName}: ${label}${body ? ' — ' + body : ''}`, 'warn');
+  // claude_state is a structured {kind, prompt} fact (not free-form text), so
+  // "agentName label" is always a clean, short, reliable description — safe
+  // to put straight into the tab title.
+  startTitleFlash(`🔔 ${agentName} ${label}`);
+}
+
+// Supervisor events range from fixed-template alerts (idle_alert, analyzer_*)
+// to free-form LLM prose (llm_summary). Only build a flash description for
+// the ones with a predictable, short shape — anything else (raw multi-line
+// AI summaries, periodic full-fleet summaries, connect/disconnect churn)
+// would make a noisy or overlong tab title, so it's skipped.
+function supervisorFlashText(ev) {
+  if (!ev || !ev.type) return null;
+  const clip = (s, n) => String(s || '').replace(/\s+/g, ' ').trim().substring(0, n);
+  if (ev.type === 'idle_alert') return `⏳ ${clip(ev.message, 40)}`;
+  if (ev.type === 'analyzer_missing' || ev.type === 'analyzer_timeout') return `⚠️ ${clip(ev.message, 40)}`;
+  if (ev.type === 'llm_summary') {
+    const firstLine = clip((ev.summary || '').split('\n')[0], 40);
+    return `🧭 ${firstLine || '督工分析完成'}`;
+  }
+  return null;
+}
+
+function toggleNotifications() {
+  if (!window.Notification) { flashToast('此浏览器不支持桌面通知', 'error'); return; }
+  if (Notification.permission === 'granted') {
+    flashToast('通知已开启');
+    updateNotifToggleBtn();
+    return;
+  }
+  Notification.requestPermission().then(() => {
+    updateNotifToggleBtn();
+    flashToast(Notification.permission === 'granted' ? '通知已开启' : '通知权限被拒绝');
+  }).catch(() => {});
+}
+
+function updateNotifToggleBtn() {
+  const btn = document.getElementById('notif-toggle');
+  if (!btn) return;
+  const granted = window.Notification && Notification.permission === 'granted';
+  btn.classList.toggle('on', !!granted);
+  btn.textContent = granted ? '🔔 已开启' : '🔔 通知';
+}
+updateNotifToggleBtn();
+
 // --- Copy SSH / SCP command for an agent ---
 function copySshCmd(agentId) {
   const a = lastAgents.find(x => x.id === agentId);
   if (!a || !a.sys) { flashToast('无系统信息', 'error'); return; }
   const ip = a.sys.ips && a.sys.ips[0] ? a.sys.ips[0].addr : '';
-  const user = a.sys.username || 'user';
+  const user = a.sys.username || 'zzb';
   if (!ip) { flashToast('无 IP 信息', 'error'); return; }
   const cmd = `ssh ${user}@${ip}`;
   const done = () => flashToast('已复制: ' + cmd);
@@ -1540,7 +1993,7 @@ function restartScreen(agentId) {
 
 // ========== Mode Switch ==========
 
-document.querySelectorAll('.mode-switch button[data-mode]').forEach(btn => {
+document.querySelectorAll('#view-mode-switch button').forEach(btn => {
   btn.addEventListener('click', () => {
     const mode = btn.dataset.mode;
     setMode(mode);
@@ -1549,17 +2002,257 @@ document.querySelectorAll('.mode-switch button[data-mode]').forEach(btn => {
 
 function setMode(mode) {
   currentMode = mode;
-  document.querySelectorAll('.mode-switch button[data-mode]').forEach(b => {
+  document.querySelectorAll('#view-mode-switch button').forEach(b => {
     b.classList.toggle('active', b.dataset.mode === mode);
   });
   const multiBar = document.getElementById('dash-multi-bar');
+  const mgmtPanel = document.getElementById('mgmt-panel');
+  const agentList = document.getElementById('agent-list');
   if (mode === 'multi') {
     selectedAgents.clear();
     multiBar.style.display = 'flex';
   } else {
     multiBar.style.display = 'none';
   }
+  if (mode === 'mgmt') {
+    agentList.style.display = 'none';
+    mgmtPanel.style.display = 'flex';
+    renderMgmtPanel();
+  } else {
+    agentList.style.display = 'flex';
+    mgmtPanel.style.display = 'none';
+  }
   renderAgents(lastAgents);
+}
+
+// ========== Management Panel ==========
+
+let lastSupervisorEvent = null;     // most recent supervisor_event payload
+let lastSpawnResults = [];          // recent spawn_node_result messages
+let supervisorConfig = null;        // current config.server.supervisor, from auth_ok / supervisor_config
+
+function renderMgmtPanel() {
+  renderMgmtClients();
+  renderMgmtSummary();
+  renderSupervisorSettings();
+}
+
+// --- Supervisor settings form ---
+// Analyzer dropdown lists every agent name currently known, plus the
+// configured value even if that agent isn't connected right now (e.g. editing
+// settings before starting the analyzer node).
+function buildAnalyzerOptions(selectedValue) {
+  const names = new Set(lastAgents.map(a => a.name));
+  if (selectedValue) names.add(selectedValue);
+  return '<option value="">（不使用分析员）</option>' +
+    Array.from(names).sort().map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+}
+
+function renderSupervisorSettings() {
+  const cfg = supervisorConfig || {};
+  const enabledEl = document.getElementById('sup-enabled');
+  const analyzerEl = document.getElementById('sup-analyzer');
+  if (!enabledEl || !analyzerEl) return;   // panel not in DOM yet
+
+  enabledEl.checked = !!cfg.enabled;
+  document.getElementById('sup-summaryInterval').value = cfg.summaryInterval || 60;
+  document.getElementById('sup-idleTimeout').value = cfg.idleTimeout || 600;
+  document.getElementById('sup-analyzerInterval').value = cfg.analyzerInterval || 300;
+  document.getElementById('sup-analyzerTimeout').value = cfg.analyzerTimeout || 120;
+  document.getElementById('sup-webhook').value = cfg.webhook || '';
+
+  const current = cfg.analyzerAgentName || '';
+  analyzerEl.innerHTML = buildAnalyzerOptions(current);
+  analyzerEl.value = current;
+}
+
+// Refresh just the dropdown's option list (agents connecting/disconnecting) —
+// called from the periodic 10s agents broadcast, where re-running the full
+// renderSupervisorSettings() would stomp on an in-progress, unsaved edit of
+// the rest of the form every 10 seconds.
+function refreshAnalyzerOptions() {
+  const analyzerEl = document.getElementById('sup-analyzer');
+  if (!analyzerEl) return;
+  const selected = analyzerEl.value;
+  analyzerEl.innerHTML = buildAnalyzerOptions(selected);
+  analyzerEl.value = selected;
+}
+
+function saveSupervisorConfig() {
+  const val = (id) => document.getElementById(id).value;
+  const payload = {
+    type: 'update_supervisor_config',
+    enabled: document.getElementById('sup-enabled').checked,
+    analyzerAgentName: val('sup-analyzer'),
+    summaryInterval: Number(val('sup-summaryInterval')),
+    idleTimeout: Number(val('sup-idleTimeout')),
+    analyzerInterval: Number(val('sup-analyzerInterval')),
+    analyzerTimeout: Number(val('sup-analyzerTimeout')),
+    webhook: val('sup-webhook').trim()
+  };
+  const statusEl = document.getElementById('sup-save-status');
+  if (statusEl) statusEl.textContent = '保存中…';
+  ws.send(JSON.stringify(payload));
+}
+
+function renderMgmtSummary() {
+  const txt = document.getElementById('mgmt-summary-text');
+  const timeEl = document.getElementById('mgmt-summary-time');
+  const suggEl = document.getElementById('mgmt-suggestions');
+  if (!lastSupervisorEvent) {
+    txt.textContent = '（等待督工事件…）';
+    timeEl.textContent = '';
+    suggEl.innerHTML = '';
+    return;
+  }
+  const ev = lastSupervisorEvent.event || lastSupervisorEvent;
+  if (ev.type === 'llm_summary') {
+    txt.textContent = ev.summary || '(no summary)';
+    timeEl.textContent = ' · LLM · ' + new Date(lastSupervisorEvent.time || Date.now()).toLocaleTimeString();
+    if (ev.suggestions && ev.suggestions.length) {
+      suggEl.innerHTML = '<div style="color:#8b949e; font-size:12px; margin-bottom:4px;">建议（只读，需手动确认）：</div>' +
+        ev.suggestions.map(s => `
+          <div style="display:flex; gap:6px; align-items:center; padding:6px; background:#161b22; border-radius:4px; margin-bottom:4px;">
+            <span style="color:#c9d1d9; font-size:12px; flex:1;"><b>${escapeHtml(s.agentName||s.agentId||'')}</b>: <code>${escapeHtml(s.action||'')}</code> <span style="color:#6e7681;">(${escapeHtml(s.reason||'')})</span></span>
+            <button onclick="applySuggestion('${(s.agentId||'').replace(/'/g,"\\'")}', '${escapeHtml((s.action||'').replace(/'/g,"\\'"))}')" style="background:#238636; color:#fff; border:none; padding:4px 8px; border-radius:3px; cursor:pointer; font-size:11px;">注入</button>
+          </div>`).join('');
+    } else {
+      suggEl.innerHTML = '';
+    }
+  } else if (ev.type === 'summary') {
+    txt.textContent = ev.message || '(no message)';
+    timeEl.textContent = ' · ' + new Date(lastSupervisorEvent.time || Date.now()).toLocaleTimeString();
+    suggEl.innerHTML = '';
+  } else {
+    txt.textContent = JSON.stringify(ev, null, 2);
+    timeEl.textContent = ' · ' + ev.type;
+    suggEl.innerHTML = '';
+  }
+}
+
+function renderMgmtClients() {
+  const c = document.getElementById('mgmt-clients');
+  if (!lastAgents || lastAgents.length === 0) {
+    c.innerHTML = '<div style="color:#6e7681;">No agents online</div>';
+    return;
+  }
+  // Group by clientId
+  const byClient = new Map();
+  for (const a of lastAgents) {
+    const cid = (a.attrs && a.attrs.clientId) || a.clientId || 'unknown';
+    if (!byClient.has(cid)) byClient.set(cid, []);
+    byClient.get(cid).push(a);
+  }
+  c.innerHTML = Array.from(byClient.entries()).map(([cid, agents]) => {
+    const nodeCount = agents[0] && agents[0].reportedNodeCount;
+    const overLimit = agents.length >= 20;
+    return `<div class="mgmt-client">
+      <h4>Client: ${escapeHtml(cid)} · ${agents.length} agent(s)${nodeCount != null ? ' / ' + nodeCount + ' screen(s)' : ''}</h4>
+      <div class="add-node-row">
+        <input type="text" id="spawn-name-${escapeHtml(cid)}" placeholder="新节点 screen 名" maxlength="40">
+        <select id="spawn-cmd-${escapeHtml(cid)}">
+          <option value="bash">bash</option>
+          <option value="claude">claude</option>
+          <option value="sh">sh</option>
+        </select>
+        <button onclick="spawnNodeOnClient('${escapeHtml(cid)}')" ${overLimit?'disabled':''}>
+          ${overLimit ? '已达 20 上限' : '+ 新增节点'}
+        </button>
+      </div>
+      <div class="mgmt-agent-list">
+        ${agents.map(a => {
+          const cs = a.claudeState;
+          const csStr = (cs && cs.running) ? ` · claude:${cs.kind}${cs.prompt ? ' "' + escapeHtml(cs.prompt.substring(0,40)) + '"' : ''}` : '';
+          const rowClass = `mgmt-agent-row${attentionAgents.has(a.id) ? ' attention' : ''}`;
+          const safeName = a.name.replace(/'/g, "\\'");
+          return `<div class="${rowClass}">
+            <span class="name">${escapeHtml(a.name)}</span>
+            <span class="screen">[${escapeHtml(a.screen||'')}]</span>
+            <span class="state">${a.needsInput ? '⏳等待' : '▶运行'}${csStr}</span>
+            <button class="kill-btn" onclick="killNode('${a.id}','${safeName}',false)" title="断开监控，保留任务 screen">停止监控</button>
+            <button class="kill-btn danger" onclick="killNode('${a.id}','${safeName}',true)" title="断开监控并终止任务 screen">终止节点</button>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function spawnNodeOnClient(clientId) {
+  const nameInput = document.getElementById('spawn-name-' + clientId);
+  const cmdSelect = document.getElementById('spawn-cmd-' + clientId);
+  if (!nameInput || !cmdSelect) return;
+  const screenName = nameInput.value.trim();
+  const cmd = cmdSelect.value;
+  if (!screenName) { alert('请输入 screen 名'); return; }
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(screenName)) { alert('screen 名仅允许字母/数字/_/-，最长40'); return; }
+  const reqId = 'spawn-' + Date.now().toString(36);
+  pendingSpawnReqs.set(reqId, { clientId, screenName, cmd, ts: Date.now() });
+  ws.send(JSON.stringify({
+    type: 'spawn_node',
+    reqId,
+    target: { clientId },
+    screenName,
+    nodeName: screenName, // same as screen for simplicity
+    cmd
+  }));
+  showFloatingNotice(`已请求在 ${clientId} 上新增节点 ${screenName}`);
+}
+
+const pendingSpawnReqs = new Map();
+
+// Stop a node's monitoring agent, optionally also killing the task screen it
+// was attached to. killTask=false leaves the underlying screen session (and
+// whatever's running inside it) completely untouched — only the SWT agent
+// disconnects; killTask=true tears both down.
+function killNode(agentId, agentName, killTask) {
+  const msg = killTask
+    ? `确定要终止节点 "${agentName}" 吗？\n\n这会同时结束它监控的 screen 任务会话，任务本身也会被杀掉，无法撤销。`
+    : `确定要停止监控 "${agentName}" 吗？\n\n只会断开 SWT 的监控 agent，它底下的 screen 任务会话不受影响，仍会继续运行。`;
+  if (!confirm(msg)) return;
+  const reqId = 'kill-' + Date.now().toString(36);
+  ws.send(JSON.stringify({ type: 'kill_node', reqId, agentId, mode: killTask ? 'agent_and_task' : 'agent_only' }));
+  showFloatingNotice(`已请求${killTask ? '终止' : '停止监控'} ${agentName}`);
+}
+
+function applySuggestion(agentId, action) {
+  if (!agentId || !action) return;
+  if (!confirm(`将注入只读命令到 ${agentId}:\n\n${action}\n\n确认？`)) return;
+  // Use existing /api/action endpoint via fetch
+  fetch('/api/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agentId, input: action + '\n' })
+  }).then(r => r.json()).then(r => {
+    if (r.ok) showFloatingNotice('已注入: ' + action);
+    else alert('注入失败: ' + (r.error || 'unknown'));
+  }).catch(e => alert('注入错误: ' + e.message));
+}
+
+function requestLlmSummary() {
+  // Manually trigger via supervisor HTTP endpoint - we just refresh view;
+  // server's supervisor will emit a supervisor_event on its next interval.
+  fetch('/api/supervisor').then(r => r.json()).then(s => {
+    if (s && s.message) {
+      lastSupervisorEvent = { event: { type: 'summary', message: s.message }, time: new Date().toISOString() };
+      renderMgmtSummary();
+      showFloatingNotice('已刷新督工摘要');
+    }
+  }).catch(e => alert('刷新失败: ' + e.message));
+}
+
+function showFloatingNotice(text) {
+  const el = document.getElementById('float-notice') || (() => {
+    const d = document.createElement('div');
+    d.id = 'float-notice';
+    d.style.cssText = 'position:fixed; bottom:20px; right:20px; background:rgba(40,80,40,0.95); color:#fff; padding:10px 16px; border-radius:6px; z-index:300; font-size:12px; max-width:300px;';
+    document.body.appendChild(d);
+    return d;
+  })();
+  el.textContent = text;
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.display = 'none'; }, 3000);
 }
 
 // ========== Multi Select ==========
@@ -1623,7 +2316,8 @@ function openMultiTerminal() {
       theme: { background: '#0f0f23' },
       fontSize: 12,
       cursorBlink: true,
-      scrollback: 50000
+      scrollback: 50000,
+      macOptionClickForcesSelection: true
     });
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
@@ -1636,8 +2330,6 @@ function openMultiTerminal() {
 
     // Handle input
     term.onData(data => {
-      data = stripTerminalColorReplies(data);
-      if (!data) return;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const bytes = new TextEncoder().encode(data);
       let bin = '';
@@ -1682,6 +2374,201 @@ function closeMultiView() {
   renderAgents(lastAgents);
 }
 
+// ========== Mobile structured view ==========
+// Alternative to raw xterm on phones: render the terminal stream as a readable
+// transcript + contextual action buttons (yes/no/options), driven by a JS port
+// of claude-detector. Input goes through a normal <input> so IMEs work.
+
+let termViewMode = 'xterm';        // 'xterm' | 'structured'
+let structBuf = '';                // rolling ANSI-stripped transcript text
+let structAgentId = null;
+const STRUCT_BUF_MAX = 30000;
+let structRenderTimer = null;
+let structUserScrolled = false;
+
+// --- ANSI stripper + detector (browser port of claude-detector.js) ---
+function structStripAnsi(s) {
+  return s ? s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+              .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+              .replace(/\x1b[@-Z\\-_]/g, '') : '';
+}
+const STRUCT_RE = {
+  banner: [/Welcome\s+to\s+Claude/i, /claude\.ai\/code/i, /Claude Code/i, /^\s*✻/m, /\bclaude[>@:]\s*$/im, /Allow\s+(Claude|me)\s+to\b/i, /\bClaude\s+is\s+(thinking|working)\b/i],
+  spinner: [/^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒*+x○●]\s+/m, /\b(thinking|cogitating|pondering|generating|analyzing|working|processing)\b[\s.]*$/i],
+  yesno: [/\b(Do\s+you|Would\s+you|Are\s+you|Shall\s+I|Should\s+I|Try|Allow|Proceed|Continue)\b[^\n?]*\?/i, /❯\s*(Yes|No)\b/i, /\(\s*[Yy]\s*\/\s*[Nn]\s*\)/, /\btype\s+(yes|y|no|n)\s+to\s+/i],
+  bash: [/\bAllow\s+(Claude|me)\s+to\s+(run|execute|use)\b/i, /\b(?:Run|Execute)\s+(?:bash|shell|command)\b[^\n]*\?\s*$/i, /\bpermission\s+to\s+(run|execute|edit|write|delete)\b/i],
+  option: [/[\n]\s*[❯>]?\s*\d+\.\s+\S[^\n]*([\n]\s*\d+\.\s+\S[^\n]*)+\s*$/],
+  input: [/^\s*>\s*$/m, /\bclaude[>@:]\s*$/im]
+};
+function detectClaudeStateJS(raw) {
+  const text = structStripAnsi(raw || '');
+  const lines = text.split('\n');
+  const tail = lines.slice(-60).join('\n');
+  let last = '';
+  for (let i = lines.length - 1; i >= 0; i--) { if (lines[i].trim()) { last = lines[i].trim(); break; } }
+  const r = { running: false, kind: 'none', prompt: '', options: [], lastLine: last.slice(0, 300) };
+  if (!text.trim()) return r;
+  const isClaude = STRUCT_RE.banner.some(re => re.test(text)) || STRUCT_RE.banner.some(re => re.test(tail));
+  if (!isClaude) return r;
+  r.running = true;
+  if (STRUCT_RE.spinner.some(re => re.test(tail))) { r.kind = 'working'; r.prompt = last.slice(0, 200); return r; }
+  if (STRUCT_RE.bash.some(re => re.test(tail))) { r.kind = 'bash'; r.prompt = last; return r; }
+  if (STRUCT_RE.option.some(re => re.test(tail))) {
+    const opts = [];
+    tail.split('\n').forEach(l => { const m = l.match(/^\s*[❯>]?\s*(\d+)[\.\)]\s+(.+?)\s*$/); if (m) opts.push({ index: +m[1], label: m[2].trim() }); });
+    if (opts.length >= 2) { r.kind = 'option'; r.options = opts.slice(0, 20); r.prompt = last; return r; }
+  }
+  if (STRUCT_RE.yesno.some(re => re.test(tail))) { r.kind = 'yesno'; r.prompt = last; return r; }
+  if (STRUCT_RE.input.some(re => re.test(tail))) { r.kind = 'input'; r.prompt = last; return r; }
+  r.kind = 'working'; r.prompt = last.slice(0, 200);
+  return r;
+}
+
+// --- Feed incoming data into the structured buffer ---
+function feedStructured(base64Payload, agentId) {
+  if (agentId !== structAgentId) return;
+  let text;
+  try { text = decodeURIComponent(escape(atob(base64Payload))); } catch { return; }
+  text = structStripAnsi(text);
+  // Normalize line ends: \r\n → \n; lone \r (spinner redraws) → \n
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  structBuf += text;
+  if (structBuf.length > STRUCT_BUF_MAX) structBuf = structBuf.slice(-STRUCT_BUF_MAX);
+  if (!structRenderTimer) structRenderTimer = setTimeout(renderStructured, 80);
+}
+
+// --- Render transcript + action bar ---
+function renderStructured() {
+  structRenderTimer = null;
+  const el = document.getElementById('struct-transcript');
+  if (!el) return;
+  // Collapse runs of blank lines + dedupe consecutive identical lines (spinner noise)
+  let lines = structBuf.split('\n');
+  const out = [];
+  let prev = null, blank = 0;
+  for (const l of lines) {
+    if (l.trim() === '') { blank++; continue; }
+    if (blank > 0 && out.length) out.push('');   // one blank line between blocks
+    blank = 0;
+    if (l === prev) continue;                     // dedupe consecutive duplicates
+    prev = l;
+    out.push(l);
+  }
+  const shown = out.slice(-300);
+  // Escape HTML then render
+  el.innerHTML = shown.map(l => '<div class="struct-line">' + escapeHtml(l) + '</div>').join('');
+  // Auto-scroll unless the user scrolled up
+  if (!structUserScrolled) el.scrollTop = el.scrollHeight;
+
+  // Action bar from detector
+  renderStructActionbar();
+}
+
+function renderStructActionbar() {
+  const bar = document.getElementById('struct-actionbar');
+  if (!bar) return;
+  const st = detectClaudeStateJS(structBuf);
+  let html = '';
+  if (st.running) {
+    if (st.kind === 'yesno') {
+      html = `<button class="primary" onclick="structAnswer('yes')">Yes</button>` +
+             `<button class="danger" onclick="structAnswer('no')">No</button>`;
+    } else if (st.kind === 'option' && st.options.length) {
+      html = st.options.map(o =>
+        `<button onclick="structAnswer('opt','${o.index}')">${escapeHtml(String(o.index))}. ${escapeHtml(o.label.slice(0,24))}</button>`
+      ).join('');
+    } else if (st.kind === 'working') {
+      html = `<button disabled style="opacity:0.6">Claude 思考中…</button>`;
+    } else if (st.kind === 'bash') {
+      html = `<button class="primary" onclick="structAnswer('yes')">允许</button>` +
+             `<button class="danger" onclick="structAnswer('no')">拒绝</button>`;
+    }
+  }
+  if (html) { bar.innerHTML = html; bar.style.display = 'flex'; }
+  else { bar.style.display = 'none'; }
+}
+
+// --- Input / actions ---
+function structSendRaw(text) {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !currentAgentId || !text) return;
+  const bytes = new TextEncoder().encode(text);
+  let bin = ''; bytes.forEach(b => bin += String.fromCharCode(b));
+  ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId: currentAgentId }));
+}
+function structSendInput() {
+  const inp = document.getElementById('struct-input');
+  const v = inp.value;
+  if (!v) return;
+  structSendRaw(v + '\r');
+  inp.value = '';
+  inp.focus({ preventScroll: true });
+}
+function structKey(name) {
+  const map = { ctrlc: '\x03', esc: '\x1b', tab: '\t', up: '\x1bOA', down: '\x1bOB', enter: '\r' };
+  if (map[name]) structSendRaw(map[name]);
+}
+function structAnswer(kind, opt) {
+  if (kind === 'yes') structSendRaw('y\r');
+  else if (kind === 'no') structSendRaw('n\r');
+  else if (kind === 'opt') structSendRaw(opt + '\r');
+}
+
+// --- Mode toggle (structured ↔ raw xterm) ---
+function setTermViewMode(mode) {
+  termViewMode = mode;
+  const sv = document.getElementById('structured-view');
+  const tc = document.getElementById('term-container');
+  const mt = document.getElementById('mobile-toolbar');
+  const toggle = document.getElementById('float-toggle-view');
+  if (mode === 'structured') {
+    sv.style.display = 'flex';
+    tc.style.display = 'none';
+    if (mt) mt.style.display = 'none';
+    toggle.textContent = '原始';
+    renderStructured();
+    // Tell the PTY to render at a phone-friendly width so Claude wraps output
+    // for reading instead of using the default 200-col layout.
+    if (ws && ws.readyState === WebSocket.OPEN && currentAgentId) {
+      ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: 100, rows: 40 }));
+    }
+  } else {
+    sv.style.display = 'none';
+    tc.style.display = 'block';
+    if (window.innerWidth < 600 && mt) mt.style.display = 'block';
+    toggle.textContent = '结构';
+    // Refit xterm to real size + re-send resize (it was hidden while sizing)
+    setTimeout(() => {
+      if (fitAddon && term) { try { fitAddon.fit(); } catch {} }
+      if (ws && ws.readyState === WebSocket.OPEN && term) {
+        ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: term.cols, rows: term.rows }));
+      }
+    }, 60);
+  }
+}
+function toggleTermView() {
+  setTermViewMode(termViewMode === 'structured' ? 'xterm' : 'structured');
+}
+
+// Track transcript manual scroll so we don't yank the user back to bottom
+(function () {
+  document.addEventListener('DOMContentLoaded', () => {
+    const el = document.getElementById('struct-transcript');
+    if (!el) return;
+    el.addEventListener('scroll', () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+      structUserScrolled = !atBottom;
+    });
+  });
+})();
+
+// Enter key in the structured input sends
+document.addEventListener('DOMContentLoaded', () => {
+  const inp = document.getElementById('struct-input');
+  if (inp) inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); structSendInput(); }
+  });
+});
+
 // ========== Mobile toolbar ==========
 
 function sendRaw(data) {
@@ -1722,75 +2609,106 @@ function clearCtrl() {
 }
 
 function doPaste() {
-  // Legacy: try clipboard API (works on desktop), fallback to input area
+  // Legacy: try clipboard API (works on desktop), fallback to focusing input bar
   navigator.clipboard.readText().then(t => { if (t) sendRaw(t); }).catch(() => {
-    toggleMobileInput();
+    focusMobileInput();
   });
 }
 
-function toggleMobileInput() {
-  const area = document.getElementById('mobile-input-area');
-  const btn = document.getElementById('btn-input');
-  if (area.style.display === 'none' || !area.style.display) {
-    area.style.display = 'block';
-    btn.classList.add('active');
-    document.getElementById('mobile-text-input').focus({ preventScroll: true });
-  } else {
-    closeMobileInput();
-  }
+function focusMobileInput() {
+  const input = document.getElementById('mobile-text-input');
+  if (input) input.focus({ preventScroll: true });
+}
+
+// Explicit scroll controls for mobile — xterm.js's own scrollback viewport is
+// notoriously unreliable to touch-drag on some phones/browsers even with
+// -webkit-overflow-scrolling: touch, so these drive the same scroll API a
+// mouse wheel would, with no dependency on touch gesture handling at all.
+function scrollTermPages(n) {
+  if (term) term.scrollPages(n);
+}
+function scrollTermToBottom() {
+  if (term) term.scrollToBottom();
 }
 
 function closeMobileInput() {
-  const area = document.getElementById('mobile-input-area');
-  const btn = document.getElementById('btn-input');
-  area.style.display = 'none';
-  btn.classList.remove('active');
-  document.getElementById('mobile-text-input').value = '';
-}
-
-function sendMobileInput(withEnter) {
   const input = document.getElementById('mobile-text-input');
-  const text = input.value;
-  if (!text) return;
-  sendRaw(text);
-  if (withEnter) sendRaw('\r');
-  input.value = '';
-  input.focus({ preventScroll: true });
+  if (input) input.value = '';
+  mobileComposing = false;
 }
 
-// Send on newline: iOS IME's return key inserts \n directly and often does NOT
-// fire a JS keydown Enter — so we watch the input event instead. Any \n
-// (typed return, pasted multiline) triggers send immediately.
-document.getElementById('mobile-text-input').addEventListener('input', function() {
-  if (this.value.indexOf('\n') !== -1) {
-    sendMobileInput(true);
-  }
-});
+// Mobile live input: each committed character is sent to the PTY immediately,
+// so it feels like a real terminal (echo, mid-line Tab completion, etc.).
+// IME-safe: during composition (third-party keyboards on iOS) we never touch
+// the textarea value — only send after the IME commits.
+let mobileComposing = false;
+const mobileInputEl = document.getElementById('mobile-text-input');
 
-// Android keyboards honour enterkeyhint by firing a keydown Enter WITHOUT
-// inserting \n into the textarea (nothing is submitted — there is no form), so
-// the input-event path above never runs and pressing the keyboard's send key
-// appears to do nothing.  Handle keydown Enter for that case; clearing the
-// value first keeps the input-event fallback from double-sending.
-document.getElementById('mobile-text-input').addEventListener('keydown', function(e) {
+mobileInputEl.addEventListener('compositionstart', () => { mobileComposing = true; });
+mobileInputEl.addEventListener('compositionend', () => {
+  mobileComposing = false;
+  mobileDrain();
+});
+mobileInputEl.addEventListener('input', (e) => {
+  if (mobileComposing || e.isComposing) return;   // mid-composition: do NOT read/clear
+  mobileDrain();
+});
+// Backspace should delete in the terminal (otherwise the textarea just empties itself).
+mobileInputEl.addEventListener('keydown', (e) => {
+  if (mobileComposing || e.isComposing) return;
+  if (e.key === 'Backspace') {
+    e.preventDefault();
+    sendRaw('\x7f');
+  }
+  // Android keyboards honour enterkeyhint by firing a keydown Enter WITHOUT
+  // inserting \n into the textarea (nothing is submitted — there is no form),
+  // so the input-event path below never runs and pressing the keyboard's send
+  // key appears to do nothing.  Handle keydown Enter for that case; the
+  // mobileDrain() guard (empty value → no-op) keeps the input-event fallback
+  // from double-sending.
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    sendMobileInput(true);
+    mobileDrain();
   }
 });
+
+// Drain committed text from the bar into the terminal, then clear it so the
+// bar stays a one-line "live" input. \n (iOS return key / pasted newline) → \r.
+function mobileDrain() {
+  const v = mobileInputEl.value;
+  if (!v) return;
+  mobileInputEl.value = '';
+  sendRaw(v.replace(/\n/g, '\r'));
+  mobileInputEl.focus({ preventScroll: true });
+}
+
+function mobileSendEnter() {
+  sendRaw('\r');
+  mobileInputEl.focus({ preventScroll: true });
+}
 
 // iOS Safari keyboard adaptation: make #term-view follow the visualViewport
 // height so that when the soft keyboard pushes up, the terminal view (and the
 // mobile toolbar inside it) shrinks instead of being obscured. On desktop,
 // visualViewport.height === innerHeight, so this is a harmless no-op there.
+// We also refit xterm within one animation frame so the terminal snaps to the
+// new size instead of lagging behind the debounce (which read as "jumping").
 (function () {
   const termView = document.getElementById('term-view');
   if (!termView || !window.visualViewport) return;
   const vv = window.visualViewport;
+  let fitScheduled = false;
   function syncTermHeight() {
     termView.style.height = vv.height + 'px';
     termView.style.bottom = 'auto';   // height drives sizing, not bottom:0
     termView.style.top = vv.offsetTop + 'px';
+    if (!fitScheduled) {
+      fitScheduled = true;
+      requestAnimationFrame(() => {
+        fitScheduled = false;
+        if (fitAddon && term) { try { fitAddon.fit(); } catch {} }
+      });
+    }
   }
   vv.addEventListener('resize', syncTermHeight);
   vv.addEventListener('scroll', syncTermHeight);

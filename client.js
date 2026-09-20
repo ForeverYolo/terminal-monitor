@@ -1,9 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execSync, execFileSync, spawn } = require('child_process');
+const crypto = require('crypto');
 const WebSocket = require('ws');
 const pty = require('node-pty');
+const { detectClaudeState } = require('./claude-detector');
+const { validateSpawnRequest, SPAWN_MAX_NODES } = require('./spawn-validator');
+const { loadConfig } = require('./config-loader');
 
 // --- Auto-collect system info ---
 function collectSysInfo() {
@@ -61,11 +65,7 @@ function collectSysInfo() {
 }
 
 // --- Load config (support --config flag for multi-instance) ---
-const cfgEqArg = process.argv.find(a => a.startsWith('--config='));
-const configArg = (cfgEqArg ? cfgEqArg.split('=')[1] : null)
-  || (process.argv.indexOf('--config') !== -1 ? process.argv[process.argv.indexOf('--config') + 1] : null);
-const configFile = configArg || path.join(__dirname, 'config.json');
-const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+const { config, configFile } = loadConfig('config.json', __dirname);
 const { serverUrl, token, name, screen: screenSession, screenMode, attrs } = config.client;
 
 if (!serverUrl || !token || !name) {
@@ -74,6 +74,20 @@ if (!serverUrl || !token || !name) {
 }
 
 const screenName = screenSession || 'main';
+
+// --- Stable per-machine clientId ---
+// Groups this client with any nodes it spawns via spawn_node (server.js target.clientId
+// routing, supervisor.js per-machine node counting). Persisted back into the config file
+// so it survives restarts instead of fragmenting the grouping on every relaunch.
+if (!config.client.clientId) {
+  config.client.clientId = `c-${os.hostname()}-${crypto.randomBytes(4).toString('hex')}`;
+  try {
+    fs.writeFileSync(configFile, JSON.stringify(config, null, 2), { mode: 0o600 });
+  } catch (e) {
+    console.error('[!] failed to persist clientId to config:', e.message);
+  }
+}
+const clientId = config.client.clientId;
 
 // --- Debug byte-stream dump (toggle with --dump flag) ---
 // Dumps raw pty traffic to /tmp/swt-dump-<name>-{in,out}.bin so escape-sequence
@@ -196,6 +210,150 @@ function sendMsg(obj) {
   return false;
 }
 
+// --- Spawn new node (screen + child client) ---
+// triggered by server 'spawn_node' message. Always safe:
+//   - max 20 nodes per machine (configurable via SPAWN_MAX_NODES)
+//   - screenName validated strictly (alphanum + -_)
+//   - cmd whitelist: claude | bash | sh
+//   - writes temp config under project dir
+//   - child is detached and unref'd so it survives parent exit
+// Raw `screen -ls` parse — can throw; callers decide how to handle failure
+// (spawn_node treats it as "no sessions", list_screens reports the error over the wire).
+function getLocalScreenSessions() {
+  const out = execSync('screen -ls 2>/dev/null || true', { encoding: 'utf8' });
+  const names = [];
+  for (const line of out.split('\n')) {
+    const m = line.match(/^\s*\d+\.([^\s]+)\s+/);
+    if (m) names.push(m[1]);
+  }
+  return names;
+}
+
+function listLocalScreenNames() {
+  try { return getLocalScreenSessions(); } catch { return []; }
+}
+
+// Screen names of nodes THIS app has spawned/registered on this machine —
+// scoped to our own config.client-*.json files, NOT every screen session that
+// happens to exist on the box. A machine can easily be running 30+ screens
+// for completely unrelated projects; those must never count against our cap
+// or be reported as "our" node count in the management panel.
+function listLocalNodeScreenNames() {
+  try {
+    return fs.readdirSync(__dirname)
+      .filter(f => /^config\.client-.*\.json$/.test(f))
+      .map(f => f.slice('config.client-'.length, -'.json'.length));
+  } catch { return []; }
+}
+
+async function handleSpawnNode(msg) {
+  const reqId = msg.reqId;
+  const v = validateSpawnRequest(msg);
+  if (!v.ok) {
+    sendMsg({ type: 'spawn_node_result', reqId, ok: false, error: v.error });
+    return;
+  }
+  const newScreenName = v.screenName;
+  const cmd = v.cmd;
+
+  // Enforce ≤ SPAWN_MAX_NODES per machine, counting only nodes THIS app spawned
+  // (see listLocalNodeScreenNames). Separately, the *name* must not collide with
+  // ANY screen session on the box — ours or a completely unrelated one — since
+  // we're about to `screen -dmS` with that exact name.
+  const nodeCount = listLocalNodeScreenNames().length;
+  if (nodeCount >= SPAWN_MAX_NODES) {
+    sendMsg({ type: 'spawn_node_result', reqId, ok: false, error: `max ${SPAWN_MAX_NODES} nodes reached on this machine`, count: nodeCount });
+    return;
+  }
+  const existing = listLocalScreenNames();
+  if (existing.includes(newScreenName)) {
+    sendMsg({ type: 'spawn_node_result', reqId, ok: false, error: `screen session "${newScreenName}" already exists`, count: nodeCount });
+    return;
+  }
+
+  // Build child config (clone of current config + override screen + name)
+  const childConfig = JSON.parse(JSON.stringify(config.client));
+  childConfig.screen = newScreenName;
+  childConfig.name = msg.nodeName || `${name}-${newScreenName}`;
+  childConfig.screenMode = childConfig.screenMode || 'reattach'; // detached screen → -r reattach
+  childConfig.clientId = clientId;
+  const cfgPath = path.join(__dirname, `config.client-${newScreenName}.json`);
+  fs.writeFileSync(cfgPath, JSON.stringify({ mode: 'client', client: childConfig }, null, 2), { mode: 0o600 });
+
+  // Create a DETACHED screen session running the chosen command
+  const screenSpawnArgs = ['screen', '-dmS', newScreenName];
+  if (cmd === 'claude') {
+    screenSpawnArgs.push('bash', '-lc', 'claude');
+  } else {
+    screenSpawnArgs.push(cmd);
+  }
+  console.log(`[spawn_node] creating screen: ${screenSpawnArgs.join(' ')}`);
+  try {
+    execSync(screenSpawnArgs.join(' '), { encoding: 'utf8' });
+  } catch (e) {
+    sendMsg({ type: 'spawn_node_result', reqId, ok: false, error: `screen create failed: ${e.message}` });
+    return;
+  }
+  // Give screen a moment to initialize before client attaches
+  await new Promise(r => setTimeout(r, 800));
+
+  // Spawn child client.js to attach to the new screen
+  const child = spawn(process.execPath, [path.join(__dirname, 'client.js'), `--config=${cfgPath}`], {
+    detached: true,
+    stdio: 'ignore',
+    cwd: __dirname,
+    env: { ...process.env }
+  });
+  child.on('error', (e) => {
+    console.error('[spawn_node] child error:', e.message);
+    sendMsg({ type: 'spawn_node_result', reqId, ok: false, error: `client spawn error: ${e.message}` });
+  });
+  child.unref();
+
+  console.log(`[spawn_node] spawned child PID ${child.pid} for screen ${newScreenName}`);
+  // Wait briefly to see if child stays alive
+  await new Promise(r => setTimeout(r, 600));
+  sendMsg({
+    type: 'spawn_node_result',
+    reqId,
+    ok: true,
+    screenName: newScreenName,
+    nodeName: childConfig.name,
+    clientId,
+    childPid: child.pid,
+    count: nodeCount + 1
+  });
+}
+
+// --- Claude state detection ---
+// Client-side mirror of lastOutput for cheap local detection (avoids round-trip).
+let lastOutputBuffer = '';
+const LAST_OUTPUT_BUFFER_MAX = 20000; // 20KB tail
+let claudeStateTimer = null;
+const CLAUDE_STATE_INTERVAL = 4000; // report every 4s
+
+function pushOutput(text) {
+  lastOutputBuffer += text;
+  if (lastOutputBuffer.length > LAST_OUTPUT_BUFFER_MAX) {
+    lastOutputBuffer = lastOutputBuffer.slice(-LAST_OUTPUT_BUFFER_MAX);
+  }
+}
+
+function reportClaudeState() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const state = detectClaudeState(lastOutputBuffer);
+  ws.send(JSON.stringify({ type: 'claude_state', state }));
+}
+
+function startClaudeStateReporter() {
+  stopClaudeStateReporter();
+  claudeStateTimer = setInterval(reportClaudeState, CLAUDE_STATE_INTERVAL);
+}
+
+function stopClaudeStateReporter() {
+  if (claudeStateTimer) { clearInterval(claudeStateTimer); claudeStateTimer = null; }
+}
+
 // -x: multi-display (for attached sessions), -r: reattach (for detached)
 // Use large default PTY size so TUI apps (claude, vim, etc.) have room.
 // Browser will send actual resize shortly after connecting.
@@ -252,6 +410,7 @@ function connect() {
     console.log('Connected to server');
     reconnectDelay = 1000;
     startHeartbeat();
+    startClaudeStateReporter();
 
     // Spawn PTY with screen
     spawnPty();
@@ -263,7 +422,7 @@ function connect() {
       token,
       name,
       screen: screenName,
-      attrs: attrs || {},
+      attrs: { ...(attrs || {}), clientId },
       sys: sysInfo,
       cols,
       rows
@@ -299,6 +458,7 @@ function connect() {
     ptyProcess.onData((data) => {
       if (DEBUG_DUMP) dumpStream('OUT', data);
       oscTail = trackOscCwd(oscTail, data);
+      pushOutput(data);
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'data', payload: Buffer.from(data).toString('base64') }));
       }
@@ -339,6 +499,49 @@ function connect() {
     if (msg.type === 'restart_screen' && ptyProcess) {
       console.log('[!] restart_screen requested — killing PTY for respawn');
       try { ptyProcess.kill(); } catch (e) { console.error('[!] kill failed:', e.message); }
+    }
+
+    // Spawn a new node (new screen session + new child client.js) locally.
+    if (msg.type === 'spawn_node') {
+      handleSpawnNode(msg).catch(e => {
+        console.error('[spawn_node] error:', e.message);
+        sendMsg({ type: 'spawn_node_result', reqId: msg.reqId, ok: false, error: e.message });
+      });
+    }
+
+    // Supervisor→agent: list THIS app's own node screens (used for node
+    // counting/display) — not every screen session on the machine, which
+    // would include totally unrelated projects the user runs on the same box.
+    if (msg.type === 'list_screens') {
+      try {
+        sendMsg({ type: 'list_screens_result', reqId: msg.reqId, ok: true, screens: listLocalNodeScreenNames() });
+      } catch (e) {
+        sendMsg({ type: 'list_screens_result', reqId: msg.reqId, ok: false, error: e.message });
+      }
+    }
+
+    // Kill this node from the management panel — either just this monitoring
+    // agent (mode: 'agent_only'), or the agent AND the underlying task screen
+    // it was attached to (mode: 'agent_and_task'). Writing the stop marker
+    // BEFORE exiting is what makes this a real stop rather than a 3s blip:
+    // this process normally runs under a restart-on-crash wrapper (see
+    // install.sh's write_run_wrapper) that would otherwise just relaunch it.
+    if (msg.type === 'kill_node') {
+      const killTask = msg.mode === 'agent_and_task';
+      console.log(`[!] kill_node received (mode=${msg.mode || 'agent_only'})${killTask ? ' — also killing task screen ' + screenName : ''}`);
+      try {
+        fs.writeFileSync(`${configFile}.stop`, '');
+      } catch (e) {
+        console.error('[!] failed to write stop marker:', e.message);
+      }
+      if (killTask) {
+        try {
+          execFileSync('screen', ['-S', screenName, '-X', 'quit']);
+        } catch (e) {
+          console.error('[!] failed to quit task screen:', e.message);
+        }
+      }
+      shutdown();
     }
 
     // Remote kill: server tells us to die
@@ -540,6 +743,7 @@ function connect() {
   ws.on('close', () => {
     console.log('Disconnected from server');
     stopHeartbeat();
+    stopClaudeStateReporter();
     if (ptyProcess) {
       ptyProcess.kill();
       ptyProcess = null;

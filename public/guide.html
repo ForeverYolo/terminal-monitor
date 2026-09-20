@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>使用指南 · Screen Web Terminal</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    --bg:#faf9f6; --bg-card:#ffffff; --bg-soft:#f3efe7;
+    --ink:#2d2a26; --ink-soft:#6b645a; --ink-faint:#a39c8f;
+    --accent:#c96442; --accent-soft:#f3e2da; --accent-dark:#a84e30;
+    --line:#e8e2d6;
+    --green:#3a7d5c; --green-soft:#e3f0e6;
+    --red:#c1443b; --red-soft:#fbe6e3;
+    --yellow:#a8791f; --yellow-soft:#f7ecd6;
+    --radius:14px;
+    --maxw:760px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:'Noto Sans SC','Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+    line-height:1.7; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent);}
+  h1,h2,h3{font-family:'Inter','Noto Sans SC',sans-serif; font-weight:700; color:var(--ink); line-height:1.3;}
+  code{background:var(--bg-soft); padding:2px 6px; border-radius:5px; font-size:0.92em; color:var(--accent-dark);}
+
+  /* ---- top bar ---- */
+  #topbar{
+    position:sticky; top:0; z-index:50; background:rgba(250,249,246,0.92); backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line); padding:14px 20px; display:flex; align-items:center; justify-content:space-between; gap:12px;
+  }
+  #topbar .brand{display:flex; align-items:center; gap:10px; font-weight:700; font-size:15px; color:var(--ink);}
+  #topbar .brand .dot{width:10px; height:10px; border-radius:50%; background:var(--accent); flex-shrink:0;}
+  #topbar a.back{font-size:13px; color:var(--ink-soft); text-decoration:none; white-space:nowrap;}
+  #topbar a.back:hover{color:var(--accent);}
+
+  /* ---- layout ---- */
+  #layout{display:flex; max-width:1100px; margin:0 auto; align-items:flex-start;}
+  #toc{
+    width:220px; flex-shrink:0; position:sticky; top:64px;
+    padding:32px 16px 32px 24px; max-height:calc(100vh - 64px); overflow-y:auto;
+  }
+  #toc a{
+    display:block; padding:6px 10px; font-size:13px; color:var(--ink-soft); text-decoration:none;
+    border-radius:8px; margin-bottom:2px;
+  }
+  #toc a:hover{background:var(--bg-soft); color:var(--ink);}
+  #toc a.active{background:var(--accent-soft); color:var(--accent-dark); font-weight:600;}
+  #content{flex:1; min-width:0; padding:0 24px 80px;}
+
+  /* ---- hero ---- */
+  .hero{max-width:var(--maxw); margin:48px auto 8px; padding:0 4px;}
+  .hero .eyebrow{
+    display:inline-flex; align-items:center; gap:6px; background:var(--accent-soft); color:var(--accent-dark);
+    font-size:12px; font-weight:600; padding:5px 12px; border-radius:20px; margin-bottom:16px;
+  }
+  .hero h1{font-size:34px; margin:0 0 14px;}
+  .hero p.lead{font-size:16px; color:var(--ink-soft); margin:0; max-width:560px;}
+
+  /* ---- quick start ---- */
+  .quickstart{
+    max-width:var(--maxw); margin:32px auto; background:var(--bg-card); border:1px solid var(--line);
+    border-radius:var(--radius); padding:28px 28px 20px; box-shadow:0 1px 3px rgba(0,0,0,0.04);
+  }
+  .quickstart h2{margin:0 0 4px; font-size:18px;}
+  .quickstart .sub{color:var(--ink-soft); font-size:13px; margin-bottom:20px;}
+  .qs-steps{display:flex; flex-direction:column; gap:0;}
+  .qs-step{display:flex; gap:16px; padding:14px 0; border-top:1px solid var(--line);}
+  .qs-step:first-child{border-top:none;}
+  .qs-num{
+    width:28px; height:28px; border-radius:50%; background:var(--accent); color:#fff; font-weight:700; font-size:13px;
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+  }
+  .qs-step h4{margin:2px 0 4px; font-size:14.5px;}
+  .qs-step p{margin:0; font-size:13.5px; color:var(--ink-soft);}
+
+  /* ---- sections ---- */
+  section{max-width:var(--maxw); margin:0 auto; padding:40px 4px 0;}
+  section h2{font-size:23px; margin:0 0 6px; scroll-margin-top:80px;}
+  section > .section-desc{color:var(--ink-soft); font-size:14px; margin:0 0 22px;}
+  section h3{font-size:16.5px; margin:26px 0 8px;}
+  section p{font-size:14.5px; margin:0 0 14px;}
+  section ul, section ol{font-size:14.5px; padding-left:22px; margin:0 0 14px;}
+  section li{margin-bottom:6px;}
+  hr.div{border:none; border-top:1px solid var(--line); max-width:var(--maxw); margin:8px auto 0;}
+
+  /* ---- concept diagram ---- */
+  .diagram{
+    display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap;
+    background:var(--bg-soft); border-radius:var(--radius); padding:28px 16px; margin:18px 0 22px;
+  }
+  .diagram .node{
+    background:var(--bg-card); border:1px solid var(--line); border-radius:12px; padding:14px 18px;
+    text-align:center; min-width:120px; box-shadow:0 1px 2px rgba(0,0,0,0.03);
+  }
+  .diagram .node .icon{font-size:22px; margin-bottom:6px;}
+  .diagram .node .label{font-weight:600; font-size:13px;}
+  .diagram .node .sub{font-size:11px; color:var(--ink-faint); margin-top:2px;}
+  .diagram .arrow{color:var(--ink-faint); font-size:20px; padding:0 2px;}
+
+  /* ---- cards / grid ---- */
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:16px 0 20px;}
+  .info-card{
+    background:var(--bg-card); border:1px solid var(--line); border-radius:12px; padding:16px 18px;
+  }
+  .info-card .icon{font-size:20px; margin-bottom:8px;}
+  .info-card h4{margin:0 0 6px; font-size:14px;}
+  .info-card p{margin:0; font-size:13px; color:var(--ink-soft);}
+
+  /* ---- mock UI elements ---- */
+  .mock-card{
+    background:#16213e; border:1px solid #2a2a4a; border-radius:10px; padding:16px; max-width:320px;
+    color:#e0e0e0; font-family:'Inter',sans-serif; margin:16px 0; box-shadow:0 4px 16px rgba(0,0,0,0.12);
+  }
+  .mock-card .mname{font-weight:600; font-size:14.5px; color:#fff;}
+  .mock-card .mhost{font-size:11px; color:#777; margin:2px 0 10px;}
+  .mock-status{display:flex; align-items:center; gap:6px; font-size:11.5px; color:#6a9955; margin-top:8px;}
+  .mock-dot{width:8px; height:8px; border-radius:50%; flex-shrink:0;}
+  .mock-dot.busy{background:#4caf50;}
+  .mock-dot.idle{background:#ff6b6b;}
+  .mock-badge{display:inline-block; margin-top:8px; padding:2px 8px; border-radius:10px; font-size:10.5px; background:#4a2a2a; color:#ff9b9b; border:1px solid #8e3a3a;}
+
+  .callout{
+    display:flex; gap:12px; background:var(--yellow-soft); border:1px solid #ecd9a8; border-radius:10px;
+    padding:14px 16px; margin:16px 0; font-size:13.5px; color:#6b5117;
+  }
+  .callout.danger{background:var(--red-soft); border-color:#f0c3bd; color:#8a2e26;}
+  .callout .ci{font-size:16px; flex-shrink:0;}
+
+  /* ---- key rows for toolbar explanation ---- */
+  .key-table{width:100%; border-collapse:collapse; margin:8px 0 18px; font-size:13.5px;}
+  .key-table th, .key-table td{text-align:left; padding:9px 10px; border-bottom:1px solid var(--line);}
+  .key-table th{color:var(--ink-faint); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.02em;}
+  .keybtn{
+    display:inline-block; background:#21262d; color:#c9d1d9; border-radius:5px; padding:3px 9px;
+    font-family:'Inter',monospace; font-size:12.5px; font-weight:600;
+  }
+
+  /* ---- FAQ ---- */
+  details.faq{
+    background:var(--bg-card); border:1px solid var(--line); border-radius:10px; padding:4px 16px;
+    margin-bottom:10px;
+  }
+  details.faq summary{
+    cursor:pointer; padding:12px 0; font-weight:600; font-size:14.5px; list-style:none; display:flex;
+    align-items:center; justify-content:space-between;
+  }
+  details.faq summary::-webkit-details-marker{display:none;}
+  details.faq summary::after{content:'+'; color:var(--accent); font-size:20px; font-weight:400;}
+  details.faq[open] summary::after{content:'−';}
+  details.faq .a{padding:0 0 14px; font-size:13.5px; color:var(--ink-soft);}
+
+  /* ---- glossary ---- */
+  .glossary{width:100%; border-collapse:collapse; font-size:13.5px; margin:8px 0 8px;}
+  .glossary td{padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top;}
+  .glossary td:first-child{font-weight:600; white-space:nowrap; color:var(--ink); width:110px;}
+  .glossary td:last-child{color:var(--ink-soft);}
+
+  footer{max-width:var(--maxw); margin:56px auto 40px; padding:24px 4px 0; border-top:1px solid var(--line); text-align:center; color:var(--ink-faint); font-size:12.5px;}
+
+  @media (max-width:860px){
+    #toc{display:none;}
+    #content{padding:0 18px 60px;}
+    .hero{margin:32px auto 8px;}
+    .hero h1{font-size:27px;}
+    .grid2{grid-template-columns:1fr;}
+    .diagram{gap:4px;}
+    .diagram .arrow{transform:rotate(90deg); padding:4px 0;}
+  }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <div class="brand"><span class="dot"></span>Screen Web Terminal</div>
+  <a class="back" href="/">← 返回登录</a>
+</div>
+
+<div id="layout">
+  <nav id="toc">
+    <a href="#start">快速开始</a>
+    <a href="#what">这是什么</a>
+    <a href="#login">登录</a>
+    <a href="#dashboard">仪表盘</a>
+    <a href="#terminal">终端界面</a>
+    <a href="#mobile">手机端说明</a>
+    <a href="#files">文件传输</a>
+    <a href="#install">安装与部署（搭建者）</a>
+    <a href="#manage">管理面板（管理员）</a>
+    <a href="#faq">常见问题</a>
+    <a href="#glossary">名词解释</a>
+  </nav>
+
+  <div id="content">
+
+    <div class="hero">
+      <span class="eyebrow">📖 使用指南</span>
+      <h1>欢迎使用 Screen Web Terminal</h1>
+      <p class="lead">这份指南会从零开始，一步步教你怎么用浏览器打开、查看、操作远程电脑上的命令行窗口——不需要装任何软件，手机和电脑都能用。</p>
+    </div>
+
+    <div class="quickstart">
+      <h2>🚀 3 步开始使用</h2>
+      <div class="sub">如果你已经拿到了网址和密码，看这里就够了</div>
+      <div class="qs-steps">
+        <div class="qs-step">
+          <div class="qs-num">1</div>
+          <div><h4>打开网址</h4><p>在浏览器（手机或电脑都行）里打开管理员给你的地址，会看到一个登录框。</p></div>
+        </div>
+        <div class="qs-step">
+          <div class="qs-num">2</div>
+          <div><h4>输入密码登录</h4><p>用户名随便填什么都可以，密码要填对。登录后浏览器会记住密码，下次自动进入。</p></div>
+        </div>
+        <div class="qs-step">
+          <div class="qs-num">3</div>
+          <div><h4>点击一张卡片</h4><p>登录后会看到若干张卡片，每张代表一台正在被监控的电脑。点一下就能进入它的命令行窗口，直接开始操作。</p></div>
+        </div>
+      </div>
+    </div>
+
+    <hr class="div">
+
+    <section id="what">
+      <h2>这是什么</h2>
+      <p class="section-desc">用一句话说清楚它是干什么的</p>
+      <p>简单说：<strong>你的某台电脑上正在运行一个"Screen 会话"（可以理解成一个不会因为断线而消失的命令行窗口）</strong>，这个工具能让你透过浏览器，从任何地方看到这个窗口里的内容，还能像本人坐在那台电脑前一样打字操作它。</p>
+      <p>它是怎么做到的：那台电脑上装了一个很小的"代理程序"，主动连接到一台中转服务器；你打开网页登录的，也是连到这台中转服务器。服务器负责把两边的画面和键盘输入互相转发。</p>
+      <div class="diagram">
+        <div class="node"><div class="icon">💻</div><div class="label">远程电脑</div><div class="sub">跑着任务 / Claude Code</div></div>
+        <div class="arrow">⇄</div>
+        <div class="node"><div class="icon">🌐</div><div class="label">中转服务器</div><div class="sub">24 小时在线</div></div>
+        <div class="arrow">⇄</div>
+        <div class="node"><div class="icon">📱</div><div class="label">你的浏览器</div><div class="sub">手机 / 电脑都行</div></div>
+      </div>
+      <p>好处是：那台远程电脑不需要公网 IP，不需要装 VPN，你也不需要装任何客户端软件——一个浏览器就够了。就算你把网页关掉、手机锁屏，远程那边的程序也会继续运行，不会因为你断开连接就被打断。</p>
+    </section>
+
+    <section id="login">
+      <h2>登录</h2>
+      <p class="section-desc">第一次打开网站时会看到的画面</p>
+      <ul>
+        <li><strong>用户名</strong>：随便填一个方便自己识别的名字就行，不影响能不能登录成功。</li>
+        <li><strong>密码</strong>：管理员分配的登录密码，必须填对。</li>
+      </ul>
+      <p>登录成功后，密码会被安全地记在你这台设备的浏览器里，下次打开网页会自动帮你登录，不用每次都重新输入。如果长时间没有操作导致连接断开，页面会自动尝试重新连上，不需要手动刷新。</p>
+      <div class="callout">
+        <div class="ci">💡</div>
+        <div>如果一直显示"Connection lost"或者提示密码错误，先确认密码有没有输对；如果确定密码没问题，可能是服务器暂时不在线，联系管理员确认一下。</div>
+      </div>
+    </section>
+
+    <section id="dashboard">
+      <h2>仪表盘</h2>
+      <p class="section-desc">登录后看到的主页面，每张卡片代表一台被监控的电脑</p>
+
+      <div class="mock-card">
+        <div class="mname">⭐ my-server <span style="font-size:11px;color:#4a9eff;background:#1a3a5c;padding:1px 6px;border-radius:4px;">screen: main</span></div>
+        <div class="mhost">ubuntu-box &middot; alice@192.168.1.10</div>
+        <div class="mock-status"><span class="mock-dot busy"></span> 正在跑着的最后几行输出…</div>
+        <div class="mock-badge">claude: working</div>
+      </div>
+
+      <h3>卡片上的信息代表什么</h3>
+      <table class="key-table">
+        <tr><th>元素</th><th>含义</th></tr>
+        <tr><td>⭐ 星标</td><td>点一下可以把常用的机器置顶，方便下次快速找到</td></tr>
+        <tr><td><span class="mock-dot busy" style="display:inline-block;"></span> 绿色圆点</td><td>这台机器正在运行，没有在等你输入</td></tr>
+        <tr><td><span class="mock-dot idle" style="display:inline-block;"></span> 红色圆点</td><td>命令行停在一个"提示符"上，可能在等你操作</td></tr>
+        <tr><td>彩色小胶囊（claude: xxx）</td><td>如果这台机器在跑 Claude Code，这里会显示它当前的状态，比如正在思考、在等你确认、需要你选一个选项</td></tr>
+        <tr><td>右上角的标签</td><td>管理员给这台机器打的备注标签，比如 gpu / dev</td></tr>
+      </table>
+
+      <h3>三种查看模式</h3>
+      <div class="grid2">
+        <div class="info-card"><div class="icon">🗂️</div><h4>卡片</h4><p>默认模式，逐个查看每台机器，点哪张卡片就进入哪台的终端。</p></div>
+        <div class="info-card"><div class="icon">🖥️</div><h4>多屏</h4><p>电脑端专属，可以同时勾选多台机器，在同一个画面里并排查看（手机屏幕太小，已经隐藏这个功能）。</p></div>
+        <div class="info-card"><div class="icon">⚙️</div><h4>管理</h4><p>面向管理员的高级功能，可以新增/关闭节点、调整自动巡检设置，详见下方"管理面板"一节。</p></div>
+      </div>
+      <p>右上角还可以按 名字 / 编号 / 最近使用 排序，排序不会因为机器上下线而跳动。</p>
+    </section>
+
+    <section id="terminal">
+      <h2>终端界面</h2>
+      <p class="section-desc">点进一张卡片之后看到的画面——一个和远程电脑一模一样的命令行窗口</p>
+      <p>电脑端可以直接用键盘打字，就跟本地开了一个终端一样，光标在哪、你打字就输入到哪。窗口大小也会自动适配你调整浏览器窗口的大小。</p>
+      <p>右上角有几个悬浮按钮：</p>
+      <ul>
+        <li><strong>← Back</strong>：返回仪表盘（不会中断远程正在运行的任务）</li>
+        <li><strong>📤 / 📥</strong>：上传文件到远程电脑 / 从远程电脑下载文件，见下面"文件传输"一节</li>
+      </ul>
+      <div class="callout">
+        <div class="ci">💡</div>
+        <div>关掉网页、手机锁屏，或者退出应用，都不会影响远程电脑上正在跑的程序——那是完全独立运行的，你只是"暂时看不到"而已，重新打开网页再进去就能接着看。</div>
+      </div>
+    </section>
+
+    <section id="mobile">
+      <h2>手机端说明</h2>
+      <p class="section-desc">手机屏幕小，操作方式和电脑不太一样，这里单独说明</p>
+
+      <h3>底部工具栏</h3>
+      <p>进入终端后，屏幕下方会出现一排按钮，方便没有实体键盘的时候操作：</p>
+      <table class="key-table">
+        <tr><th>按钮</th><th>作用</th></tr>
+        <tr><td><span class="keybtn">↑ ↓ → ←</span></td><td>方向键，等同于电脑键盘的方向键</td></tr>
+        <tr><td><span class="keybtn">Tab</span> <span class="keybtn">Esc</span></td><td>补全 / 退出，跟电脑键盘一样</td></tr>
+        <tr><td><span class="keybtn">Ctrl</span> + 字母</td><td>先点一下 Ctrl 按钮（会高亮），再点字母按钮，等同于按住 Ctrl 再按那个字母（比如 Ctrl+C 中断程序）</td></tr>
+        <tr><td><span class="keybtn">Home</span> <span class="keybtn">End</span> <span class="keybtn">⌫</span></td><td>行首 / 行尾 / 删除一个字符</td></tr>
+        <tr><td><span class="keybtn">键盘</span></td><td>唤出下方的文字输入框，适合打长文字（中文输入法也能用）</td></tr>
+        <tr><td><span class="keybtn">⇞ 上翻</span> / <span class="keybtn">⇟ 下翻</span></td><td>向上/向下翻看历史内容——手机上用手指滑动有时候翻不动，用这两个按钮最可靠</td></tr>
+        <tr><td><span class="keybtn">⤓ 最新</span></td><td>一键跳回最新的内容（翻历史翻晕了就点这个）</td></tr>
+      </table>
+
+      <h3>"原始 / 结构" 切换按钮</h3>
+      <p>终端页面右上角有个圆形按钮，可以在两种显示方式之间切换：</p>
+      <div class="grid2">
+        <div class="info-card"><div class="icon">🖥️</div><h4>原始</h4><p>还原真实的终端画面，默认使用这个——像 vim、htop 这类全屏程序，只有在这个模式下才能正常显示。</p></div>
+        <div class="info-card"><div class="icon">💬</div><h4>结构</h4><p>把内容整理成像聊天记录一样的可读文字，专门为 Claude Code 优化，需要"是/否"确认或选择选项时会在下方直接出现按钮，不用自己找位置点。</p></div>
+      </div>
+      <p>如果只是在用 Claude Code、不需要看全屏程序，"结构"模式在小屏幕上会读起来更舒服；其它情况建议留在"原始"模式。</p>
+    </section>
+
+    <section id="files">
+      <h2>文件传输</h2>
+      <p class="section-desc">终端页面右上角的 📤 / 📥 按钮</p>
+      <ul>
+        <li><strong>📤 上传</strong>：把你设备上的文件发送到远程电脑当前所在的目录下</li>
+        <li><strong>📥 下载</strong>：浏览远程电脑当前目录下的文件并下载到你的设备</li>
+      </ul>
+      <p>"当前目录"指的是远程那边命令行此刻所在的文件夹（跟你在电脑上 <code>cd</code> 到哪个文件夹是一个概念）。单个文件最大支持 200MB，只能访问远程电脑该用户自己的主目录范围内的文件，出于安全考虑不能访问其它地方。</p>
+    </section>
+
+    <section id="install">
+      <h2>安装与部署</h2>
+      <p class="section-desc">面向从零开始搭建这套系统的人——需要用到命令行，但每一步该敲什么字都会写清楚</p>
+
+      <div class="callout">
+        <div class="ci">🙋</div>
+        <div>如果你只是被别人邀请来用这个网站的，这一节可以跳过，不影响你正常使用前面几节介绍的功能。</div>
+      </div>
+
+      <h3>需要准备什么</h3>
+      <div class="grid2">
+        <div class="info-card"><div class="icon">☁️</div><h4>一台"服务器"</h4><p>一台有公网 IP、24 小时开机的 Linux 主机（比如阿里云/腾讯云的云主机），所有人都通过它访问网页。</p></div>
+        <div class="info-card"><div class="icon">💻</div><h4>若干台"被监控电脑"</h4><p>你想远程查看的那些电脑，不需要公网 IP，甚至可以在内网/家里，只要能连上外网即可。</p></div>
+      </div>
+      <p>两边都需要装了 Linux 系统，并且你能用 <strong>SSH</strong> 登录进去敲命令（Windows 上可以用 PuTTY 或者 Windows Terminal，Mac / Linux 自带的"终端"App 就能直接用 <code>ssh 用户名@服务器地址</code> 连接）。如果这一步不知道怎么弄，找懂的朋友帮忙连上去就行，后面的操作都是照着敲命令，不需要额外的知识。</p>
+
+      <h3>第一步：把代码放到机器上</h3>
+      <p>服务器和每一台被监控的电脑，都需要把这个项目的代码复制过去（比如用 <code>git clone</code>，或者直接把文件夹传上去），放在哪个目录都可以，记住这个目录，后面的命令都要在这个目录里执行。</p>
+
+      <h3>第二步：部署服务器（只需要做一次）</h3>
+      <div class="qs-steps">
+        <div class="qs-step">
+          <div class="qs-num">1</div>
+          <div><h4>登录服务器，进入代码目录，执行：</h4><p><code>bash install.sh server</code></p></div>
+        </div>
+        <div class="qs-step">
+          <div class="qs-num">2</div>
+          <div><h4>依次回答几个问题</h4><p>监听端口（不确定就直接回车用默认值）、网页登录密码（自己设一个，记住它）、公网 IP 或域名（一般会自动探测出来，直接回车确认即可）。如果之前部署过，脚本会先把上次的配置读出来给你看，直接回车就是"沿用上次的设置"。</p></div>
+        </div>
+        <div class="qs-step">
+          <div class="qs-num">3</div>
+          <div><h4>脚本会自动搞定剩下的事</h4><p>检查/安装 Node.js 和 screen、安装依赖、启动服务，并且会验证是不是真的启动成功了（不会出现"看起来装完了其实没跑起来"的情况）。</p></div>
+        </div>
+        <div class="qs-step">
+          <div class="qs-num">4</div>
+          <div><h4>记下最后打印出来的几行信息</h4><p>访问地址、登录密码、Client Token——尤其是 <strong>Token</strong>，下一步部署每台被监控电脑的时候都要用到这同一个 Token。</p></div>
+        </div>
+      </div>
+
+      <h3>第三步：在每台要监控的电脑上部署客户端</h3>
+      <div class="qs-steps">
+        <div class="qs-step">
+          <div class="qs-num">1</div>
+          <div><h4>先手动建一个 screen 会话，跑你真正要监控的东西</h4><p><code>screen -S 随便起个名字</code>，进去之后跑你的程序（或者先跑个 <code>bash</code> 占位也行），然后按 <code>Ctrl+A</code> 再按 <code>D</code> 退出（不是关闭，是"放到后台"）。这个"名字"接下来会用到。</p></div>
+        </div>
+        <div class="qs-step">
+          <div class="qs-num">2</div>
+          <div><h4>在这台电脑上执行：</h4><p><code>bash install.sh client 刚才那个名字</code></p></div>
+        </div>
+        <div class="qs-step">
+          <div class="qs-num">3</div>
+          <div><h4>依次填入：</h4><p>服务器地址（上一步记下来的访问地址）、Token（上一步记下来的那个）、给这台电脑起个显示名称（随便起，方便在网页上认出是哪台）、标签（可选，直接回车跳过也行）。</p></div>
+        </div>
+        <div class="qs-step">
+          <div class="qs-num">4</div>
+          <div><h4>完成</h4><p>刷新网页仪表盘，这台电脑就会出现在卡片列表里了。以后想再加新的被监控电脑，重复这一步就行，每台机器都需要单独部署一次。</p></div>
+        </div>
+      </div>
+
+      <div class="callout">
+        <div class="ci">💡</div>
+        <div>同一台电脑上想同时监控好几个 screen 会话，也是重复第三步，每次换一个不同的 screen 名字即可；或者部署完之后直接在网页"管理面板"里点"新增节点"，不用再登录到那台电脑上手动操作。</div>
+      </div>
+
+      <h3>配置文件字段说明（进阶，一般不需要手动改）</h3>
+      <p>上面两步跑完之后，脚本会自动生成配置文件，正常使用不需要手动编辑，了解一下大概长什么样就好：</p>
+      <table class="key-table">
+        <tr><th>文件</th><th>作用</th></tr>
+        <tr><td><code>config.json</code>（服务器上）</td><td>网页登录密码、监听端口、允许连接的 Token 列表都在这里</td></tr>
+        <tr><td><code>config.client-会话名.json</code>（每台被监控电脑上）</td><td>要连接哪个服务器地址、用哪个 Token、显示名称、监控哪个 screen 会话</td></tr>
+      </table>
+
+      <h3>安装过程中可能遇到的问题</h3>
+      <details class="faq">
+        <summary>没有 sudo 权限，装不了 Node.js</summary>
+        <div class="a">脚本会自动提示一种不需要权限的安装方式（下载一份独立的 Node.js 放到项目目录里），照着提示的命令敲就行，装完之后重新跑一遍部署脚本会自动认出来。</div>
+      </details>
+      <details class="faq">
+        <summary>安装依赖（npm install）失败，提示跟编译有关的错误</summary>
+        <div class="a">这台电脑上大概率缺少编译工具，装一下就好：<code>apt-get install -y build-essential python3</code>（需要 sudo/root），装完重新运行部署脚本即可。</div>
+      </details>
+      <details class="faq">
+        <summary>提示"未找到名为 xxx 的本机 screen session"</summary>
+        <div class="a">说明忘了第三步的第 1 小步——先手动用 <code>screen -S 名字</code> 建好这个会话，再回来部署客户端。</div>
+      </details>
+    </section>
+
+    <section id="manage">
+      <h2>管理面板（面向管理员）</h2>
+      <p class="section-desc">这一节涉及新增/关闭节点等操作，普通用户一般用不到，谨慎操作</p>
+      <p>切到仪表盘右上角的"管理"模式，可以看到按所属机器分组的节点列表，每一行是一个正在被监控的节点。</p>
+
+      <h3>新增节点</h3>
+      <p>在某台机器的分组里填一个新的 screen 名字、选择要运行的程序（bash / claude / sh），点"新增节点"，会在那台机器上新建一个 screen 会话并自动开始监控，不需要登录到那台机器上手动操作。每台机器最多 20 个节点。</p>
+
+      <h3>停止监控 / 终止节点 —— 这两个按钮务必分清楚</h3>
+      <div class="callout">
+        <div class="ci">⚠️</div>
+        <div><strong>"停止监控"</strong> 只是让这个节点不再出现在列表里，远程那边的任务本身<strong>完全不受影响</strong>，该干嘛还继续干嘛。<strong>"终止节点"</strong> 会把远程那个任务<strong>一并杀掉</strong>，无法撤销，点之前会有二次确认，请确认清楚再点。</div>
+      </div>
+
+      <h3>督工设置（可选的自动巡检功能）</h3>
+      <p>如果开启，系统会定期检查各节点状态，在长时间没有响应时提醒你；如果配置了一个"分析员"节点（一个专门运行 Claude Code 的机器），还能定期生成整个机群的文字摘要。这是可选的高级功能，不开启完全不影响正常使用。</p>
+    </section>
+
+    <section id="faq">
+      <h2>常见问题</h2>
+
+      <details class="faq">
+        <summary>登录页面一直显示 "Connection lost"</summary>
+        <div class="a">先确认密码有没有输对，输错密码也会先短暂显示别的提示、再变成这句话（这是已知的显示顺序问题，不代表出了两个不同的故障）。密码确认没问题的话，可能是服务器暂时没启动，联系管理员确认。</div>
+      </details>
+
+      <details class="faq">
+        <summary>仪表盘上看不到我的电脑</summary>
+        <div class="a">说明那台电脑上还没有装好对应的监控程序，这一步需要管理员操作，找管理员帮忙添加。</div>
+      </details>
+
+      <details class="faq">
+        <summary>手机上手指往上划，看不到之前的内容</summary>
+        <div class="a">用底部工具栏的"⇞ 上翻" / "⇟ 下翻"按钮，比手势滑动更可靠，详见"手机端说明"一节。</div>
+      </details>
+
+      <details class="faq">
+        <summary>不小心点了"终止节点"，任务没了怎么办</summary>
+        <div class="a">这个操作无法撤销，任务已经被关闭了。需要管理员在那台电脑上重新开一个同名（或新名字）的 screen 会话，再重新添加监控。</div>
+      </details>
+
+      <details class="faq">
+        <summary>密码忘记了 / 想换个密码</summary>
+        <div class="a">登录密码由管理员统一设置，找管理员帮你确认或修改。</div>
+      </details>
+
+      <details class="faq">
+        <summary>输入的字符会自动换行，看起来很奇怪</summary>
+        <div class="a">通常是窗口大小跟远程程序预期的不一致导致的，试试把浏览器窗口调整一下大小（或者手机转个方向再转回来），终端会自动重新适配；如果一直有问题，联系管理员看看是不是需要重新连接一下这个节点。</div>
+      </details>
+
+      <details class="faq">
+        <summary>能不能在多台设备上同时登录同一个账号</summary>
+        <div class="a">可以，同一个密码可以在任意多台设备/浏览器上登录，互不影响，都能各自独立查看和操作。</div>
+      </details>
+    </section>
+
+    <section id="glossary">
+      <h2>名词解释</h2>
+      <table class="glossary">
+        <tr><td>服务器</td><td>负责转发画面和输入的中转站，你登录网页连接的就是它，需要一直保持在线。</td></tr>
+        <tr><td>客户端 / 节点</td><td>装在被监控的那台电脑上的小程序，负责把命令行画面发给服务器。</td></tr>
+        <tr><td>Screen 会话</td><td>一个不会因为断线而消失的命令行窗口，是实际运行你的程序/任务的地方。</td></tr>
+        <tr><td>Token</td><td>客户端用来证明自己身份的一串密钥，普通用户不需要关心。</td></tr>
+        <tr><td>Claude Code</td><td>Anthropic 出品的命令行版 AI 编程助手，如果远程电脑上跑的是它，卡片上会显示彩色的状态胶囊。</td></tr>
+      </table>
+    </section>
+
+    <footer>
+      有其它问题？联系你的管理员。
+    </footer>
+
+  </div>
+</div>
+
+<script>
+// Highlight the current section in the TOC while scrolling
+const links = Array.from(document.querySelectorAll('#toc a'));
+const sections = links.map(a => document.querySelector(a.getAttribute('href')));
+function onScroll(){
+  let idx = 0;
+  const y = window.scrollY + 100;
+  for (let i = 0; i < sections.length; i++) {
+    if (sections[i] && sections[i].offsetTop <= y) idx = i;
+  }
+  links.forEach((a, i) => a.classList.toggle('active', i === idx));
+}
+window.addEventListener('scroll', onScroll, { passive: true });
+onScroll();
+</script>
+</body>
+</html>

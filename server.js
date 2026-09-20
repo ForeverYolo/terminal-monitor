@@ -3,12 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const { createSupervisor } = require('./supervisor');
+const { stripAnsi } = require('./claude-detector');
+const { loadConfig } = require('./config-loader');
 
 // --- Load config (support --config flag) ---
-const configArg = process.argv.find(a => a.startsWith('--config='))?.split('=')[1]
-  || (process.argv.indexOf('--config') !== -1 ? process.argv[process.argv.indexOf('--config') + 1] : null);
-const configFile = configArg || path.join(__dirname, 'config.json');
-const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+const { config, configFile } = loadConfig('config.json', __dirname);
 const { port, password, tokens } = config.server;
 const validTokens = new Set(Object.keys(tokens || {}));
 const tokenUserMap = {};
@@ -19,11 +18,48 @@ for (const [token, info] of Object.entries(tokens || {})) {
 // --- State ---
 const agents = new Map();   // ws -> { id, name, screen, attrs, sys, ws, scrollback }
 const browsers = new Map(); // ws -> { ws, agentIds: Set }
-const SCROLLBACK_MAX = 2000000; // ~2MB scrollback per agent
-const SCROLLBACK_INIT = 50000;  // send recent scrollback on connect
+// Configurable so a low-resource VPS can shrink per-agent memory: config.server.scrollbackMax (bytes).
+const SCROLLBACK_MAX = config.server.scrollbackMax || 2000000; // ~2MB scrollback per agent
+// Trim only once we're this far over budget, in one batch — avoids paying an
+// O(n) Array.shift()/splice() on every single incoming chunk once the buffer
+// is full (which is most of the time under any sustained output).
+const SCROLLBACK_TRIM_MARGIN = Math.max(20000, Math.round(SCROLLBACK_MAX * 0.1));
+// Chunks of scrollback replayed to a browser on connect. Configurable via
+// config.server.scrollbackInit — kept modest by default (older history is
+// available on demand via scrollback_more) since every chunk here is a
+// synchronous ws.send() cost paid at connect time (see sendScrollbackReplay).
+const SCROLLBACK_INIT = config.server.scrollbackInit || 3000;
+// A *byte* cap on top of the chunk-count one above. Chunk sizes vary wildly —
+// a chunk can be a few bytes (one keystroke's echo) or tens of KB (a big PTY
+// read) — so "last 3000 chunks" alone doesn't reliably bound how much data a
+// browser has to receive, base64-decode, and hand to xterm.js to parse/render
+// before the terminal feels ready. Whichever limit is hit first wins.
+const SCROLLBACK_INIT_BYTES = config.server.scrollbackInitBytes || 200000;
 const SCROLLBACK_PAGE = 500;    // chunks per lazy-load request
+// How many scrollback chunks to send per event-loop tick during replay. Node
+// is single-threaded — a tight loop sending thousands of chunks synchronously
+// would freeze EVERY other connection (all agents' live output, all other
+// browsers, HTTP requests) for the duration. Batching + yielding via
+// setImmediate keeps each pause small regardless of how much history there is.
+const SCROLLBACK_SEND_BATCH = 200;
 const LAST_OUTPUT_MAX = 10000; // keep last 10KB for status preview
 const LAST_LINES_COUNT = 3;    // show last 3 lines in dashboard
+
+// --- Resource governance (defense in depth for a low-resource VPS) ---
+// Every one of these bounds something that was previously unbounded: a request
+// body, a single WS frame, or the number of live connections. None of this is
+// about normal usage hitting the ceiling — it's about a bug, a stuck reconnect
+// loop, or a hostile client not being able to grow memory without limit.
+const MAX_ACTION_BODY = config.server.maxActionBody || 65536;       // /api/action POST body (bytes) — plenty for pasted terminal input
+const MAX_WS_PAYLOAD = config.server.maxWsPayload || 4 * 1024 * 1024; // single WS frame (bytes) — file_chunk payloads are ~342KB base64; leaves headroom
+const MAX_BROWSERS = config.server.maxBrowsers || 100;              // concurrent authenticated browser connections
+const MAX_AGENTS = config.server.maxAgents || 200;                  // concurrent registered agents
+
+// Always an object (not just falsy-checked) so update_supervisor_config below
+// has somewhere to merge into even if config.json never had a supervisor block.
+config.server.supervisor = config.server.supervisor || {};
+
+const pendingScreenQueries = new Map(); // reqId -> (result) => void
 
 // Detect if output ends with a prompt (waiting for input)
 function hasPrompt(text) {
@@ -43,6 +79,41 @@ function generateAgentId() {
   return `agent-${++agentIdCounter}`;
 }
 
+// Replay an agent's buffered scrollback to a browser in small batches, yielding
+// to the event loop between each so a large history doesn't stall every other
+// connection on the server (see SCROLLBACK_SEND_BATCH). Wire format is
+// unchanged — same `data`/`scrollback_info`/`scrollback_end` messages, just
+// paced. `done` fires when finished, including when there's nothing to send.
+function sendScrollbackReplay(ws, ainfo, done) {
+  const total = ainfo.scrollback.length;
+  if (total === 0) { done(); return; }
+  // Walk back from the most recent chunk, stopping at whichever limit —
+  // chunk count or total bytes — is hit first. Bounded to at most
+  // SCROLLBACK_INIT iterations, so this is a cheap, one-time scan.
+  let start = total, bytes = 0, count = 0;
+  while (start > 0 && count < SCROLLBACK_INIT && bytes < SCROLLBACK_INIT_BYTES) {
+    start--;
+    bytes += ainfo.scrollback[start].length;
+    count++;
+  }
+  let i = start;
+  function sendBatch() {
+    if (ws.readyState !== ws.OPEN) { done(); return; } // browser gone mid-replay
+    const end = Math.min(i + SCROLLBACK_SEND_BATCH, total);
+    for (; i < end; i++) {
+      ws.send(JSON.stringify({ type: 'data', payload: ainfo.scrollback[i], agentId: ainfo.id }));
+    }
+    if (i < total) {
+      setImmediate(sendBatch);
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total, loadedFrom: start, hasMore: start > 0 }));
+    ws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id }));
+    done();
+  }
+  sendBatch();
+}
+
 function getAgentsList(user) {
   return Array.from(agents.values())
     .filter(a => !user || a.user === user)
@@ -57,7 +128,9 @@ function getAgentsList(user) {
         sys: a.sys || {},
         connectedAt: a.connectedAt,
         lastLines,
-        needsInput: hasPrompt(a.lastOutput)
+        needsInput: hasPrompt(a.lastOutput),
+        claudeState: a.claudeState || null,
+        clientId: a.attrs && a.attrs.clientId ? a.attrs.clientId : null
       };
     });
 }
@@ -91,15 +164,24 @@ setInterval(() => {
 }, CONSOLE_SUMMARY_INTERVAL);
 
 // --- HTTP server ---
+// Cache static pages in memory instead of a blocking sync disk read on every
+// request — fs.readFileSync() stalls the whole (single-threaded) event loop,
+// including in-flight WebSocket traffic, while it runs. A code change to a
+// cached page needs a server restart to take effect.
+const indexHtml = fs.readFileSync(path.join(__dirname, 'public', 'index.html'));
+const guideHtml = fs.readFileSync(path.join(__dirname, 'public', 'guide.html'));
+const faviconSvg = fs.readFileSync(path.join(__dirname, 'public', 'favicon.svg'));
+
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/' || req.url === '/index.html') {
-    const file = path.join(__dirname, 'public', 'index.html');
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(fs.readFileSync(file));
+    res.end(indexHtml);
+  } else if (req.url === '/guide.html') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(guideHtml);
   } else if (req.url === '/favicon.ico' || req.url === '/favicon.svg') {
-    const file = path.join(__dirname, 'public', 'favicon.svg');
     res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
-    res.end(fs.readFileSync(file));
+    res.end(faviconSvg);
   } else if (req.url === '/api/agents') {
     // API: return agent status as JSON (for CLI monitoring / supervisor)
     const list = Array.from(agents.values()).map(a => {
@@ -114,15 +196,37 @@ const httpServer = http.createServer((req, res) => {
         connectedAt: a.connectedAt,
         lastLines,
         needsInput: hasPrompt(a.lastOutput),
-        scrollbackSize: a.scrollback.length
+        scrollbackSize: a.scrollback.length,
+        claudeState: a.claudeState || null,
+        clientId: a.attrs && a.attrs.clientId ? a.attrs.clientId : null
       };
     });
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ time: new Date().toISOString(), agents: list }, null, 2));
+  } else if (req.url === '/api/supervisor') {
+    // API: return current supervisor summary (or 503 if disabled)
+    if (!supervisor) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'supervisor disabled' }));
+    } else {
+      const s = supervisor.buildSummary();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ time: new Date().toISOString(), ...s }, null, 2));
+    }
   } else if (req.url === '/api/action' && req.method === 'POST') {
     // API: send input to an agent's terminal
     let body = '';
-    req.on('data', chunk => { body += chunk; });
+    let bodyTooLarge = false;
+    req.on('data', chunk => {
+      if (bodyTooLarge) return;
+      body += chunk;
+      if (body.length > MAX_ACTION_BODY) {
+        bodyTooLarge = true;
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
+        req.destroy();
+      }
+    });
     req.on('end', () => {
       try {
         const { agentId, input } = JSON.parse(body);
@@ -162,7 +266,13 @@ const httpServer = http.createServer((req, res) => {
 });
 
 // --- WebSocket server ---
-const wss = new WebSocketServer({ server: httpServer });
+// perMessageDeflate defaults to on in `ws`, costing a zlib context (~50-100KB)
+// per connection plus per-message CPU. Payloads here are already base64 text —
+// not worth the CPU/memory on a small VPS for the bandwidth it saves.
+// maxPayload bounds a single frame's memory cost — `ws`'s own default is 100MB,
+// which would let one oversized/malformed message (bug or hostile peer) spike
+// memory well past what a small VPS has.
+const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: false, maxPayload: MAX_WS_PAYLOAD });
 
 wss.on('connection', (ws) => {
   let role = null; // 'agent' or 'browser'
@@ -186,6 +296,12 @@ wss.on('connection', (ws) => {
         ws.close();
         return;
       }
+      if (agents.size >= MAX_AGENTS) {
+        console.log(`[!] Agent registration rejected: at MAX_AGENTS (${MAX_AGENTS})`);
+        ws.send(JSON.stringify({ type: 'error', message: 'Server at max agent capacity' }));
+        ws.close();
+        return;
+      }
       role = 'agent';
       const id = generateAgentId();
       const user = tokenUserMap[msg.token] || 'user';
@@ -198,6 +314,7 @@ wss.on('connection', (ws) => {
         connectedAt: new Date().toISOString(),
         ws,
         scrollback: [],
+        scrollbackBytes: 0,
         lastOutput: '',
         user
       };
@@ -229,10 +346,16 @@ wss.on('connection', (ws) => {
         ws.close();
         return;
       }
+      if (browsers.size >= MAX_BROWSERS) {
+        console.log(`[!] Browser auth rejected: at MAX_BROWSERS (${MAX_BROWSERS})`);
+        ws.send(JSON.stringify({ type: 'error', message: 'Server at max connection capacity, try again shortly' }));
+        ws.close();
+        return;
+      }
       role = 'browser';
       const user = msg.username || 'user';
       browsers.set(ws, { ws, agentIds: new Set(), user });
-      ws.send(JSON.stringify({ type: 'auth_ok', agents: getAgentsList(user), user }));
+      ws.send(JSON.stringify({ type: 'auth_ok', agents: getAgentsList(user), user, supervisorConfig: config.server.supervisor }));
       console.log(`[+] Browser connected (user: ${user})`);
       return;
     }
@@ -258,11 +381,22 @@ wss.on('connection', (ws) => {
         }
       } catch (e) { /* ignore decode errors */ }
 
-      // Append to scrollback
+      // Append to scrollback. Track total bytes incrementally (no reduce()) and
+      // trim in one batched splice only once meaningfully over budget, rather
+      // than shifting the array on every message — see SCROLLBACK_TRIM_MARGIN.
       agentInfo.scrollback.push(msg.payload);
-      let total = agentInfo.scrollback.reduce((s, p) => s + p.length, 0);
-      while (total > SCROLLBACK_MAX && agentInfo.scrollback.length > 1) {
-        total -= agentInfo.scrollback.shift().length;
+      agentInfo.scrollbackBytes = (agentInfo.scrollbackBytes || 0) + msg.payload.length;
+      if (agentInfo.scrollbackBytes > SCROLLBACK_MAX + SCROLLBACK_TRIM_MARGIN) {
+        let dropCount = 0, freed = 0;
+        const sb = agentInfo.scrollback;
+        while (agentInfo.scrollbackBytes - freed > SCROLLBACK_MAX && dropCount < sb.length - 1) {
+          freed += sb[dropCount].length;
+          dropCount++;
+        }
+        if (dropCount > 0) {
+          sb.splice(0, dropCount);
+          agentInfo.scrollbackBytes -= freed;
+        }
       }
       // Forward to browsers (check both single-agent and multi-agent subscriptions)
       const payload = JSON.stringify({ type: 'data', payload: msg.payload, agentId: agentInfo.id });
@@ -282,6 +416,58 @@ wss.on('connection', (ws) => {
         if (binfo.agentIds.has(agentInfo.id) && bws.readyState === bws.OPEN) {
           bws.send(fpayload);
         }
+      }
+    }
+
+    // Agent periodically reports its detected Claude session state
+    if (role === 'agent' && msg.type === 'claude_state') {
+      const agentInfo = agents.get(ws);
+      if (!agentInfo) return;
+      const prev = agentInfo.claudeState;
+      agentInfo.claudeState = {
+        running: !!msg.state && msg.state.running,
+        kind: msg.state ? msg.state.kind : 'none',
+        prompt: msg.state ? (msg.state.prompt || '').substring(0, 500) : '',
+        options: msg.state ? (msg.state.options || []).slice(0, 20) : [],
+        lastLine: msg.state ? (msg.state.lastLine || '').substring(0, 300) : '',
+        detectedAt: msg.state ? msg.state.detectedAt : null,
+        receivedAt: new Date().toISOString()
+      };
+      if (supervisor) supervisor.onClaudeState(agentInfo.id, agentInfo.claudeState);
+      // Notify watching browsers if state kind changed (saves bandwidth vs full broadcast).
+      // Broadcast to all browsers so the dashboard management panel stays live
+      // without each browser needing to subscribe to every agent.
+      if (!prev || prev.kind !== agentInfo.claudeState.kind || prev.prompt !== agentInfo.claudeState.prompt) {
+        const update = JSON.stringify({
+          type: 'claude_state',
+          agentId: agentInfo.id,
+          state: agentInfo.claudeState
+        });
+        for (const [bws, binfo] of browsers) {
+          if (bws.readyState === bws.OPEN) {
+            bws.send(update);
+          }
+        }
+      }
+    }
+
+    // Forward spawn_node_result and list_screens_result agent → browser
+    if (role === 'agent' && (msg.type === 'spawn_node_result' || msg.type === 'list_screens_result')) {
+      const agentInfo = agents.get(ws);
+      if (!agentInfo) return;
+      // Resolve any pending list_screens promise first
+      if (msg.type === 'list_screens_result' && msg.reqId && pendingScreenQueries.has(msg.reqId)) {
+        try {
+          pendingScreenQueries.get(msg.reqId)({
+            ok: !!msg.ok,
+            screens: msg.screens || [],
+            error: msg.error
+          });
+        } catch {}
+      }
+      const out = JSON.stringify({ ...msg, agentId: agentInfo.id, clientId: (agentInfo.attrs || {}).clientId || null });
+      for (const [bws, binfo] of browsers) {
+        if (bws.readyState === bws.OPEN) bws.send(out);
       }
     }
 
@@ -308,28 +494,9 @@ wss.on('connection', (ws) => {
         console.log(`[*] Browser watching agent: ${msg.agentId} (resume: ${!!msg.resume})`);
         // On resume (reconnect), skip scrollback replay — frontend keeps its own buffer.
         if (!msg.resume && msg.agentId) {
-          // Send recent scrollback (last SCROLLBACK_INIT chunks)
           for (const [, ainfo] of agents) {
-            if (ainfo.id === msg.agentId && ainfo.scrollback.length > 0) {
-              const total = ainfo.scrollback.length;
-              const start = Math.max(0, total - SCROLLBACK_INIT);
-              for (let i = start; i < total; i++) {
-                ws.send(JSON.stringify({ type: 'data', payload: ainfo.scrollback[i], agentId: ainfo.id }));
-              }
-              // Tell browser how much history is available
-              ws.send(JSON.stringify({
-                type: 'scrollback_info',
-                agentId: ainfo.id,
-                total: total,
-                loadedFrom: start,
-                hasMore: start > 0
-              }));
-              // End marker so browser scrolls to bottom after all data is written
-              ws.send(JSON.stringify({
-                type: 'scrollback_end',
-                agentId: ainfo.id
-              }));
-              console.log(`[*] Sent ${total - start}/${total} scrollback chunks to browser`);
+            if (ainfo.id === msg.agentId) {
+              sendScrollbackReplay(ws, ainfo, () => {});
               break;
             }
           }
@@ -344,26 +511,13 @@ wss.on('connection', (ws) => {
         console.log(`[*] Browser watching ${msg.agentIds.length} agents: ${msg.agentIds.join(', ')} (resume: ${!!msg.resume})`);
         // On resume (reconnect), skip scrollback replay.
         if (!msg.resume) {
-          // Send scrollback for each agent
+          // Each agent's replay is independently paced (sendScrollbackReplay) and
+          // kicked off without waiting on the others, so they interleave fairly
+          // across event-loop ticks instead of one agent's history blocking the rest.
           for (const agentId of msg.agentIds) {
             for (const [, ainfo] of agents) {
-              if (ainfo.id === agentId && ainfo.scrollback.length > 0) {
-                const total = ainfo.scrollback.length;
-                const start = Math.max(0, total - SCROLLBACK_INIT);
-                for (let i = start; i < total; i++) {
-                  ws.send(JSON.stringify({ type: 'data', payload: ainfo.scrollback[i], agentId: ainfo.id }));
-                }
-                ws.send(JSON.stringify({
-                  type: 'scrollback_info',
-                  agentId: ainfo.id,
-                  total: total,
-                  loadedFrom: start,
-                  hasMore: start > 0
-                }));
-                ws.send(JSON.stringify({
-                  type: 'scrollback_end',
-                  agentId: ainfo.id
-                }));
+              if (ainfo.id === agentId) {
+                sendScrollbackReplay(ws, ainfo, () => {});
                 break;
               }
             }
@@ -453,6 +607,119 @@ wss.on('connection', (ws) => {
         }
       }
     }
+
+    // Kill a node from the management panel (browser → agent) — either just
+    // the monitoring agent (mode: 'agent_only') or the agent AND its
+    // underlying task screen (mode: 'agent_and_task'). Like spawn_node, this
+    // doesn't require the browser to be "watching" this agent's terminal —
+    // it's a fleet-management action, not a terminal-session action.
+    if (role === 'browser' && msg.type === 'kill_node') {
+      const binfo = browsers.get(ws);
+      if (!binfo) return;
+      let matchWs = null, matchInfo = null;
+      for (const [aws, ainfo] of agents) {
+        if (aws.readyState === aws.OPEN && ainfo.id === msg.agentId) { matchWs = aws; matchInfo = ainfo; break; }
+      }
+      if (!matchWs) {
+        ws.send(JSON.stringify({ type: 'kill_node_result', reqId: msg.reqId, ok: false, error: 'Agent not found or offline' }));
+        return;
+      }
+      const mode = msg.mode === 'agent_and_task' ? 'agent_and_task' : 'agent_only';
+      matchWs.send(JSON.stringify({ type: 'kill_node', reqId: msg.reqId, mode }));
+      console.log(`[*] kill_node (${mode}) forwarded to agent ${matchInfo.name}`);
+      ws.send(JSON.stringify({ type: 'kill_node_result', reqId: msg.reqId, ok: true }));
+    }
+
+    // Live-update the supervisor's config from the management panel (browser →
+    // server). Any authenticated browser can call this — same trust level as
+    // spawn_node/restart_screen/api-action, all of which already let a logged-in
+    // browser affect the whole fleet. Persists to config.json (survives a
+    // restart) and hot-reloads the running supervisor via initSupervisor().
+    // The form always submits the full config, so every field below is
+    // unconditionally applied (not a partial patch).
+    if (role === 'browser' && msg.type === 'update_supervisor_config') {
+      const errors = [];
+      const next = { ...config.server.supervisor };
+
+      next.enabled = !!msg.enabled;
+      next.analyzerAgentName = String(msg.analyzerAgentName || '').trim().slice(0, 100);
+
+      const webhook = String(msg.webhook || '').trim().slice(0, 500);
+      if (webhook) {
+        try { new URL(webhook); } catch { errors.push('webhook 不是合法 URL'); }
+      }
+      next.webhook = webhook;
+
+      const numField = (key, label, min, max) => {
+        const n = Number(msg[key]);
+        if (!Number.isFinite(n) || n < min || n > max) {
+          errors.push(`${label} 必须在 ${min}-${max} 之间`);
+          return;
+        }
+        next[key] = Math.round(n);
+      };
+      numField('summaryInterval', '摘要间隔(秒)', 10, 86400);
+      numField('idleTimeout', '空闲告警阈值(秒)', 10, 86400);
+      numField('analyzerInterval', '分析间隔(秒)', 10, 86400);
+      numField('analyzerTimeout', '分析超时(秒)', 5, 3600);
+
+      if (errors.length) {
+        ws.send(JSON.stringify({ type: 'supervisor_config_result', ok: false, error: errors.join('; ') }));
+        return;
+      }
+
+      config.server.supervisor = next;
+      try {
+        fs.writeFileSync(configFile, JSON.stringify(config, null, 2), { mode: 0o600 });
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'supervisor_config_result', ok: false, error: `保存到 config.json 失败: ${e.message}` }));
+        return;
+      }
+
+      initSupervisor();
+      console.log(`[*] Supervisor config updated by browser (enabled=${next.enabled}, analyzer=${next.analyzerAgentName || '(none)'})`);
+
+      ws.send(JSON.stringify({ type: 'supervisor_config_result', ok: true }));
+      const broadcastMsg = JSON.stringify({ type: 'supervisor_config', config: next });
+      for (const [bws] of browsers) {
+        if (bws.readyState === bws.OPEN) bws.send(broadcastMsg);
+      }
+    }
+
+    // Spawn a new node on the target client machine (browser → server → agent).
+    // Either msg.target.agentId (any agent of that client) or msg.target.clientId.
+    // Generates a unique reqId for correlation.
+    if (role === 'browser' && msg.type === 'spawn_node') {
+      const binfo = browsers.get(ws);
+      if (!binfo) return;
+      const target = msg.target || {};
+      let matchWs = null, matchInfo = null;
+      for (const [aws, ainfo] of agents) {
+        if (aws.readyState !== aws.OPEN) continue;
+        if (target.agentId && ainfo.id === target.agentId) { matchWs = aws; matchInfo = ainfo; break; }
+        if (target.clientId && (ainfo.attrs || {}).clientId === target.clientId) {
+          matchWs = aws; matchInfo = ainfo; break;
+        }
+      }
+      if (!matchWs) {
+        ws.send(JSON.stringify({
+          type: 'spawn_node_result',
+          reqId: msg.reqId,
+          ok: false,
+          error: `No agent found for target ${JSON.stringify(target)}`
+        }));
+        return;
+      }
+      const fwd = JSON.stringify({
+        type: 'spawn_node',
+        reqId: msg.reqId,
+        screenName: msg.screenName,
+        nodeName: msg.nodeName,
+        cmd: msg.cmd || 'bash'
+      });
+      matchWs.send(fwd);
+      console.log(`[*] spawn_node forwarded to ${matchInfo.name} (client ${matchInfo.attrs && matchInfo.attrs.clientId}) screen=${msg.screenName} cmd=${msg.cmd || 'bash'}`);
+    }
   });
 
   ws.on('close', () => {
@@ -473,25 +740,79 @@ wss.on('connection', (ws) => {
 });
 
 // --- Supervisor ---
-const supCfg = config.server.supervisor;
-let supervisor = null;
-if (supCfg && supCfg.enabled) {
-  supervisor = createSupervisor(supCfg, {
-    getAgents: getAgentsList,
-    sendToAgent: (agentId, input) => {
+// Deps are built once; initSupervisor() (re)creates the actual instance from
+// the current config.server.supervisor, so a live config update from the
+// browser (see 'update_supervisor_config' below) can tear down and restart
+// it in place without restarting the whole server.
+const supervisorDeps = {
+  getAgents: getAgentsList,
+  getAgentRawOutput: (agentId) => {
+    for (const [, ainfo] of agents) {
+      if (ainfo.id === agentId) return ainfo.lastOutput || '';
+    }
+    return '';
+  },
+  sendToAgent: (agentId, input) => {
+    for (const [aws, ainfo] of agents) {
+      if (ainfo.id === agentId && aws.readyState === aws.OPEN) {
+        aws.send(JSON.stringify({ type: 'data', payload: Buffer.from(input, 'utf8').toString('base64') }));
+        return true;
+      }
+    }
+    return false;
+  },
+  sendToAgentObj: (agentId, obj) => {
+    for (const [aws, ainfo] of agents) {
+      if (ainfo.id === agentId && aws.readyState === aws.OPEN) {
+        aws.send(JSON.stringify(obj));
+        return true;
+      }
+    }
+    return false;
+  },
+  broadcastToBrowsers: (obj) => {
+    const data = JSON.stringify(obj);
+    for (const [bws] of browsers) {
+      if (bws.readyState === bws.OPEN) bws.send(data);
+    }
+  },
+  requestAgentListScreens: (agentId) => {
+    return new Promise((resolve) => {
+      const reqId = `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      let resolved = false;
+      const onTimer = setTimeout(() => {
+        if (!resolved) { resolved = true; resolve({ ok: false, error: 'timeout' }); }
+      }, 5000);
+      pendingScreenQueries.set(reqId, (result) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(onTimer);
+        pendingScreenQueries.delete(reqId);
+        resolve(result);
+      });
+      // Send list_screens request to agent
       for (const [aws, ainfo] of agents) {
         if (ainfo.id === agentId && aws.readyState === aws.OPEN) {
-          const bytes = new TextEncoder().encode(input);
-          let bin = '';
-          bytes.forEach(b => bin += String.fromCharCode(b));
-          aws.send(JSON.stringify({ type: 'data', payload: btoa(bin) }));
-          return true;
+          aws.send(JSON.stringify({ type: 'list_screens', reqId }));
+          return;
         }
       }
-      return false;
-    }
-  });
+      // Agent not found
+      if (!resolved) { resolved = true; clearTimeout(onTimer); pendingScreenQueries.delete(reqId); resolve({ ok: false, error: 'agent offline' }); }
+    });
+  }
+};
+
+let supervisor = null;
+function initSupervisor() {
+  if (supervisor) { supervisor.stop(); supervisor = null; }
+  const supCfg = config.server.supervisor;
+  if (supCfg && supCfg.enabled) {
+    supervisor = createSupervisor(supCfg, supervisorDeps);
+    supervisor.start();
+  }
 }
+initSupervisor();
 
 // --- Start ---
 httpServer.listen(port, () => {
