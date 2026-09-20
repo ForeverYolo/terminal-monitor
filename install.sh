@@ -22,6 +22,44 @@ check_node() {
     echo "[OK] Node.js $(node -v)"
 }
 
+# --- 解析可用的 node 绝对路径 ---
+# 部分机器（如 2080）system node 过旧（v12）解析不了源码里的可选链语法，
+# 真实运行时在 nvm 里，而非交互 shell 不会加载 nvm。探测标准不是版本号
+# 而是证据：能通过 `node --check` 解析本仓库的 client.js 才算可用。
+# 注意参数顺序是 `node --check <file>`，`node <file> --check` 会把 --check
+# 传给脚本本身。
+resolve_node() {
+    for p in "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node /usr/bin/node; do
+        if [ -x "$p" ] && "$p" --check "$REPO_DIR/client.js" 2>/dev/null; then
+            NODE_BIN="$p"
+            return 0
+        fi
+    done
+    if command -v node >/dev/null 2>&1 && node --check "$REPO_DIR/client.js" 2>/dev/null; then
+        NODE_BIN=node
+        return 0
+    fi
+    echo "[!] 没有找到能解析本项目的 node，请安装 Node 20+ 或 nvm" >&2
+    return 1
+}
+
+# --- 复用本机已有 clientId ---
+# clientId 按 config 文件首次运行时随机生成，同一台机器手工创建多个 config
+# 会各自生成不同 ID，在网页上被拆成多台"机器"。首次生成后复用同目录已有
+# config 里的值，保证同机所有节点归入同一个 Client。
+pick_client_id() {
+    local f id
+    for f in "$PROJ_DIR"/config.client-*.json "$PROJ_DIR"/config.client.json "$PROJ_DIR"/config.json; do
+        [ -f "$f" ] || continue
+        id=$(grep -oP '"clientId"\s*:\s*"\K[^"]+' "$f" | head -1)
+        if [ -n "$id" ]; then
+            CLIENT_ID="$id"
+            return 0
+        fi
+    done
+    CLIENT_ID=$(openssl rand -hex 4)
+}
+
 # --- 部署服务端 ---
 deploy_server() {
     echo "=== 部署 Terminal Monitor Server ==="
@@ -86,13 +124,14 @@ EOF
     npm install --production 2>&1 | tail -1
 
     # 在 screen 里启动
+    resolve_node
     local sn="swt-server"
     if screen -list | grep -q "\.$sn"; then
         echo "[!] screen session '$sn' 已存在，先关闭..."
         screen -S "$sn" -X quit
         sleep 1
     fi
-    screen -dmS "$sn" bash -c "cd $PROJ_DIR && node server.js 2>&1 | tee -a $PROJ_DIR/server.log"
+    screen -dmS "$sn" bash -c "cd $PROJ_DIR && exec '$NODE_BIN' server.js 2>&1 | tee -a $PROJ_DIR/server.log"
 
     echo ""
     echo "=== 部署完成 ==="
@@ -175,8 +214,9 @@ deploy_client() {
         TAGS_JSON=$(echo "$TAGS" | tr ',' '\n' | xargs -I{} printf '"{}",' | sed 's/,$//' | awk '{print "["$0"]"}')
     fi
 
-    # 写文件 - 每个 session 独立配置
+    # 写文件 - 每个 session 独立配置，但 clientId 复用本机已有的
     local CFG_NAME="config.client-${SCREEN_SESSION}.json"
+    pick_client_id
     mkdir -p "$PROJ_DIR/public"
     if [ "$PROJ_DIR" != "$REPO_DIR" ]; then
         cp "$REPO_DIR/server.js" "$PROJ_DIR/"
@@ -197,6 +237,7 @@ deploy_client() {
     "token": "$TOKEN",
     "name": "$NAME",
     "screen": "$SCREEN_SESSION",
+    "clientId": "$CLIENT_ID",
     "attrs": {
       "tags": $TAGS_JSON
     }
@@ -208,13 +249,14 @@ EOF
     npm install --production 2>&1 | tail -1
 
     # 在 screen 里启动，用 screen session 名做后缀避免冲突
+    resolve_node
     local sn="swt-client-${SCREEN_SESSION}"
     if screen -list | grep -q "\.$sn"; then
         echo "[!] screen session '$sn' 已存在，先关闭..."
         screen -S "$sn" -X quit
         sleep 1
     fi
-    screen -dmS "$sn" bash -c "cd $PROJ_DIR && node client.js --config=$CFG_NAME 2>&1 | tee -a $PROJ_DIR/client-${SCREEN_SESSION}.log"
+    screen -dmS "$sn" bash -c "cd $PROJ_DIR && exec '$NODE_BIN' client.js --config=$CFG_NAME 2>&1 | tee -a $PROJ_DIR/client-${SCREEN_SESSION}.log"
 
     echo ""
     echo "=== 部署完成 ==="
@@ -311,7 +353,8 @@ EOF
     # Start server
     echo ""
     echo "[*] Starting server on 0.0.0.0:$PORT ..."
-    node "$PROJ_DIR/server.js" --config=config.debug-server.json &
+    resolve_node
+    "$NODE_BIN" "$PROJ_DIR/server.js" --config=config.debug-server.json &
     SERVER_PID=$!
     sleep 1
 
@@ -322,7 +365,7 @@ EOF
 
     # Start client
     echo "[*] Starting client (screen: $SCREEN_SESSION) ..."
-    node "$PROJ_DIR/client.js" --config=config.debug-client.json &
+    "$NODE_BIN" "$PROJ_DIR/client.js" --config=config.debug-client.json &
     CLIENT_PID=$!
     sleep 1
 
