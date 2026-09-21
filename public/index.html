@@ -2160,7 +2160,8 @@ function renderMgmtClients() {
     return `<div class="mgmt-client">
       <h4>Client: ${escapeHtml(cid)} · ${agents.length} agent(s)${nodeCount != null ? ' / ' + nodeCount + ' screen(s)' : ''}</h4>
       <div class="add-node-row">
-        <input type="text" id="spawn-name-${escapeHtml(cid)}" placeholder="新节点 screen 名" maxlength="40">
+        <input type="text" id="spawn-name-${escapeHtml(cid)}" placeholder="screen 名" maxlength="40" style="width:110px;">
+        <input type="text" id="spawn-display-${escapeHtml(cid)}" placeholder="显示名(默认 机器名-screen名)" maxlength="60" style="width:190px;">
         <select id="spawn-cmd-${escapeHtml(cid)}">
           <option value="bash">bash</option>
           <option value="claude">claude</option>
@@ -2191,23 +2192,28 @@ function renderMgmtClients() {
 
 function spawnNodeOnClient(clientId) {
   const nameInput = document.getElementById('spawn-name-' + clientId);
+  const displayInput = document.getElementById('spawn-display-' + clientId);
   const cmdSelect = document.getElementById('spawn-cmd-' + clientId);
   if (!nameInput || !cmdSelect) return;
   const screenName = nameInput.value.trim();
+  const displayName = displayInput ? displayInput.value.trim() : '';
   const cmd = cmdSelect.value;
   if (!screenName) { alert('请输入 screen 名'); return; }
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(screenName)) { alert('screen 名仅允许字母/数字/_/-，最长40'); return; }
   const reqId = 'spawn-' + Date.now().toString(36);
   pendingSpawnReqs.set(reqId, { clientId, screenName, cmd, ts: Date.now() });
-  ws.send(JSON.stringify({
+  const body = {
     type: 'spawn_node',
     reqId,
     target: { clientId },
     screenName,
-    nodeName: screenName, // same as screen for simplicity
     cmd
-  }));
-  showFloatingNotice(`已请求在 ${clientId} 上新增节点 ${screenName}`);
+  };
+  // Optional display name; empty → client.js falls back to
+  // `${parentName}-${screenName}` (e.g. "2080-server-monitor-3").
+  if (displayName) body.nodeName = displayName;
+  ws.send(JSON.stringify(body));
+  showFloatingNotice(`已请求在 ${clientId} 上新增节点 ${displayName || screenName}`);
 }
 
 const pendingSpawnReqs = new Map();
