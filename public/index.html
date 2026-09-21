@@ -600,6 +600,8 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
         </div>
         <div>
           <button onclick="saveSupervisorConfig()" style="background:#2a6e4a; color:#fff; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-size:13px;">保存并应用</button>
+          <button onclick="pushUpdateAll()" style="background:#2a4a6e; color:#fff; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-size:13px; margin-left:8px;">⬆ 全部推送更新</button>
+          <button onclick="restartServer()" style="background:#6e2a2a; color:#fff; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-size:13px; margin-left:8px;">⟳ 重启服务器应用更新</button>
           <span id="sup-save-status" style="margin-left:10px; font-size:12px; color:#8b949e;"></span>
         </div>
       </div>
@@ -1028,6 +1030,7 @@ function connect(username, password) {
       lastAgents = msg.agents || [];
       syncAttentionFromAgents(lastAgents);
       supervisorConfig = msg.supervisorConfig || {};
+      if (msg.serverFiles) lastServerFiles = msg.serverFiles;
 
       const inTerm = views.term.style.display !== 'none';
       const inMulti = views.multi.style.display !== 'none';
@@ -1072,6 +1075,7 @@ function connect(username, password) {
     } else if (msg.type === 'agents') {
       lastAgents = msg.agents || [];
       syncAttentionFromAgents(lastAgents);
+      if (msg.serverFiles) lastServerFiles = msg.serverFiles;
       renderAgents(lastAgents);
       if (currentMode === 'mgmt') { renderMgmtClients(); refreshAnalyzerOptions(); }
     } else if (msg.type === 'data') {
@@ -1165,6 +1169,25 @@ function connect(username, password) {
         }
         if (currentMode === 'mgmt') renderMgmtClients();
       }
+    } else if (msg.type === 'push_update_result') {
+      const p = msg.reqId && pendingUpdateReqs.get(msg.reqId);
+      if (p) { clearTimeout(p.timer); pendingUpdateReqs.delete(msg.reqId); }
+      showFloatingNotice(msg.ok
+        ? `✓ ${msg.agentName} 已更新` + (msg.updated && msg.updated.length ? `: ${msg.updated.join(', ')}` : '（已是最新）')
+        : `✗ ${msg.agentName} 更新失败: ${msg.error || 'unknown'}`);
+      if (currentMode === 'mgmt') renderMgmtClients();
+    } else if (msg.type === 'query_files_result') {
+      const p = msg.reqId && pendingUpdateReqs.get(msg.reqId);
+      if (p) { clearTimeout(p.timer); pendingUpdateReqs.delete(msg.reqId); }
+      if (currentMode === 'mgmt') renderMgmtClients();
+    } else if (msg.type === 'restart_server_result') {
+      showFloatingNotice(msg.ok ? (msg.message || '服务器重启中…') : `✗ 重启失败: ${msg.error || 'unknown'}`);
+    } else if (msg.type === 'pull_update_result') {
+      const p = pendingPullReqs.get(msg.reqId);
+      if (p) { clearTimeout(p.timer); pendingPullReqs.delete(msg.reqId); }
+      showFloatingNotice(msg.ok
+        ? `✓ 已从 ${msg.agentName} 拉取: ${(msg.updated || []).join(', ')} — 重启服务器后生效`
+        : `✗ 从 ${msg.agentName} 拉取失败: ${msg.error || 'unknown'}`);
     }
   };
 
@@ -2154,21 +2177,39 @@ function renderMgmtClients() {
     if (!byClient.has(cid)) byClient.set(cid, []);
     byClient.get(cid).push(a);
   }
+  // This list re-renders on every agents broadcast (~10s) while innerHTML
+  // rebuilds wipe typed text. Snapshot the in-progress inputs and select so
+  // the user doesn't lose a half-typed screen name mid-broadcast.
+  const saved = {};
+  for (const cid of byClient.keys()) {
+    const name = document.getElementById('spawn-name-' + cid);
+    const disp = document.getElementById('spawn-display-' + cid);
+    const cmd = document.getElementById('spawn-cmd-' + cid);
+    saved[cid] = { name: name ? name.value : '', disp: disp ? disp.value : '', cmd: cmd ? cmd.value : 'bash' };
+  }
   c.innerHTML = Array.from(byClient.entries()).map(([cid, agents]) => {
     const nodeCount = agents[0] && agents[0].reportedNodeCount;
     const overLimit = agents.length >= 20;
+    const badge = versionBadge(agents[0]);
+    const sv = saved[cid] || { name: '', disp: '', cmd: 'bash' };
     return `<div class="mgmt-client">
-      <h4>Client: ${escapeHtml(cid)} · ${agents.length} agent(s)${nodeCount != null ? ' / ' + nodeCount + ' screen(s)' : ''}</h4>
+      <h4>Client: ${escapeHtml(cid)} · ${agents.length} agent(s)${nodeCount != null ? ' / ' + nodeCount + ' screen(s)' : ''} ${badge}</h4>
       <div class="add-node-row">
-        <input type="text" id="spawn-name-${escapeHtml(cid)}" placeholder="screen 名" maxlength="40" style="width:110px;">
-        <input type="text" id="spawn-display-${escapeHtml(cid)}" placeholder="显示名(默认 机器名-screen名)" maxlength="60" style="width:190px;">
+        <input type="text" id="spawn-name-${escapeHtml(cid)}" placeholder="screen 名" maxlength="40" style="width:110px;" value="${escapeHtml(sv.name)}">
+        <input type="text" id="spawn-display-${escapeHtml(cid)}" placeholder="显示名(默认 机器名-screen名)" maxlength="60" style="width:190px;" value="${escapeHtml(sv.disp)}">
         <select id="spawn-cmd-${escapeHtml(cid)}">
-          <option value="bash">bash</option>
-          <option value="claude">claude</option>
-          <option value="sh">sh</option>
+          <option value="bash"${sv.cmd === 'bash' ? ' selected' : ''}>bash</option>
+          <option value="claude"${sv.cmd === 'claude' ? ' selected' : ''}>claude</option>
+          <option value="sh"${sv.cmd === 'sh' ? ' selected' : ''}>sh</option>
         </select>
         <button onclick="spawnNodeOnClient('${escapeHtml(cid)}')" ${overLimit?'disabled':''}>
           ${overLimit ? '已达 20 上限' : '+ 新增节点'}
+        </button>
+        <button onclick="pushUpdateToClient('${escapeHtml(cid)}')" title="把服务器上的客户端文件推送到这台机器并自动重启监控进程">
+          ⬆ 推送更新
+        </button>
+        <button onclick="pullUpdateFromClient('${escapeHtml(cid)}', '${escapeHtml(agents[0] ? agents[0].name : cid)}')" style="background:#3a6e2a; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;" title="把这台机器当作版本源：服务器从它拉取全部托管文件并覆盖自己的副本（覆盖前自动备份）">
+          ⬇ 从此机拉取
         </button>
       </div>
       <div class="mgmt-agent-list">
@@ -2217,6 +2258,111 @@ function spawnNodeOnClient(clientId) {
 }
 
 const pendingSpawnReqs = new Map();
+
+// --- Push-update UI ---
+
+// Four-state version badge for one agent. Inputs:
+//   S = lastServerFiles (server manifest)   A = agent.fileHashes (fresh disk
+//   hashes via register + periodic query_files)   R = agent.runningHashes
+//   (register-time snapshot = running version)   rPrev = previous register's
+//   R.client.js for this clientId (server-tracked)
+// States:
+//   green  ✓ 最新        S==A==R for client files, no server-side drift
+//   yellow ⬆ 待更新      server ahead / process behind — push_update fixes it
+//   blue   ⬇ 待拉取      this machine's disk has unpublished changes:
+//                        server-side file drift, or client-file edit on disk
+//                        (A≠R with R==S), or agent restarted onto local code
+//                        (A==R≠S with rPrev==S)
+//   grey   ? 版本未知     old client without hashes
+const CLIENT_FILES_UI = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js'];
+function versionBadge(agent) {
+  if (!lastServerFiles || !agent || !agent.fileHashes || !agent.runningHashes) {
+    return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
+  }
+  const A = agent.fileHashes, R = agent.runningHashes, S = lastServerFiles;
+  // Server-side files this agent doesn't run — drift means someone edited them
+  // on that machine (server never pushes them to agents). Any drift → 待拉取.
+  for (const name of Object.keys(S)) {
+    if (CLIENT_FILES_UI.includes(name)) continue;
+    if (A[name] && S[name] && A[name] !== S[name]) {
+      return '<span style="color:#58a6ff;font-size:12px;">⬇ 待拉取</span>';
+    }
+  }
+  // Client files: three-way compare.
+  let yellow = false;
+  for (const name of CLIENT_FILES_UI) {
+    if (!(name in A) || !(name in R)) return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
+    const a = A[name], r = R[name], s = S[name];
+    if (!s) continue;
+    if (a !== r) {
+      // disk edited while old process still runs; direction via R vs S
+      if (r === s) return '<span style="color:#58a6ff;font-size:12px;">⬇ 待拉取</span>';  // local unpublished edit
+      yellow = true;                                                                      // ambiguous → conservative 待更新
+      continue;
+    }
+    // A == R: disk matches running process
+    if (a !== s) {
+      // If the previous register's R was the server version, this agent
+      // RESTARTED onto local unpublished code → 待拉取; otherwise server
+      // published a newer version not yet pushed → 待更新.
+      if (name === 'client.js' && agent.rPrev && agent.rPrev === s) {
+        return '<span style="color:#58a6ff;font-size:12px;">⬇ 待拉取</span>';
+      }
+      yellow = true;
+    }
+  }
+  if (yellow) return '<span style="color:#d29922;font-size:12px;">⬆ 待更新</span>';
+  return '<span style="color:#3fb950;font-size:12px;">✓ 最新</span>';
+}
+
+function sendPush(reqId, body, clientId) {
+  const timer = setTimeout(() => {
+    pendingUpdateReqs.delete(reqId);
+    showFloatingNotice(`⏱ ${clientId} 更新无响应（可能正在重启，等待其重连）`);
+  }, 30000);
+  pendingUpdateReqs.set(reqId, { clientId, timer });
+  ws.send(JSON.stringify(body));
+}
+
+function pushUpdateToClient(clientId) {
+  const reqId = 'push-' + Date.now().toString(36);
+  sendPush(reqId, { type: 'push_update', reqId, clientId }, clientId);
+  showFloatingNotice(`已请求推送更新到 ${clientId}`);
+}
+
+// Treat this machine as the version source: server fetches its managed files
+// from the agent, overwrites its own copies (after backing up), then a server
+// restart + push_update_all distributes the new version everywhere.
+function pullUpdateFromClient(clientId, agentName) {
+  const reqId = 'pull-' + Date.now().toString(36);
+  if (!confirm(`把 "${agentName || clientId}" 设为版本源？\n\n服务器将从这台机器拉取全部托管文件（client.js、server.js、前端页面等），并覆盖服务器磁盘上的副本（覆盖前自动备份）。\n\n之后需要重启服务器 + 全部推送更新，其他机器才会拿到新版本。`)) return;
+  const timer = setTimeout(() => {
+    pendingPullReqs.delete(reqId);
+    showFloatingNotice(`⏱ ${clientId} 拉取无响应（agent 可能掉线）`);
+  }, 30000);
+  pendingPullReqs.set(reqId, { timer });
+  ws.send(JSON.stringify({ type: 'pull_update', reqId, clientId }));
+  showFloatingNotice(`正在从 ${agentName || clientId} 拉取更新…`);
+}
+
+function pushUpdateAll() {
+  if (!confirm('向所有在线机器推送客户端文件更新？落后的机器会自动重启监控进程。')) return;
+  const reqId = 'push-all-' + Date.now().toString(36);
+  const clientIds = new Set();
+  for (const a of lastAgents) {
+    const cid = (a.attrs && a.attrs.clientId) || a.clientId;
+    if (cid) clientIds.add(cid);
+  }
+  for (const cid of clientIds) {
+    sendPush(reqId + '-' + cid, { type: 'push_update', reqId: reqId + '-' + cid, clientId: cid }, cid);
+  }
+  showFloatingNotice(`已请求推送更新到 ${clientIds.size} 台机器`);
+}
+
+function restartServer() {
+  if (!confirm('确认重启服务器以应用磁盘上的更新文件？\n\n所有连接会断开几秒后自动恢复。')) return;
+  ws.send(JSON.stringify({ type: 'restart_server', reqId: 'rst-' + Date.now().toString(36) }));
+}
 
 // Stop a node's monitoring agent, optionally also killing the task screen it
 // was attached to. killTask=false leaves the underlying screen session (and
@@ -2275,6 +2421,11 @@ function showFloatingNotice(text) {
 // ========== Multi Select ==========
 
 let lastAgents = [];
+// Push-update state: server's file manifest (version source) and per-request
+// tracking with a 30s timeout — an agent that's mid-restart won't answer.
+let lastServerFiles = null;
+const pendingUpdateReqs = new Map(); // reqId -> { clientId, timer }
+const pendingPullReqs = new Map();   // reqId -> { timer } for pull_update flows
 
 function toggleAgentSelect(agentId) {
   if (selectedAgents.has(agentId)) {

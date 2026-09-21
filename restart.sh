@@ -151,8 +151,21 @@ export NODE_BIN'
 
   # --- service part: quit swt screen, resolve node, relaunch via screen ---
   if [ "$do_service" = 1 ]; then
+    # Honor a termination: a .stop marker (written by web "终止节点") means
+    # this node must NOT be resurrected by a restart — skip it entirely.
+    remote_script+="
+if [ -f '$qpath/config.client-$SCREEN_SESSION.json.stop' ]; then
+  echo '[restart] .stop marker present — node was terminated, skipping relaunch'
+  exit 0
+fi"
     remote_script+="
 (screen -S $qscreen -X quit 2>/dev/null || true) && sleep 1"
+    remote_script+="
+# screen quit can leave the node client alive as an orphan (it survives the
+# SIGHUP race because it holds its own node-pty) — it would then reconnect and
+# show up as a duplicate agent. Sweep the exact process before relaunching.
+pkill -f 'node.*client.js --config=$node_args' 2>/dev/null || true
+sleep 1"
     remote_script+="
 $NODE_RESOLVE"
     remote_script+="

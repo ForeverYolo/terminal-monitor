@@ -89,6 +89,43 @@ if (!config.client.clientId) {
 }
 const clientId = config.client.clientId;
 
+// --- Push-update: self file manifest ---
+// Server diffs these hashes against its own copies and pushes only what
+// differs (update_files). Whitelist is strict: only these names may ever be
+// written by the update path.
+const CLIENT_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js'];
+// Names this agent may be asked to upload (pull_update). Includes the
+// server-side files: when this machine is the designated update source, the
+// server replaces its own copies from here. Strict whitelist — anything else
+// is refused, so the fetch path can never read arbitrary files.
+const FETCHABLE_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
+  'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
+
+function sha256File(absPath) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    const s = fs.createReadStream(absPath);
+    s.on('data', d => h.update(d));
+    s.on('error', reject);
+    s.on('end', () => resolve(h.digest('hex')));
+  });
+}
+
+// {name: hash} of our FETCHABLE_FILES copies; missing files are omitted.
+// Deliberately wider than CLIENT_FILES: the server-side files (server.js,
+// public/* etc.) are hashed too so the four-state version badge can spot a
+// machine whose server-side copies drifted (i.e. someone edited them here to
+// publish via pull). At register time this snapshot IS the running version
+// (the server treats it as R); later query_files refreshes give fresh disk
+// state (A).
+async function hashSelfFiles() {
+  const out = {};
+  for (const name of FETCHABLE_FILES) {
+    try { out[name] = await sha256File(path.join(__dirname, name)); } catch { /* omitted */ }
+  }
+  return out;
+}
+
 // --- Debug byte-stream dump (toggle with --dump flag) ---
 // Dumps raw pty traffic to /tmp/swt-dump-<name>-{in,out}.bin so escape-sequence
 // flow (mouse mode switches, alt screen, etc.) can be inspected offline.
@@ -204,7 +241,7 @@ function safeResolveAgainst(base, rel) {
 
 function sendMsg(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
+    sendRawOrQueue(JSON.stringify(obj));
     return true;
   }
   return false;
@@ -280,10 +317,20 @@ async function handleSpawnNode(msg) {
   const cfgPath = path.join(__dirname, `config.client-${newScreenName}.json`);
   fs.writeFileSync(cfgPath, JSON.stringify({ mode: 'client', client: childConfig }, null, 2), { mode: 0o600 });
 
-  // Create a DETACHED screen session running the chosen command
+  // Create a DETACHED screen session running the chosen command. Plain `bash`
+  // inside screen is interactive-NON-login: on hosts whose ~/.bashrc guards on
+  // being a login shell (or heavy init like conda that misbehaves without the
+  // full login env) the shell can come up half-initialized. `bash -l` with no
+  // -c is an INTERACTIVE login shell — walks /etc/profile → ~/.profile →
+  // ~/.bashrc, matching what the user gets over ssh. (Note: `bash -lc` would
+  // be non-interactive and trip the classic `case $- in *i*` guard.)
+  // claude already runs via `bash -lc` deliberately (non-interactive, no
+  // prompt needed); sh never reads .bashrc, so it's left as-is.
   const screenSpawnArgs = ['screen', '-dmS', newScreenName];
   if (cmd === 'claude') {
     screenSpawnArgs.push('bash', '-lc', 'claude');
+  } else if (cmd === 'bash') {
+    screenSpawnArgs.push('bash', '-l');
   } else {
     screenSpawnArgs.push(cmd);
   }
@@ -325,6 +372,106 @@ async function handleSpawnNode(msg) {
   });
 }
 
+// --- Pull-update: serve this machine's copies as the designated source ---
+// Mirror of handleUpdateFiles (push direction). Read-only; every name is
+// checked against the FETCHABLE_FILES whitelist before touching the disk.
+async function handleFetchFiles(msg) {
+  const reqId = msg.reqId;
+  const names = (Array.isArray(msg.names) ? msg.names : [])
+    .filter(n => typeof n === 'string' && FETCHABLE_FILES.includes(n));
+  const files = [];
+  for (const name of names) {
+    const buf = await fs.promises.readFile(path.join(__dirname, name));
+    files.push({
+      name,
+      content: buf.toString('base64'),
+      sha256: crypto.createHash('sha256').update(buf).digest('hex')
+    });
+  }
+  sendMsg({ type: 'fetch_files_result', reqId, ok: true, files });
+}
+
+// --- Push-update: apply pushed files, then self-restart ---
+
+async function handleUpdateFiles(msg) {
+  const reqId = msg.reqId;
+  if (!Array.isArray(msg.files)) {
+    sendMsg({ type: 'update_files_result', reqId, ok: false, error: 'files must be an array', updated: [] });
+    return;
+  }
+  // Validate everything BEFORE touching disk: strict whitelist (no paths, no
+  // traversal) and content must match its declared sha256.
+  for (const f of msg.files) {
+    if (!f || !CLIENT_FILES.includes(f.name)) {
+      throw new Error(`file not allowed: ${f && f.name}`);
+    }
+    const buf = Buffer.from(f.content, 'base64');
+    const sum = crypto.createHash('sha256').update(buf).digest('hex');
+    if (sum !== f.sha256) throw new Error(`checksum mismatch: ${f.name}`);
+  }
+  // Atomic install: write temp sibling then rename. Overwriting the running
+  // client.js is safe on Linux — node holds the old inode until exit.
+  const updated = [];
+  for (const f of msg.files) {
+    const finalPath = path.join(__dirname, f.name);
+    const tmpPath = finalPath + '.swt-new';
+    fs.writeFileSync(tmpPath, Buffer.from(f.content, 'base64'), { mode: 0o644 });
+    fs.renameSync(tmpPath, finalPath);
+    updated.push(f.name);
+  }
+  console.log(`[update] applied: ${updated.join(', ')} — scheduling self-restart`);
+  sendMsg({ type: 'update_files_result', reqId, ok: true, updated });
+  scheduleSelfRestart();
+}
+
+let selfRestartScheduled = false;
+
+// Restart THIS client process so the new files take effect. Only ever touches
+// our own service screen (swt-client-<screenName>) — the monitored task screen
+// <screenName> is not touched. Uses process.execPath (absolute node), never
+// bare `node` (ancient system node on some hosts can't parse the source).
+function scheduleSelfRestart() {
+  if (selfRestartScheduled) return;
+  selfRestartScheduled = true;
+  const SESSION = screenName;
+  const CFG = path.basename(configFile);
+  const NODE = process.execPath;
+  const DIR = __dirname;
+  const PID = process.pid;
+  const script = `
+sleep 2
+kill -TERM ${PID} 2>/dev/null || true
+sleep 2
+if screen -ls 2>/dev/null | grep -q '[.]swt-client-${SESSION}'; then
+  screen -S swt-client-${SESSION} -X quit 2>/dev/null
+  sleep 1
+fi
+# Honor termination: if the node was killed via web UI (kill_node), the .stop
+# marker must not be bypassed by an in-flight update restart. But if the task
+# screen exists again, the node is being revived on purpose — clear and relaunch.
+if [ -f '${DIR}/${CFG}.stop' ]; then
+  if screen -ls 2>/dev/null | grep -qE '[.]${SESSION}(\\s|$)'; then
+    rm -f '${DIR}/${CFG}.stop'
+  else
+    echo "[self-restart] .stop marker present — node terminated, not relaunching" >&2
+    exit 0
+  fi
+fi
+# Relaunch unconditionally. Two setups exist out there:
+#  - install.sh's restart-on-crash wrapper: killing us above makes the wrapper
+#    relaunch with the NEW files, and the screen we create below would be a
+#    duplicate... except the wrapper's screen has the SAME name, so
+#    screen -dmS with an existing session is refused (duplicate name check),
+#    which makes this a safe no-op in that case.
+#  - manually launched screen (no wrapper): without this the agent would be
+#    gone forever after a push — 5060Ti incident, Sep 2026.
+screen -dmS swt-client-${SESSION} bash -c "cd '${DIR}' && exec '${NODE}' client.js --config=${CFG} 2>&1 | tee -a '${DIR}/client-${SESSION}.log'"
+`;
+  const child = spawn('bash', ['-c', script], { detached: true, stdio: 'ignore', env: { ...process.env } });
+  child.unref();
+  console.log(`[update] self-restart scheduled (screen swt-client-${SESSION})`);
+}
+
 // --- Claude state detection ---
 // Client-side mirror of lastOutput for cheap local detection (avoids round-trip).
 let lastOutputBuffer = '';
@@ -342,7 +489,7 @@ function pushOutput(text) {
 function reportClaudeState() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const state = detectClaudeState(lastOutputBuffer);
-  ws.send(JSON.stringify({ type: 'claude_state', state }));
+  sendRawOrQueue(JSON.stringify({ type: 'claude_state', state }));
 }
 
 function startClaudeStateReporter() {
@@ -381,7 +528,7 @@ function startHeartbeat() {
   stopHeartbeat();
   hbInterval = setInterval(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'ping' }));
+      sendRawOrQueue(JSON.stringify({ type: 'ping' }));
       // Reset timeout on each ping
       clearTimeout(hbTimeout);
       hbTimeout = setTimeout(() => {
@@ -401,6 +548,31 @@ function stopHeartbeat() {
 
 let ptyGeneration = 0;  // incremented on every spawn; stale respawn timers no-op
 
+// Register handshake is async (hashSelfFiles reads 4 files from disk). The
+// server closes any connection whose first message isn't register, and a
+// freshly attached screen's initial redraw fires through onData immediately —
+// so outbound data/claude_state/ping that beat the register message must be
+// queued, not dropped or sent early.
+let registered = false;
+let pendingOutbound = [];
+
+function sendRawOrQueue(str) {
+  if (registered && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(str);
+  } else {
+    pendingOutbound.push(str);
+  }
+}
+
+function flushOutbound() {
+  registered = true;
+  const q = pendingOutbound;
+  pendingOutbound = [];
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    for (const s of q) ws.send(s);
+  }
+}
+
 function connect() {
   console.log(`Connecting to ${serverUrl} ...`);
 
@@ -409,6 +581,7 @@ function connect() {
   ws.on('open', () => {
     console.log('Connected to server');
     reconnectDelay = 1000;
+    registered = false;
     startHeartbeat();
     startClaudeStateReporter();
 
@@ -417,16 +590,21 @@ function connect() {
 
     // Register with server
     const sysInfo = collectSysInfo();
-    ws.send(JSON.stringify({
-      type: 'register',
-      token,
-      name,
-      screen: screenName,
-      attrs: { ...(attrs || {}), clientId },
-      sys: sysInfo,
-      cols,
-      rows
-    }));
+    hashSelfFiles().then(files => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) { pendingOutbound = []; return; }
+      ws.send(JSON.stringify({
+        type: 'register',
+        token,
+        name,
+        screen: screenName,
+        attrs: { ...(attrs || {}), clientId },
+        sys: sysInfo,
+        files,
+        cols,
+        rows
+      }));
+      flushOutbound();
+    });
   });
 
   function spawnPty() {
@@ -460,7 +638,7 @@ function connect() {
       oscTail = trackOscCwd(oscTail, data);
       pushOutput(data);
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'data', payload: Buffer.from(data).toString('base64') }));
+        sendRawOrQueue(JSON.stringify({ type: 'data', payload: Buffer.from(data).toString('base64') }));
       }
     });
 
@@ -548,6 +726,32 @@ function connect() {
     if (msg.type === 'kill') {
       console.log('[!] Received kill command from server, shutting down...');
       shutdown();
+    }
+
+    // --- Push-update: server sends diffs of CLIENT_FILES ---
+    if (msg.type === 'update_files') {
+      handleUpdateFiles(msg).catch(e => {
+        console.error('[update] failed:', e.message);
+        sendMsg({ type: 'update_files_result', reqId: msg.reqId, ok: false, error: e.message, updated: [] });
+      });
+    }
+
+    if (msg.type === 'query_files') {
+      hashSelfFiles().then(files => {
+        sendMsg({ type: 'query_files_result', reqId: msg.reqId, ok: true, files });
+      });
+    }
+
+    // --- Pull-update: server wants THIS agent's copies of whitelisted files ---
+    // Reverse direction of update_files: this machine is the designated update
+    // source, so we read files and ship them up. Read-only — nothing here ever
+    // writes to disk. Whitelist covers everything the server manages
+    // (its own server-side files too, since it will overwrite itself with them).
+    if (msg.type === 'fetch_files') {
+      handleFetchFiles(msg).catch(e => {
+        console.error('[fetch_files] failed:', e.message);
+        sendMsg({ type: 'fetch_files_result', reqId: msg.reqId, ok: false, error: e.message, files: [] });
+      });
     }
 
     // Heartbeat: server pong resets our timeout
@@ -742,6 +946,8 @@ function connect() {
 
   ws.on('close', () => {
     console.log('Disconnected from server');
+    registered = false;
+    pendingOutbound = [];
     stopHeartbeat();
     stopClaudeStateReporter();
     if (ptyProcess) {
@@ -784,6 +990,30 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 // --- Start ---
+// A .stop marker means the node was terminated from the web UI (kill_node).
+// The marker must survive until someone deliberately removes it or a NEW
+// screen for this session appears — otherwise every restart resurrects a dead
+// node as an attach-retry zombie (monitor-3 incident, Sep 2026).
+if (fs.existsSync(`${configFile}.stop`)) {
+  // If the task screen exists again, the node is being brought back on
+  // purpose: clear the marker and continue. Otherwise honor the stop.
+  const alive = (() => {
+    try {
+      // screen -ls lines look like "\t1234.name\t(date)\t(Detached)" — the name
+      // is followed by a TAB, never end-of-line, so anchor with (\s|$) not $.
+      execSync(`screen -ls 2>/dev/null | grep -qE "[.]${screenName}(\\s|$)"`, { shell: '/bin/bash' });
+      return true;
+    } catch { return false; }
+  })();
+  if (alive) {
+    try { fs.unlinkSync(`${configFile}.stop`); } catch {}
+    console.log(`[*] .stop marker present but screen ${screenName} exists again — clearing marker, continuing`);
+  } else {
+    console.log(`[*] .stop marker present for ${configFile} and screen ${screenName} is gone — this node was terminated. Exiting.`);
+    console.log(`[*] To bring it back: recreate screen ${screenName}, or delete ${configFile}.stop`);
+    process.exit(0);
+  }
+}
 console.log(`Screen Web Terminal client starting...`);
 console.log(`  Name: ${name}`);
 console.log(`  Screen session: ${screenName} (${screenArgs.join(' ')})`);

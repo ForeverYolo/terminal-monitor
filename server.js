@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { createSupervisor } = require('./supervisor');
 const { stripAnsi } = require('./claude-detector');
@@ -60,6 +61,13 @@ const MAX_AGENTS = config.server.maxAgents || 200;                  // concurren
 config.server.supervisor = config.server.supervisor || {};
 
 const pendingScreenQueries = new Map(); // reqId -> (result) => void
+const pendingUpdateReqs = new Map();    // reqId -> browser ws awaiting update_files_result/query_files_result
+const pendingPulls = new Map();         // reqId -> { ws, agentName } awaiting fetch_files_result
+// clientId -> { r, rPrev } — the running-version hashes this machine's agents
+// reported at their last TWO registers. Used by the badge to disambiguate
+// "agent restarted onto an unpublished local version" (rPrev==server, r!=server
+// → 待拉取) from "server published, agent not pushed yet" (r unchanged → 待更新).
+const agentRunningVersions = new Map();
 
 // Detect if output ends with a prompt (waiting for input)
 function hasPrompt(text) {
@@ -155,7 +163,15 @@ function getAgentsList(user) {
         lastLines,
         needsInput: hasPrompt(a.lastOutput),
         claudeState: a.claudeState || null,
-        clientId: a.attrs && a.attrs.clientId ? a.attrs.clientId : null
+        clientId: a.attrs && a.attrs.clientId ? a.attrs.clientId : null,
+        fileHashes: a.fileHashes || null,
+        runningHashes: a.runningHashes || null,
+        rPrev: (() => {
+          const cid = a.attrs && a.attrs.clientId;
+          if (!cid) return null;
+          const rv = agentRunningVersions.get(cid);
+          return rv ? (rv.rPrev || null) : null;
+        })()
       };
     });
 }
@@ -163,7 +179,7 @@ function getAgentsList(user) {
 function broadcastAgents() {
   for (const [ws, binfo] of browsers) {
     if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ type: 'agents', agents: getAgentsList(binfo.user) }));
+      ws.send(JSON.stringify({ type: 'agents', agents: getAgentsList(binfo.user), serverFiles: serverManifest }));
     }
   }
 }
@@ -196,6 +212,166 @@ setInterval(() => {
 const indexHtml = fs.readFileSync(path.join(__dirname, 'public', 'index.html'));
 const guideHtml = fs.readFileSync(path.join(__dirname, 'public', 'guide.html'));
 const faviconSvg = fs.readFileSync(path.join(__dirname, 'public', 'favicon.svg'));
+
+// --- Push-update: file manifests and known-good backup ---
+// This server's on-disk copies are the single source of truth: the web UI
+// pushes CLIENT_FILES diffs to agents (see push_update handler) and restarts
+// itself to apply SERVER_FILES landed here out-of-band (deploy.sh/scp).
+const CLIENT_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js'];
+// client.js is listed here too (though the server never runs it) because the
+// manifest is the diff source for client pushes — without it,
+// update_files_result couldn't record the agent's post-push client.js hash and
+// every subsequent push would resend the whole file.
+const SERVER_FILES = ['server.js', 'supervisor.js', 'client.js', 'claude-detector.js', 'spawn-validator.js',
+  'config-loader.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
+// Everything an agent may be asked to upload when it's the designated update
+// source (pull_update). Client-side allowlist lives in client.js and must match.
+const FETCHABLE_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
+  'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
+
+function sha256File(absPath) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    const s = fs.createReadStream(absPath);
+    s.on('data', d => h.update(d));
+    s.on('error', reject);
+    s.on('end', () => resolve(h.digest('hex')));
+  });
+}
+
+// {name: hash} for the given list; missing files are omitted.
+async function buildFileManifest(list) {
+  const out = {};
+  for (const name of list) {
+    try { out[name] = await sha256File(path.join(__dirname, name)); } catch { /* omitted */ }
+  }
+  return out;
+}
+
+// Snapshot the booting (i.e. known-good) files for the restart rollback guard.
+// Flat names in one dir to keep the restore `cp` simple; public/ files get
+// re-split on restore. Only overwrite a backup when its content differs.
+async function ensureRestartBackup() {
+  const bakDir = path.join(__dirname, 'backups', 'pre-restart-latest');
+  fs.mkdirSync(bakDir, { recursive: true });
+  for (const name of SERVER_FILES) {
+    const flat = name.replace(/\//g, '__');
+    const src = path.join(__dirname, name);
+    const dst = path.join(bakDir, flat);
+    try {
+      const [srcHash] = await Promise.all([sha256File(src)]);
+      let dstHash = null;
+      try { dstHash = await sha256File(dst); } catch { /* no backup yet */ }
+      if (srcHash !== dstHash) fs.copyFileSync(src, dst);
+    } catch (e) {
+      console.log(`[!] backup skip ${name}: ${e.message}`);
+    }
+  }
+}
+
+let serverManifest = null; // filled before the WS server accepts connections
+
+// Snapshot the files we're about to overwrite via pull_update, so a bad pull
+// (e.g. wrong machine picked as source) can be undone by hand. Separate dir
+// from the restart rollback backup — that one must stay "last known booting".
+async function snapshotBeforePull(names) {
+  const dir = path.join(__dirname, 'backups', 'pre-pull');
+  fs.mkdirSync(dir, { recursive: true });
+  const stamped = path.join(dir, new Date().toISOString().replace(/[:.]/g, '-'));
+  fs.mkdirSync(stamped, { recursive: true });
+  for (const name of names) {
+    try {
+      const flat = name.replace(/\//g, '__');
+      fs.copyFileSync(path.join(__dirname, name), path.join(stamped, flat));
+    } catch { /* source missing — nothing to snapshot */ }
+  }
+  return stamped;
+}
+
+// Write files received from an agent (pull_update): verify sha256, then
+// atomically replace. Any validation failure aborts the whole batch.
+function applyPulledFiles(files) {
+  const decoded = [];
+  for (const f of files) {
+    if (!FETCHABLE_FILES.includes(f.name)) throw new Error(`refusing non-whitelisted file: ${f.name}`);
+    const buf = Buffer.from(f.content, 'base64');
+    if (crypto.createHash('sha256').update(buf).digest('hex') !== f.sha256) {
+      throw new Error(`sha256 mismatch for ${f.name}`);
+    }
+    decoded.push({ name: f.name, buf });
+  }
+  // All valid — write atomically (temp + rename) so a crash can't leave a
+  // half-written file behind (server.js may be mid-replacement).
+  for (const { name, buf } of decoded) {
+    const dst = path.join(__dirname, name);
+    const tmp = dst + '.pull-new';
+    fs.writeFileSync(tmp, buf);
+    fs.renameSync(tmp, dst);
+  }
+  return decoded.map(d => d.name);
+}
+
+// Verify + write the files an agent uploaded, snapshotting our old copies
+// first. Replies to the requesting browser via the recorded pull request.
+async function handleFetchFilesResult(msg, agentInfo, pull) {
+  let result;
+  try {
+    if (!msg.ok || !Array.isArray(msg.files) || msg.files.length === 0) {
+      throw new Error(msg.error || 'agent returned no files');
+    }
+    const names = msg.files.map(f => f.name);
+    const backupDir = await snapshotBeforePull(names);
+    const applied = applyPulledFiles(msg.files);
+    // Refresh our manifest so subsequent pushes diff against what we just
+    // wrote, and record new hashes as the agent's own (they ARE the source).
+    serverManifest = await buildFileManifest(SERVER_FILES);
+    for (const f of msg.files) {
+      if (agentInfo.fileHashes && f.name in agentInfo.fileHashes) agentInfo.fileHashes[f.name] = f.sha256;
+    }
+    console.log(`[*] pull_update applied from ${agentInfo.name}: ${applied.join(', ')} (backup: ${backupDir})`);
+    result = { type: 'pull_update_result', reqId: msg.reqId, ok: true, agentName: agentInfo.name, clientId: (agentInfo.attrs || {}).clientId || null, updated: applied, backupDir, message: '文件已落盘，重启服务器后生效' };
+  } catch (e) {
+    console.error(`[!] pull_update failed from ${agentInfo.name}: ${e.message}`);
+    result = { type: 'pull_update_result', reqId: msg.reqId, ok: false, agentName: agentInfo.name, clientId: (agentInfo.attrs || {}).clientId || null, error: e.message };
+  }
+  if (pull.ws && pull.ws.readyState === pull.ws.OPEN) pull.ws.send(JSON.stringify(result));
+}
+
+// Self-restart (web "重启服务器应用更新" button): quit our swt-server screen and
+// relaunch with the files currently on disk. Rollback guard: if the new server
+// doesn't come up within 5s, restore the known-good boot snapshot and try once
+// more. Runs detached — it must survive this process exiting.
+function spawnRestartScript() {
+  const DIR = __dirname;
+  const NODE = process.execPath;
+  const BAK = path.join(DIR, 'backups', 'pre-restart-latest');
+  const script = `
+set -u
+sleep 1
+screen -ls 2>/dev/null | grep -q '[.]swt-server' && screen -S swt-server -X quit
+sleep 1
+screen -dmS swt-server bash -c "cd '${DIR}' && exec '${NODE}' server.js 2>&1 | tee -a '${DIR}/server.log'"
+sleep 5
+if ! screen -ls 2>/dev/null | grep -q '[.]swt-server'; then
+  echo "[self-update] relaunch failed, restoring backup and retrying once" >> '${DIR}/server.log'
+  for f in '${BAK}'/*; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    case "$base" in
+      public__*) cp -f "$f" '${DIR}/public/'"$` + `{base#public__}" 2>/dev/null ;;
+      *)         cp -f "$f" '${DIR}/'"$base" 2>/dev/null ;;
+    esac
+  done
+  screen -dmS swt-server bash -c "cd '${DIR}' && exec '${NODE}' server.js 2>&1 | tee -a '${DIR}/server.log'"
+fi
+`;
+  try {
+    const child = require('child_process').spawn('bash', ['-c', script], { detached: true, stdio: 'ignore' });
+    child.unref();
+  } catch (e) {
+    console.log('[!] failed to spawn restart script:', e.message);
+  }
+}
 
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/' || req.url === '/index.html') {
@@ -330,12 +506,29 @@ wss.on('connection', (ws) => {
       role = 'agent';
       const id = generateAgentId();
       const user = tokenUserMap[msg.token] || 'user';
+      const regFiles = (msg.files && typeof msg.files === 'object' && !Array.isArray(msg.files)) ? msg.files : null;
+      // Register-time file hashes are the RUNNING version (R): the process
+      // hashed its own files as of startup. Track the previous register's R
+      // per clientId so the badge can tell "restarted onto unpublished local
+      // code" (rPrev==serverManifest.client.js, r differs) apart from "server
+      // is ahead, agent needs pushing" (r never changed).
+      const cid = (msg.attrs || {}).clientId || null;
+      if (cid && regFiles) {
+        const prev = agentRunningVersions.get(cid) || {};
+        agentRunningVersions.set(cid, { r: regFiles['client.js'] || null, rPrev: prev.r || null });
+      }
       const info = {
         id,
         name: msg.name || 'unknown',
         screen: msg.screen || '',
         attrs: msg.attrs || {},
         sys: msg.sys || {},
+        // sha256 of the agent's file copies (push-update versioning); at
+        // register this equals the running version; query_files refreshes
+        // update it to fresh DISK state afterwards. runningHashes stays the
+        // register-time snapshot (R) — cloned, never mutated in place.
+        fileHashes: regFiles,
+        runningHashes: regFiles ? { ...regFiles } : null,
         connectedAt: new Date().toISOString(),
         ws,
         scrollback: [],
@@ -380,7 +573,7 @@ wss.on('connection', (ws) => {
       role = 'browser';
       const user = msg.username || 'user';
       browsers.set(ws, { ws, agentIds: new Set(), user });
-      ws.send(JSON.stringify({ type: 'auth_ok', agents: getAgentsList(user), user, supervisorConfig: config.server.supervisor }));
+      ws.send(JSON.stringify({ type: 'auth_ok', agents: getAgentsList(user), user, supervisorConfig: config.server.supervisor, serverFiles: serverManifest }));
       console.log(`[+] Browser connected (user: ${user})`);
       return;
     }
@@ -503,6 +696,39 @@ wss.on('connection', (ws) => {
       for (const [bws, binfo] of browsers) {
         if (bws.readyState === bws.OPEN) bws.send(out);
       }
+    }
+
+    // Push-update results: agent → requesting browser. On success the agent
+    // re-registers with fresh hashes anyway; update the tracked copy here too
+    // so the badge flips without waiting for the reconnect cycle.
+    if (role === 'agent' && msg.type === 'update_files_result') {
+      const agentInfo = agents.get(ws);
+      if (!agentInfo) return;
+      if (msg.ok && agentInfo.fileHashes && serverManifest) {
+        for (const f of (msg.updated || [])) agentInfo.fileHashes[f] = serverManifest[f];
+      }
+      const out = JSON.stringify({ ...msg, type: 'push_update_result', agentName: agentInfo.name, agentId: agentInfo.id, clientId: (agentInfo.attrs || {}).clientId || null });
+      const target = msg.reqId && pendingUpdateReqs.get(msg.reqId);
+      if (target && target.readyState === target.OPEN) target.send(out);
+      pendingUpdateReqs.delete(msg.reqId);
+    }
+
+    if (role === 'agent' && msg.type === 'query_files_result') {
+      const agentInfo = agents.get(ws);
+      if (!agentInfo) return;
+      if (msg.ok && msg.files) agentInfo.fileHashes = msg.files;
+      const out = JSON.stringify({ ...msg, agentName: agentInfo.name, agentId: agentInfo.id, clientId: (agentInfo.attrs || {}).clientId || null });
+      const target = msg.reqId && pendingUpdateReqs.get(msg.reqId);
+      if (target && target.readyState === target.OPEN) target.send(out);
+      pendingUpdateReqs.delete(msg.reqId);
+    }
+
+    if (role === 'agent' && msg.type === 'fetch_files_result') {
+      const agentInfo = agents.get(ws);
+      const pull = msg.reqId && pendingPulls.get(msg.reqId);
+      if (!agentInfo || !pull) return;
+      pendingPulls.delete(msg.reqId);
+      handleFetchFilesResult(msg, agentInfo, pull).catch(() => {});
     }
 
     if (role === 'agent' && msg.type === 'resize') {
@@ -754,6 +980,94 @@ wss.on('connection', (ws) => {
       matchWs.send(fwd);
       console.log(`[*] spawn_node forwarded to ${matchInfo.name} (client ${matchInfo.attrs && matchInfo.attrs.clientId}) screen=${msg.screenName} cmd=${msg.cmd || 'bash'}`);
     }
+
+    // --- Push-update: send this server's CLIENT_FILES diffs to agents ---
+    // Content source is this server's own on-disk copies (read fresh per push,
+    // so out-of-band scp'd updates are picked up without a restart).
+    async function buildUpdatePayload(agentInfo) {
+      const files = [];
+      for (const name of CLIENT_FILES) {
+        const want = serverManifest ? serverManifest[name] : null;
+        const have = agentInfo.fileHashes ? agentInfo.fileHashes[name] : null;
+        if (want && have === want) continue; // already up to date
+        let content;
+        try { content = fs.readFileSync(path.join(__dirname, name)); } catch { continue; }
+        files.push({ name, content: content.toString('base64'), sha256: crypto.createHash('sha256').update(content).digest('hex') });
+      }
+      return files;
+    }
+
+    function findAgentByClientId(clientId) {
+      for (const [aws, ainfo] of agents) {
+        if (aws.readyState === aws.OPEN && (ainfo.attrs || {}).clientId === clientId) return { aws, ainfo };
+      }
+      return null;
+    }
+
+    async function pushToClient(ws, reqId, clientId) {
+      // Diff against a FRESH manifest, not the boot-time one: files may have
+      // been scp'd/deployed onto the server while it's running (that's the
+      // whole update flow — deploy.sh lands files, then pushes happen).
+      serverManifest = await buildFileManifest(SERVER_FILES);
+      const match = findAgentByClientId(clientId);
+      if (!match) {
+        ws.send(JSON.stringify({ type: 'push_update_result', reqId, agentName: clientId, ok: false, error: 'agent offline', updated: [] }));
+        return;
+      }
+      const files = await buildUpdatePayload(match.ainfo);
+      if (files.length === 0) {
+        ws.send(JSON.stringify({ type: 'push_update_result', reqId, agentName: match.ainfo.name, ok: true, updated: [], message: 'already up to date' }));
+        return;
+      }
+      pendingUpdateReqs.set(reqId, ws);
+      match.aws.send(JSON.stringify({ type: 'update_files', reqId, files }));
+      console.log(`[*] push_update → ${match.ainfo.name}: ${files.map(f => f.name).join(', ')}`);
+    }
+
+    if (role === 'browser' && msg.type === 'push_update') {
+      const binfo = browsers.get(ws);
+      if (binfo && msg.clientId && msg.reqId) pushToClient(ws, msg.reqId, msg.clientId);
+    }
+
+    if (role === 'browser' && msg.type === 'push_update_all') {
+      const binfo = browsers.get(ws);
+      if (binfo && msg.reqId) {
+        const clientIds = new Set();
+        for (const [, ainfo] of agents) {
+          const cid = (ainfo.attrs || {}).clientId;
+          if (cid) clientIds.add(cid);
+        }
+        for (const cid of clientIds) pushToClient(ws, msg.reqId + '-' + cid, cid);
+      }
+    }
+
+    // --- Pull-update: treat the named agent as the version source ---
+    // Ask it to upload FETCHABLE_FILES, then overwrite our on-disk copies.
+    // The agent's hashes have ALREADY been compared against the agent's own
+    // manifest by the browser, so here we take everything it sends.
+    if (role === 'browser' && msg.type === 'pull_update') {
+      const binfo = browsers.get(ws);
+      if (binfo && msg.clientId && msg.reqId) {
+        const match = findAgentByClientId(msg.clientId);
+        if (!match) {
+          ws.send(JSON.stringify({ type: 'pull_update_result', reqId: msg.reqId, agentName: msg.clientId, ok: false, error: 'agent offline' }));
+        } else {
+          pendingPulls.set(msg.reqId, { ws, agentName: match.ainfo.name });
+          match.aws.send(JSON.stringify({ type: 'fetch_files', reqId: msg.reqId, names: FETCHABLE_FILES }));
+          console.log(`[*] pull_update → fetching source files from ${match.ainfo.name}`);
+        }
+      }
+    }
+
+    if (role === 'browser' && msg.type === 'restart_server') {
+      const binfo = browsers.get(ws);
+      if (binfo && msg.reqId) {
+        // Ack BEFORE initiating — the restart kills this WS mid-flight.
+        ws.send(JSON.stringify({ type: 'restart_server_result', reqId: msg.reqId, ok: true, message: '服务器将在1秒后重启' }));
+        console.log('[*] restart_server requested — restarting to apply on-disk files');
+        setTimeout(spawnRestartScript, 500);
+      }
+    }
   });
 
   ws.on('close', () => {
@@ -849,6 +1163,34 @@ function initSupervisor() {
 initSupervisor();
 
 // --- Start ---
+// Manifest + known-good backup are ready before (or shortly after) the first
+// agents register; agents re-register on reconnect, so a slightly late fill
+// self-corrects on the next 10s agents broadcast.
+buildFileManifest(SERVER_FILES).then(m => {
+  serverManifest = m;
+  console.log(`[*] server file manifest ready (${Object.keys(m).length}/${SERVER_FILES.length} files)`);
+  return ensureRestartBackup();
+}).then(() => {
+  console.log('[*] pre-restart backup verified');
+}).catch(e => console.log('[!] manifest/backup init failed:', e.message));
+
+// Periodic manifest refresh. The boot-time manifest goes stale when files are
+// deployed onto the server while it runs (e.g. deploying a new client.js and
+// restarting the AGENTS only — the server restarts later or never): the stale
+// hashes then make every freshly-updated agent show a bogus "有更新" badge.
+// Same tick asks each agent for fresh disk hashes (query_files) so the badge
+// sees current A (agent disk), not just the register-time snapshot.
+setInterval(() => {
+  buildFileManifest(SERVER_FILES).then(m => { serverManifest = m; })
+    .catch(e => console.log('[!] manifest refresh failed:', e.message));
+  const reqId = 'qf-' + Date.now().toString(36);
+  for (const [aws] of agents) {
+    if (aws.readyState === aws.OPEN) {
+      try { aws.send(JSON.stringify({ type: 'query_files', reqId })); } catch { /* ignore */ }
+    }
+  }
+}, 60 * 1000);
+
 httpServer.listen(port, () => {
   console.log(`Screen Web Terminal server listening on http://0.0.0.0:${port}`);
   if (supervisor) supervisor.start();
