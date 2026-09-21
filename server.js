@@ -723,6 +723,17 @@ wss.on('connection', (ws) => {
       pendingUpdateReqs.delete(msg.reqId);
     }
 
+    // restart_node ack: forwarded as push_update_result so the browser reuses
+    // its existing pendingUpdateReqs plumbing (same Map, same timeout, same UI).
+    if (role === 'agent' && msg.type === 'restart_node_result') {
+      const agentInfo = agents.get(ws);
+      if (!agentInfo) return;
+      const out = JSON.stringify({ ...msg, type: 'push_update_result', agentName: agentInfo.name, agentId: agentInfo.id, clientId: (agentInfo.attrs || {}).clientId || null, updated: [], message: '已请求重启监控进程' });
+      const target = msg.reqId && pendingUpdateReqs.get(msg.reqId);
+      if (target && target.readyState === target.OPEN) target.send(out);
+      pendingUpdateReqs.delete(msg.reqId);
+    }
+
     if (role === 'agent' && msg.type === 'fetch_files_result') {
       const agentInfo = agents.get(ws);
       const pull = msg.reqId && pendingPulls.get(msg.reqId);
@@ -981,12 +992,17 @@ wss.on('connection', (ws) => {
       console.log(`[*] spawn_node forwarded to ${matchInfo.name} (client ${matchInfo.attrs && matchInfo.attrs.clientId}) screen=${msg.screenName} cmd=${msg.cmd || 'bash'}`);
     }
 
-    // --- Push-update: send this server's CLIENT_FILES diffs to agents ---
-    // Content source is this server's own on-disk copies (read fresh per push,
-    // so out-of-band scp'd updates are picked up without a restart).
+    // --- Push-update: send this server's managed-file diffs to agents ---
+    // ALL of SERVER_FILES, not just the client-side four: agent machines keep
+    // on-disk copies of server.js/public/* too (install.sh layout), and stale
+    // copies there previously tripped the 待拉取 badge as false drift. The
+    // agent writes them all but only self-restarts when a file it actually
+    // RUNS (client-side four) changed. Content source is this server's own
+    // on-disk copies (read fresh per push, so out-of-band scp'd updates are
+    // picked up without a restart).
     async function buildUpdatePayload(agentInfo) {
       const files = [];
-      for (const name of CLIENT_FILES) {
+      for (const name of SERVER_FILES) {
         const want = serverManifest ? serverManifest[name] : null;
         const have = agentInfo.fileHashes ? agentInfo.fileHashes[name] : null;
         if (want && have === want) continue; // already up to date
@@ -1066,6 +1082,23 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'restart_server_result', reqId: msg.reqId, ok: true, message: '服务器将在1秒后重启' }));
         console.log('[*] restart_server requested — restarting to apply on-disk files');
         setTimeout(spawnRestartScript, 500);
+      }
+    }
+
+    // --- Restart a single agent's monitoring process (⏳ 待应用 fix) ---
+    // The agent relaunches its own service screen (swt-client-<session>) so the
+    // running code picks up what's already on disk. Task screens are untouched.
+    if (role === 'browser' && msg.type === 'restart_node') {
+      const binfo = browsers.get(ws);
+      if (binfo && msg.clientId && msg.reqId) {
+        const match = findAgentByClientId(msg.clientId);
+        if (!match) {
+          ws.send(JSON.stringify({ type: 'restart_node_result', reqId: msg.reqId, agentName: msg.clientId, ok: false, error: 'agent offline' }));
+        } else {
+          pendingUpdateReqs.set(msg.reqId, ws); // reuse: agent replies with restart_node_result → forwarded as push_update_result
+          match.aws.send(JSON.stringify({ type: 'restart_node', reqId: msg.reqId }));
+          console.log(`[*] restart_node → ${match.ainfo.name}`);
+        }
       }
     }
   });

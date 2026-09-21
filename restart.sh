@@ -153,11 +153,14 @@ export NODE_BIN'
   if [ "$do_service" = 1 ]; then
     # Honor a termination: a .stop marker (written by web "终止节点") means
     # this node must NOT be resurrected by a restart — skip it entirely.
-    remote_script+="
+    # Client mode only: server mode has no SCREEN_SESSION variable.
+    if [ "$MODE" = "client" ]; then
+      remote_script+="
 if [ -f '$qpath/config.client-$SCREEN_SESSION.json.stop' ]; then
   echo '[restart] .stop marker present — node was terminated, skipping relaunch'
   exit 0
 fi"
+    fi
     remote_script+="
 (screen -S $qscreen -X quit 2>/dev/null || true) && sleep 1"
     remote_script+="

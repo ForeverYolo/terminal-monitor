@@ -2191,6 +2191,9 @@ function renderMgmtClients() {
     const nodeCount = agents[0] && agents[0].reportedNodeCount;
     const overLimit = agents.length >= 20;
     const badge = versionBadge(agents[0]);
+    // ⏳ 待应用 → offer a one-click restart of the monitoring process (the only
+    // fix for disk-new/process-old, since a push has no diff to send).
+    if (/待应用/.test(badge)) pendingRestartClients.add(cid); else pendingRestartClients.delete(cid);
     const sv = saved[cid] || { name: '', disp: '', cmd: 'bash' };
     return `<div class="mgmt-client">
       <h4>Client: ${escapeHtml(cid)} · ${agents.length} agent(s)${nodeCount != null ? ' / ' + nodeCount + ' screen(s)' : ''} ${badge}</h4>
@@ -2205,12 +2208,14 @@ function renderMgmtClients() {
         <button onclick="spawnNodeOnClient('${escapeHtml(cid)}')" ${overLimit?'disabled':''}>
           ${overLimit ? '已达 20 上限' : '+ 新增节点'}
         </button>
-        <button onclick="pushUpdateToClient('${escapeHtml(cid)}')" title="把服务器上的客户端文件推送到这台机器并自动重启监控进程">
+        <button onclick="pushUpdateToClient('${escapeHtml(cid)}')" title="把服务器上的全部托管文件（客户端+服务端+页面）推送到这台机器；监控进程相关的文件有变化时自动重启">
           ⬆ 推送更新
         </button>
         <button onclick="pullUpdateFromClient('${escapeHtml(cid)}', '${escapeHtml(agents[0] ? agents[0].name : cid)}')" style="background:#3a6e2a; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;" title="把这台机器当作版本源：服务器从它拉取全部托管文件并覆盖自己的副本（覆盖前自动备份）">
           ⬇ 从此机拉取
-        </button>
+        </button>${pendingRestartClients.has(cid) ? `<button onclick="restartNodeOnClient('${escapeHtml(cid)}')" style="background:#f0883e; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;" title="磁盘文件已最新但进程还是旧版：重启监控进程使新代码生效（不影响任务终端）">
+          ⟳ 重启监控进程
+        </button>` : ''}
       </div>
       <div class="mgmt-agent-list">
         ${agents.map(a => {
@@ -2261,56 +2266,75 @@ const pendingSpawnReqs = new Map();
 
 // --- Push-update UI ---
 
-// Four-state version badge for one agent. Inputs:
+// Five-state version badge for one agent. Inputs:
 //   S = lastServerFiles (server manifest)   A = agent.fileHashes (fresh disk
 //   hashes via register + periodic query_files)   R = agent.runningHashes
 //   (register-time snapshot = running version)   rPrev = previous register's
 //   R.client.js for this clientId (server-tracked)
 // States:
-//   green  ✓ 最新        S==A==R for client files, no server-side drift
-//   yellow ⬆ 待更新      server ahead / process behind — push_update fixes it
-//   blue   ⬇ 待拉取      this machine's disk has unpublished changes:
-//                        server-side file drift, or client-file edit on disk
-//                        (A≠R with R==S), or agent restarted onto local code
-//                        (A==R≠S with rPrev==S)
-//   grey   ? 版本未知     old client without hashes
+//   green   ✓ 最新     S==A==R for client files, no server-side drift
+//   orange  ⏳ 待应用  A==S but R≠A: disk synced, old process still running.
+//                  push_update canNOT fix this (no diff to send); needs the
+//                  monitoring process restarted (restart.sh / next push)
+//   yellow  ⬆ 待更新  A==R≠S (or ambiguous): server has a newer version the
+//                  agent hasn't received — push_update fixes it
+//   blue    ⬇ 待拉取  this machine's disk has unpublished changes: server-side
+//                  file drift, or client-file edit on disk (A≠R with R==S), or
+//                  agent restarted onto local code (A==R≠S with rPrev==S)
+//   grey    ? 版本未知  old client without hashes
 const CLIENT_FILES_UI = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js'];
+// Files the push-update writes on agent machines: everything the server
+// manages (agent machines keep on-disk copies of server files per install.sh
+// layout). The badge compares all of these against S; running-state (R)
+// comparisons still only make sense for the files the agent actually runs.
+const ALL_MANAGED_UI = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
+  'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
 function versionBadge(agent) {
   if (!lastServerFiles || !agent || !agent.fileHashes || !agent.runningHashes) {
     return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
   }
   const A = agent.fileHashes, R = agent.runningHashes, S = lastServerFiles;
-  // Server-side files this agent doesn't run — drift means someone edited them
-  // on that machine (server never pushes them to agents). Any drift → 待拉取.
-  for (const name of Object.keys(S)) {
-    if (CLIENT_FILES_UI.includes(name)) continue;
-    if (A[name] && S[name] && A[name] !== S[name]) {
-      return '<span style="color:#58a6ff;font-size:12px;">⬇ 待拉取</span>';
-    }
-  }
-  // Client files: three-way compare.
-  let yellow = false;
-  for (const name of CLIENT_FILES_UI) {
-    if (!(name in A) || !(name in R)) return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
-    const a = A[name], r = R[name], s = S[name];
-    if (!s) continue;
-    if (a !== r) {
-      // disk edited while old process still runs; direction via R vs S
-      if (r === s) return '<span style="color:#58a6ff;font-size:12px;">⬇ 待拉取</span>';  // local unpublished edit
-      yellow = true;                                                                      // ambiguous → conservative 待更新
-      continue;
-    }
-    // A == R: disk matches running process
-    if (a !== s) {
-      // If the previous register's R was the server version, this agent
-      // RESTARTED onto local unpublished code → 待拉取; otherwise server
-      // published a newer version not yet pushed → 待更新.
-      if (name === 'client.js' && agent.rPrev && agent.rPrev === s) {
-        return '<span style="color:#58a6ff;font-size:12px;">⬇ 待拉取</span>';
+  // Per-file three-way compare over ALL managed files. Server-side files
+  // (server.js, public/*) don't run on the agent, so R is meaningless for
+  // them — but push_update now ships them too, so any A≠S there is just
+  // a stale copy: pushable → 待更新 (no longer 待拉取 drift).
+  let yellow = false, orange = false, blue = false;
+  for (const name of ALL_MANAGED_UI) {
+    if (!S[name]) continue; // missing server copy — skip
+    const a = A[name];
+    if (a === S[name]) {
+      // Disk current. Only running-state matters, and only for client files.
+      if (!CLIENT_FILES_UI.includes(name)) continue;
+      if (!(name in R)) return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
+      if (R[name] !== a) {
+        // Disk new, process old → push is a no-op, needs 应用 (restart).
+        orange = true;
       }
-      yellow = true;
+    } else if (a === undefined) {
+      continue; // file absent on agent (e.g. never installed there) — ignore
+    } else {
+      // Disk differs from server.
+      if (!CLIENT_FILES_UI.includes(name)) { yellow = true; continue; }
+      if (!(name in R)) return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
+      const r = R[name];
+      if (r === S[name]) {
+        // Process runs the server version, disk was edited locally
+        // (published or not) → this machine is the source: pull from it.
+        blue = true;
+      } else if (a === r) {
+        // Process runs the edited disk → agent restarted onto local code.
+        // If it PREVIOUSLY ran the server version, someone is developing
+        // here → 待拉取; otherwise (rPrev differs) the server just has a
+        // newer published version → 待更新.
+        if (name === 'client.js' && agent.rPrev && agent.rPrev === S[name]) blue = true;
+        else yellow = true;
+      } else {
+        yellow = true; // three-way mismatch: ambiguous → conservative push
+      }
     }
   }
+  if (blue) return '<span style="color:#58a6ff;font-size:12px;">⬇ 待拉取</span>';
+  if (orange) return '<span style="color:#f0883e;font-size:12px;">⏳ 待应用</span>';
   if (yellow) return '<span style="color:#d29922;font-size:12px;">⬆ 待更新</span>';
   return '<span style="color:#3fb950;font-size:12px;">✓ 最新</span>';
 }
@@ -2330,6 +2354,15 @@ function pushUpdateToClient(clientId) {
   showFloatingNotice(`已请求推送更新到 ${clientId}`);
 }
 
+// ⏳ 待应用 fix: disk files are current but the running process predates them.
+// The agent relaunches its own service screen — task screens are untouched.
+function restartNodeOnClient(clientId) {
+  if (!confirm(`重启 ${clientId} 的监控进程，使磁盘上的新代码生效？\n\n只重启监控进程（swt-client screen），不会影响任何任务终端。`)) return;
+  const reqId = 'rnode-' + Date.now().toString(36);
+  sendPush(reqId, { type: 'restart_node', reqId, clientId }, clientId);
+  showFloatingNotice(`已请求重启 ${clientId} 的监控进程，等待其重连…`);
+}
+
 // Treat this machine as the version source: server fetches its managed files
 // from the agent, overwrites its own copies (after backing up), then a server
 // restart + push_update_all distributes the new version everywhere.
@@ -2346,7 +2379,7 @@ function pullUpdateFromClient(clientId, agentName) {
 }
 
 function pushUpdateAll() {
-  if (!confirm('向所有在线机器推送客户端文件更新？落后的机器会自动重启监控进程。')) return;
+  if (!confirm('向所有在线机器推送全部托管文件（客户端+服务端+页面）？\n\n监控进程相关文件有变化的机器会自动重启；旧版 server.js/index.html 残骸也会被对齐。')) return;
   const reqId = 'push-all-' + Date.now().toString(36);
   const clientIds = new Set();
   for (const a of lastAgents) {
@@ -2426,6 +2459,7 @@ let lastAgents = [];
 let lastServerFiles = null;
 const pendingUpdateReqs = new Map(); // reqId -> { clientId, timer }
 const pendingPullReqs = new Map();   // reqId -> { timer } for pull_update flows
+const pendingRestartClients = new Set(); // clients currently showing ⏳ 待应用 (→ ⟳ button)
 
 function toggleAgentSelect(agentId) {
   if (selectedAgents.has(agentId)) {

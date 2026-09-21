@@ -391,7 +391,13 @@ async function handleFetchFiles(msg) {
   sendMsg({ type: 'fetch_files_result', reqId, ok: true, files });
 }
 
-// --- Push-update: apply pushed files, then self-restart ---
+// --- Push-update: apply pushed files, then self-restart if needed ---
+
+// Files we can receive via update_files: everything the server manages
+// (install.sh puts server.js/public/* copies on agent machines too). Only a
+// change to one we actually RUN (the client-side four) triggers a restart.
+const UPDATABLE_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
+  'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
 
 async function handleUpdateFiles(msg) {
   const reqId = msg.reqId;
@@ -400,9 +406,10 @@ async function handleUpdateFiles(msg) {
     return;
   }
   // Validate everything BEFORE touching disk: strict whitelist (no paths, no
-  // traversal) and content must match its declared sha256.
+  // traversal beyond the known public/ subdir) and content must match its
+  // declared sha256.
   for (const f of msg.files) {
-    if (!f || !CLIENT_FILES.includes(f.name)) {
+    if (!f || !UPDATABLE_FILES.includes(f.name)) {
       throw new Error(`file not allowed: ${f && f.name}`);
     }
     const buf = Buffer.from(f.content, 'base64');
@@ -412,16 +419,19 @@ async function handleUpdateFiles(msg) {
   // Atomic install: write temp sibling then rename. Overwriting the running
   // client.js is safe on Linux — node holds the old inode until exit.
   const updated = [];
+  let ranFilesChanged = false;
   for (const f of msg.files) {
     const finalPath = path.join(__dirname, f.name);
     const tmpPath = finalPath + '.swt-new';
+    fs.mkdirSync(path.dirname(finalPath), { recursive: true });
     fs.writeFileSync(tmpPath, Buffer.from(f.content, 'base64'), { mode: 0o644 });
     fs.renameSync(tmpPath, finalPath);
     updated.push(f.name);
+    if (CLIENT_FILES.includes(f.name)) ranFilesChanged = true;
   }
-  console.log(`[update] applied: ${updated.join(', ')} — scheduling self-restart`);
+  console.log(`[update] applied: ${updated.join(', ')}${ranFilesChanged ? ' — scheduling self-restart' : ' (data-only, no restart needed)'}`);
   sendMsg({ type: 'update_files_result', reqId, ok: true, updated });
-  scheduleSelfRestart();
+  if (ranFilesChanged) scheduleSelfRestart();
 }
 
 let selfRestartScheduled = false;
@@ -740,6 +750,18 @@ function connect() {
       hashSelfFiles().then(files => {
         sendMsg({ type: 'query_files_result', reqId: msg.reqId, ok: true, files });
       });
+    }
+
+    // Explicit web-UI "restart monitoring process" (⏳ 待应用 fix): disk files
+    // are already current but the running process predates them. Same mechanics
+    // as the post-push self-restart — only touches swt-client-<screenName>,
+    // never the monitored task screen. Force past the once-guard: this is a
+    // deliberate user command, not an update side effect.
+    if (msg.type === 'restart_node') {
+      console.log('[!] restart_node requested from web UI — scheduling self restart');
+      selfRestartScheduled = false;
+      sendRawOrQueue(JSON.stringify({ type: 'restart_node_result', reqId: msg.reqId, ok: true }));
+      scheduleSelfRestart();
     }
 
     // --- Pull-update: server wants THIS agent's copies of whitelisted files ---
