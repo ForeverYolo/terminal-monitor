@@ -817,6 +817,18 @@ function createAltScreenFilter() {
         // which is the safest steady state on this relayed link.
         if (data[i + 2] === 0x3f && (data[end] === 0x68 || data[end] === 0x6c)) {
           const mode = String.fromCharCode(...data.slice(i + 3, end));
+          // Claude draws its text cursor as a one-cell reverse-video block and
+          // also hides xterm's native cursor while the TUI is active.  Reverse
+          // video is filtered below because it turns the virtual scrollback
+          // into large background-colour blocks, so keep the native cursor
+          // visible as a reliable replacement.  Convert every hide request to
+          // show; the application still controls the cursor position.
+          if (mode === '25' && data[end] === 0x6c) {
+            result.set([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x68], out);
+            out += 6;
+            i = end + 1;
+            continue;
+          }
           if (MOUSE_REPORT_MODE.test(mode)) {
             i = end + 1;
             continue;
