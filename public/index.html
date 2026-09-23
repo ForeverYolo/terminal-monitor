@@ -2307,9 +2307,9 @@ function versionBadge(agent) {
   }
   const A = agent.fileHashes, R = agent.runningHashes, S = lastServerFiles;
   // Per-file three-way compare over ALL managed files. Server-side files
-  // (server.js, public/*) don't run on the agent, so R is meaningless for
-  // them — but push_update now ships them too, so any A≠S there is just
-  // a stale copy: pushable → 待更新 (no longer 待拉取 drift).
+  // (server.js, public/*) don't run on the agent, but R still records the
+  // disk state at client startup. That lets us distinguish a local edit made
+  // after startup (待拉取) from a server update that arrived later (待更新).
   let yellow = false, orange = false, blue = false;
   for (const name of ALL_MANAGED_UI) {
     if (!S[name]) continue; // missing server copy — skip
@@ -2325,8 +2325,15 @@ function versionBadge(agent) {
     } else if (a === undefined) {
       continue; // file absent on agent (e.g. never installed there) — ignore
     } else {
-      // Disk differs from server.
-      if (!CLIENT_FILES_UI.includes(name)) { yellow = true; continue; }
+      // Disk differs from server. For files that this process does not run,
+      // the startup snapshot is still useful: R==S means this machine edited
+      // its copy after connecting, while R!=S means it was already behind the
+      // server when it connected.
+      if (!CLIENT_FILES_UI.includes(name)) {
+        if ((name in R) && R[name] === S[name] && a !== R[name]) blue = true;
+        else yellow = true;
+        continue;
+      }
       if (!(name in R)) return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
       const r = R[name];
       if (r === S[name]) {
