@@ -1506,7 +1506,7 @@ function openTerminal(agentId, agentName) {
     setTermViewMode('xterm');
   }
   term = new Terminal({
-    theme: { background: '#0f0f23' },
+    theme: { background: '#0f0f23', cursor: '#e0e0e0', cursorAccent: '#0f0f23' },
     fontSize: mobile ? 11 : 14,
     cursorBlink: true,
     scrollback: 200000,
