@@ -1584,6 +1584,8 @@ function openTerminal(agentId, agentName) {
 
   term.onData(data => {
     if (!ws || ws.readyState !== WebSocket.OPEN || !currentAgentId) return;
+    data = stripTerminalColorReplies(data);
+    if (!data) return;
     const bytes = new TextEncoder().encode(data);
     let bin = '';
     bytes.forEach(b => bin += String.fromCharCode(b));
@@ -2552,6 +2554,8 @@ function openMultiTerminal() {
     // Handle input
     term.onData(data => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      data = stripTerminalColorReplies(data);
+      if (!data) return;
       const bytes = new TextEncoder().encode(data);
       let bin = '';
       bytes.forEach(b => bin += String.fromCharCode(b));
