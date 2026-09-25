@@ -558,6 +558,59 @@ function stopHeartbeat() {
 
 let ptyGeneration = 0;  // incremented on every spawn; stale respawn timers no-op
 
+// --- Offline output queue ---
+// While disconnected, the PTY stays attached to screen and its output keeps
+// flowing here. On reconnect the queue is drained to the server BEFORE live
+// data (the onData path also enqueues while disconnected, so ordering is a
+// single FIFO). This is what lets the server's per-terminal scrollback cover
+// the disconnect gap instead of only what arrived over live connections.
+// Byte-capped: if a long outage exceeds the cap, the OLDEST data is dropped
+// (shift-like batch trim) — the tail (current screen state) matters more than
+// the head, and the server-side trim behaves the same way.
+const OFFLINE_QUEUE_MAX = 8 * 1024 * 1024; // 8MB
+const OFFLINE_QUEUE_TRIM = 1024 * 1024;    // drop 1MB in one batch when over
+let offlineQueue = [];
+let offlineQueueBytes = 0;
+
+function enqueueOffline(base64Payload) {
+  offlineQueue.push(base64Payload);
+  offlineQueueBytes += base64Payload.length;
+  if (offlineQueueBytes > OFFLINE_QUEUE_MAX + OFFLINE_QUEUE_TRIM) {
+    let freed = 0, dropped = 0;
+    while (offlineQueueBytes - freed > OFFLINE_QUEUE_MAX && dropped < offlineQueue.length - 1) {
+      freed += offlineQueue[dropped].length;
+      dropped++;
+    }
+    if (dropped > 0) {
+      offlineQueue.splice(0, dropped);
+      offlineQueueBytes -= freed;
+    }
+  }
+}
+
+// Drain the offline queue over an OPEN socket. setInterval paces the sends so
+// a huge backlog doesn't saturate one ws frame buffer / starve the event loop;
+// live data keeps flowing after the queue is empty because the onData path
+// sends directly once `offlineQueue` is drained.
+function drainOfflineQueue() {
+  if (offlineQueue.length === 0) return;
+  console.log(`[reconnect] replaying offline queue: ${offlineQueue.length} chunks (~${Math.round(offlineQueueBytes / 1024)}KB)`);
+  const pump = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { clearInterval(pump); return; }
+    let sent = 0;
+    while (offlineQueue.length > 0 && sent < 200) {
+      const chunk = offlineQueue.shift();
+      offlineQueueBytes -= chunk.length;
+      ws.send(JSON.stringify({ type: 'data', payload: chunk }));
+      sent++;
+    }
+    if (offlineQueue.length === 0) {
+      clearInterval(pump);
+      console.log('[reconnect] offline queue drained');
+    }
+  }, 10);
+}
+
 // Register handshake is async (hashSelfFiles reads 4 files from disk). The
 // server closes any connection whose first message isn't register, and a
 // freshly attached screen's initial redraw fires through onData immediately —
@@ -595,8 +648,11 @@ function connect() {
     startHeartbeat();
     startClaudeStateReporter();
 
-    // Spawn PTY with screen
-    spawnPty();
+    // Spawn PTY with screen — unless it survived the disconnect (see the
+    // keep-PTY logic in ws.on('close')); a fresh `screen -r` attach would
+    // repaint one viewport and mark the gap as if nothing happened. The
+    // offline queue covers that gap instead.
+    if (!ptyProcess) spawnPty();
 
     // Register with server
     const sysInfo = collectSysInfo();
@@ -614,6 +670,10 @@ function connect() {
         rows
       }));
       flushOutbound();
+      // Queue replay must come AFTER register (server only accepts data from
+      // registered agents) and before subsequent live output — the onData path
+      // sends directly once the queue is empty, so start draining right away.
+      drainOfflineQueue();
     });
   });
 
@@ -647,8 +707,14 @@ function connect() {
       if (DEBUG_DUMP) dumpStream('OUT', data);
       oscTail = trackOscCwd(oscTail, data);
       pushOutput(data);
+      const payload = Buffer.from(data).toString('base64');
       if (ws && ws.readyState === WebSocket.OPEN) {
-        sendRawOrQueue(JSON.stringify({ type: 'data', payload: Buffer.from(data).toString('base64') }));
+        sendRawOrQueue(JSON.stringify({ type: 'data', payload }));
+      } else {
+        // Disconnected: keep the stream for the reconnect replay (see
+        // enqueueOffline). Output still reaches screen's own buffer meanwhile,
+        // but the server never saw these bytes — queue them.
+        enqueueOffline(payload);
       }
     });
 
@@ -972,13 +1038,15 @@ function connect() {
     pendingOutbound = [];
     stopHeartbeat();
     stopClaudeStateReporter();
-    if (ptyProcess) {
-      ptyProcess.kill();
-      ptyProcess = null;
-    }
+    // KEEP the PTY attached to screen across reconnects. Killing it used to
+    // mean: reconnect → fresh `screen -r` attach → screen repaints one
+    // viewport → everything between the disconnect and reconnect was gone
+    // except that one redraw. Now output continues into the offline queue and
+    // is replayed on reconnect, so the server-side scrollback stays complete.
+    // (PTY died for real — screen exited — so there is nothing to keep.)
     // Invalidate any pending respawn timer from this connection's pty —
     // the reconnect's spawnPty owns the next generation.
-    ptyGeneration++;
+    if (ptyProcess) ptyGeneration++;
     // Abort any in-flight file transfers — streams won't survive a reconnect.
     for (const [, up] of activeUploads) { try { up.stream.destroy(); } catch {} }
     activeUploads.clear();
