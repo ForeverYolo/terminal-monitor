@@ -452,7 +452,7 @@ const httpServer = http.createServer((req, res) => {
         connectedAt: a.connectedAt,
         lastLines,
         needsInput: hasPrompt(a.lastOutput),
-        scrollbackSize: a.scrollback.length,
+        scrollbackSize: a.term ? a.term.scrollback.length : 0,
         claudeState: a.claudeState || null,
         clientId: a.attrs && a.attrs.clientId ? a.attrs.clientId : null
       };
@@ -604,6 +604,17 @@ wss.on('connection', (ws) => {
       console.log(`[+] Agent connected: ${info.name} (${id})`);
       broadcastAgents();
       if (supervisor) supervisor.onAgentConnected(info);
+
+      // Register上报的 fileHashes 是进程启动时的磁盘快照——机器是版本源或
+      // 进程启动后磁盘被改过时，A 会滞后真实磁盘最长一个 query_files 周期
+      // (60s)，期间徽章可能误报 待更新。注册后立刻补发一次 query_files 把
+      // A 拉到当前磁盘状态，不等心跳。
+      const qfReqId = 'qf-reg-' + id;
+      setTimeout(() => {
+        if (ws.readyState === ws.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'query_files', reqId: qfReqId })); } catch { /* ignore */ }
+        }
+      }, 1500); // 给注册回包一点时间，避免和新连接的初始流量挤在一起
 
       // Server-side heartbeat timeout: if no message from agent for 120s, consider dead
       ws._agentAlive = true;
@@ -1100,24 +1111,41 @@ wss.on('connection', (ws) => {
       return null;
     }
 
+    // ALL live agents of a machine. Machines run one client process per screen
+    // (monitor-1/2/3 share one clientId) — push/restart must reach every one of
+    // them, not just the first match, or the badge stays stale for the rest.
+    function findAllAgentsByClientId(clientId) {
+      const matches = [];
+      for (const [aws, ainfo] of agents) {
+        if (aws.readyState === aws.OPEN && (ainfo.attrs || {}).clientId === clientId) matches.push({ aws, ainfo });
+      }
+      return matches;
+    }
+
     async function pushToClient(ws, reqId, clientId) {
       // Diff against a FRESH manifest, not the boot-time one: files may have
       // been scp'd/deployed onto the server while it's running (that's the
       // whole update flow — deploy.sh lands files, then pushes happen).
       serverManifest = await buildFileManifest(SERVER_FILES);
-      const match = findAgentByClientId(clientId);
-      if (!match) {
+      const matches = findAllAgentsByClientId(clientId);
+      if (matches.length === 0) {
         ws.send(JSON.stringify({ type: 'push_update_result', reqId, agentName: clientId, ok: false, error: 'agent offline', updated: [] }));
         return;
       }
-      const files = await buildUpdatePayload(match.ainfo);
+      const files = await buildUpdatePayload(matches[0].ainfo);
       if (files.length === 0) {
-        ws.send(JSON.stringify({ type: 'push_update_result', reqId, agentName: match.ainfo.name, ok: true, updated: [], message: 'already up to date' }));
+        ws.send(JSON.stringify({ type: 'push_update_result', reqId, agentName: matches[0].ainfo.name, ok: true, updated: [], message: 'already up to date' }));
         return;
       }
+      // Send to EVERY process of this machine: each one applies the files and
+      // replies with the same reqId; per-reqId replies after the first are
+      // ignored by pendingUpdateReqs (single-slot), so the browser sees one
+      // result — but every process has the work queued either way.
       pendingUpdateReqs.set(reqId, ws);
-      match.aws.send(JSON.stringify({ type: 'update_files', reqId, files }));
-      console.log(`[*] push_update → ${match.ainfo.name}: ${files.map(f => f.name).join(', ')}`);
+      for (const { aws, ainfo } of matches) {
+        aws.send(JSON.stringify({ type: 'update_files', reqId, files }));
+        console.log(`[*] push_update → ${ainfo.name}: ${files.map(f => f.name).join(', ')}`);
+      }
     }
 
     if (role === 'browser' && msg.type === 'push_update') {
@@ -1168,16 +1196,22 @@ wss.on('connection', (ws) => {
     // --- Restart a single agent's monitoring process (⏳ 待应用 fix) ---
     // The agent relaunches its own service screen (swt-client-<session>) so the
     // running code picks up what's already on disk. Task screens are untouched.
+    // One client process per screen shares a clientId, so the restart request
+    // must fan out to EVERY live process of that machine — a single send only
+    // restarts one monitor, leaving the others stale (hence "click restart N
+    // times").
     if (role === 'browser' && msg.type === 'restart_node') {
       const binfo = browsers.get(ws);
       if (binfo && msg.clientId && msg.reqId) {
-        const match = findAgentByClientId(msg.clientId);
-        if (!match) {
+        const matches = findAllAgentsByClientId(msg.clientId);
+        if (matches.length === 0) {
           ws.send(JSON.stringify({ type: 'restart_node_result', reqId: msg.reqId, agentName: msg.clientId, ok: false, error: 'agent offline' }));
         } else {
           pendingUpdateReqs.set(msg.reqId, ws); // reuse: agent replies with restart_node_result → forwarded as push_update_result
-          match.aws.send(JSON.stringify({ type: 'restart_node', reqId: msg.reqId }));
-          console.log(`[*] restart_node → ${match.ainfo.name}`);
+          for (const { aws, ainfo } of matches) {
+            aws.send(JSON.stringify({ type: 'restart_node', reqId: msg.reqId }));
+            console.log("[*] restart_node sent to " + ainfo.name);
+          }
         }
       }
     }
