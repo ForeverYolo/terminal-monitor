@@ -718,6 +718,36 @@ let selectedAgents = new Set(); // for multi-select mode
 let multiTerms = {}; // agentId -> { term, fitAddon, container, filter }
 let termFilter = createAltScreenFilter(); // alt-screen filter for the single terminal
 
+// --- Seq tracking + stable terminal identity ---
+// Server stamps every data chunk with a per-terminal monotonic seq. We remember
+// the last seq seen per agent so a reconnect resume can ask for "everything
+// after N" instead of skipping the gap entirely (old resume:true behaviour).
+const lastSeqByAgent = new Map();   // agentId -> number
+// Stable terminal key (clientId|screen) -> agentId, refreshed on every agents
+// broadcast. When an agent reconnects it gets a NEW agentId but the same key —
+// watching browsers use this to re-subscribe to the new id automatically.
+const agentIdByKey = new Map();     // terminalKey -> agentId (live agents only)
+let currentTerminalKey = null;      // stable key of the single-terminal view's agent
+function terminalKeyOf(a) {
+  const cid = (a.attrs && a.attrs.clientId) || a.clientId || 'nokey';
+  return `${cid}|${a.screen || ''}`;
+}
+// Resolve the CURRENT agentId for a previously-known terminal key. Returns null
+// when no live agent carries that key (agent fully offline).
+function resolveAgentId(stableKey) {
+  return agentIdByKey.get(stableKey) || null;
+}
+function syncAgentIdMap(agents) {
+  agentIdByKey.clear();
+  for (const a of agents || []) agentIdByKey.set(terminalKeyOf(a), a.id);
+}
+// data payload for a resumed subscribe: carries per-agent lastSeq positions.
+function resumePayloadFor(agentIds) {
+  const sinceSeqs = {};
+  for (const id of agentIds) sinceSeqs[id] = lastSeqByAgent.get(id) || 0;
+  return sinceSeqs;
+}
+
 // Virtualize the alternate screen so the browser can keep one scrollback
 // buffer.  On exit, clear only the visible viewport (not scrollback) and reset
 // SGR attributes; otherwise Claude's inverse-video notifications can remain on
@@ -1041,6 +1071,7 @@ function connect(username, password) {
 
       lastAgents = msg.agents || [];
       syncAttentionFromAgents(lastAgents);
+      syncAgentIdMap(lastAgents);
       supervisorConfig = msg.supervisorConfig || {};
       if (msg.serverFiles) lastServerFiles = msg.serverFiles;
 
@@ -1048,17 +1079,26 @@ function connect(username, password) {
       const inMulti = views.multi.style.display !== 'none';
 
       if (wasReconnecting && inTerm && currentAgentId) {
-        // Resume single terminal: re-subscribe without scrollback replay.
-        // Terminal content stays as-is; only new live output is forwarded.
+        // Resume single terminal. The agent may have reconnected while we were
+        // away and changed its agentId — resolve through the stable terminal
+        // key so we follow the NEW id rather than subscribing to a dead one
+        // (the old behaviour froze the view when the id went stale).
+        const fresh = resolveAgentId(currentTerminalKey) || currentAgentId;
+        if (fresh !== currentAgentId) {
+          currentAgentId = fresh;
+          lastSeqByAgent.delete(fresh);   // new id: start from a full replay
+          if (term) term.clear();
+        }
         if (term && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: term.cols, rows: term.rows }));
         }
-        ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, resume: true }));
+        ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, resume: true, sinceSeq: lastSeqByAgent.get(currentAgentId) || 0 }));
       } else if (wasReconnecting && inMulti) {
-        // Resume multi terminal: re-subscribe previously opened agents without replay.
-        const ids = Object.keys(multiTerms);
+        // Resume multi terminal: re-subscribe previously opened agents.
+        // Remap stale ids through the stable key the same way.
+        const ids = Object.keys(multiTerms).map(id => resolveAgentId(multiTerms[id].terminalKey) || id);
         if (ids.length > 0) {
-          ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, resume: true }));
+          ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, resume: true, sinceSeqs: resumePayloadFor(ids) }));
         }
       } else {
         // Fresh login (or reconnect while not in a terminal): show dashboard.
@@ -1087,10 +1127,29 @@ function connect(username, password) {
     } else if (msg.type === 'agents') {
       lastAgents = msg.agents || [];
       syncAttentionFromAgents(lastAgents);
+      syncAgentIdMap(lastAgents);
       if (msg.serverFiles) lastServerFiles = msg.serverFiles;
       renderAgents(lastAgents);
       if (currentMode === 'mgmt') { renderMgmtClients(); refreshAnalyzerOptions(); }
+      // Mid-session id rotation: if the agent we're watching reconnected (new
+      // agentId, same stable key), re-subscribe to the new id with an
+      // incremental replay so the view keeps updating without user action.
+      // Server-side replay ordering holds live frames until replay completes,
+      // so the redraw lands cleanly before fresh output resumes.
+      if (views.term.style.display !== 'none' && currentTerminalKey && term) {
+        const fresh = resolveAgentId(currentTerminalKey);
+        if (fresh && fresh !== currentAgentId && ws.readyState === WebSocket.OPEN) {
+          currentAgentId = fresh;
+          lastSeqByAgent.delete(fresh);
+          term.clear();
+          ws.send(JSON.stringify({ type: 'connect', agentId: fresh, sinceSeq: 0 }));
+        }
+      }
     } else if (msg.type === 'data') {
+      // Track the per-terminal seq position for later incremental resumes.
+      // Replay frames carry seq too, so the position advances through both
+      // live and replayed data.
+      if (typeof msg.seq === 'number') lastSeqByAgent.set(msg.agentId, msg.seq);
       // Single terminal mode
       if (term && msg.agentId === currentAgentId) {
         term.write(termFilter(Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0))));
@@ -1112,6 +1171,16 @@ function connect(username, password) {
       // content / latest output missing"). Loading arbitrary older history
       // into a live xterm buffer correctly needs a different architecture
       // (server-side rendered-text buffer), not this byte-stream replay.
+      // mode:'full' means the server could NOT serve an incremental delta
+      // (history trimmed past our position, or we asked for a fresh window) —
+      // it is about to replay a full recent window, so clear our buffer first
+      // or the replayed history would stack below/behind stale local content.
+      if (msg.mode === 'full' && msg.agentId === currentAgentId && term) {
+        term.clear();
+      }
+      if (msg.mode === 'full' && multiTerms[msg.agentId]) {
+        multiTerms[msg.agentId].term.clear();
+      }
     } else if (msg.type === 'scrollback_end') {
       // All history written. Replay draws with whatever PTY size the agent had;
       // make sure the app inside repaints at OUR size: send one resize
@@ -1469,6 +1538,8 @@ document.querySelectorAll('#sort-switch button').forEach(b => {
 
 function openTerminal(agentId, agentName) {
   currentAgentId = agentId;
+  const meta = (lastAgents || []).find(a => a.id === agentId);
+  currentTerminalKey = meta ? terminalKeyOf(meta) : null;
   markRecent(agentId);
   showView('term');
 
@@ -1597,6 +1668,7 @@ function closeTerminal() {
   if (window._termResizeObs) { window._termResizeObs.disconnect(); window._termResizeObs = null; }
   if (term) { term.dispose(); term = null; }
   currentAgentId = null;
+  currentTerminalKey = null;
   closeMobileInput();
   closeFileBrowser();
   hideFileProgress();
@@ -2549,7 +2621,7 @@ function openMultiTerminal() {
     term.write('\x1b[?1h');
     setTimeout(() => fitAddon.fit(), 50);
 
-    multiTerms[agentId] = { term, fitAddon, container: wrap.querySelector('.multi-term-container'), filter: createAltScreenFilter() };
+    multiTerms[agentId] = { term, fitAddon, container: wrap.querySelector('.multi-term-container'), filter: createAltScreenFilter(), terminalKey: agent ? terminalKeyOf(agent) : null };
 
     // Handle input
     term.onData(data => {
