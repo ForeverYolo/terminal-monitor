@@ -115,10 +115,26 @@ function sha256File(absPath) {
 // Deliberately wider than CLIENT_FILES: the server-side files (server.js,
 // public/* etc.) are hashed too so the four-state version badge can spot a
 // machine whose server-side copies drifted (i.e. someone edited them here to
-// publish via pull). At register time this snapshot IS the running version
-// (the server treats it as R); later query_files refreshes give fresh disk
-// state (A).
+// publish via pull).
+//
+// RUNNING-VERSION SNAPSHOT (the R in the badge's S/A/R model): hashed ONCE at
+// process startup and cached for every register. The server treats these hashes
+// as "the version this process is running" — which is only true for a startup
+// snapshot. Rehashing at each connect (the old behaviour) silently reported
+// freshly-deployed disk files as the running version, so after any reconnect
+// (server restart, network blip) a stale process showed "✓ 最新" instead of
+// "⏳ 待应用" and the pending restart became invisible. Fresh DISK state (the
+// A channel) comes from query_files, which always rehashes on demand.
+let runningFileHashes = null;
 async function hashSelfFiles() {
+  if (runningFileHashes) return runningFileHashes;
+  return (runningFileHashes = await hashDiskFiles());
+}
+// Fresh DISK hashes (the A channel for the version badge): always rehashes,
+// never cached. query_files uses this — it must see files changed on disk
+// since this process started (deployed updates, local edits), which the
+// running-version snapshot above deliberately freezes out.
+async function hashDiskFiles() {
   const out = {};
   for (const name of FETCHABLE_FILES) {
     try { out[name] = await sha256File(path.join(__dirname, name)); } catch { /* omitted */ }
@@ -813,7 +829,7 @@ function connect() {
     }
 
     if (msg.type === 'query_files') {
-      hashSelfFiles().then(files => {
+      hashDiskFiles().then(files => {
         sendMsg({ type: 'query_files_result', reqId: msg.reqId, ok: true, files });
       });
     }
