@@ -143,15 +143,37 @@ async function main() {
   const infoC = framesC.find(f => false); // infos not collected by collect() (data-only) — infer from text
   check('3a. delta replay only sends chunks after sinceSeq', textC === 'L6\nL7\nL8\n', JSON.stringify(textC));
 
-  // --- 4. stale sinceSeq (older than buffer head) → full mode fallback ---
+  // --- 4. stale sinceSeq (older than buffer head) → tail append, NO clear ---
   // Fill enough data to push L1 out? Not needed: buffer starts at L1, ask from before L1.
   const bD = await wsConnect(URL);
   send(bD, { type: 'auth', password: 'testpw', username: 'user' });
   await next(bD, m => m.type === 'auth_ok');
+  let modeD = null;
+  bD.on('message', raw => { const m = JSON.parse(raw); if (m.type === 'scrollback_info' && m.agentId === agentId2) modeD = m.mode; });
   send(bD, { type: 'connect', agentId: agentId2, resume: true, sinceSeq: 1 });
   const framesD = await collect(bD, m => m.type === 'scrollback_end' && m.agentId === agentId2);
   const textD = framesD.map(f => Buffer.from(f.payload, 'base64').toString()).join('');
-  check('4a. stale position falls back to full window', textD.includes('L1') && textD.includes('L8'), JSON.stringify(textD.slice(0, 40)));
+  // tail mode: the browser keeps its own history and we append what we still
+  // have. A raw socket has no local history, so the appended window (L1..L8)
+  // must be intact — and the mode must be 'tail', not the history-erasing 'full'.
+  check('4a. stale position falls back to TAIL (append, no clear)', modeD === 'tail', `mode=${modeD}`);
+  check('4b. tail window content intact', textD.includes('L1') && textD.includes('L8'), JSON.stringify(textD.slice(0, 40)));
+
+  // --- 4c. server-restart shape: resume against an EMPTY buffer → tail, zero
+  // data. The browser's local history is the only copy left; sending a full
+  // clear here (old behaviour) erased it — the "history is gone" field bug.
+  const agentEmpty = await wsConnect(URL);
+  send(agentEmpty, { type: 'register', token: TOKEN, name: 'testbox', screen: 'mon-empty', attrs: { clientId: 'c-test' }, sys: {}, files: {}, cols: 80, rows: 24 });
+  await sleep(300);
+  const bG = await wsConnect(URL);
+  send(bG, { type: 'auth', password: 'testpw', username: 'user' });
+  await next(bG, m => m.type === 'auth_ok');
+  const emptyId = (await next(bG, m => m.type === 'agents' && m.agents.some(a => a.screen === 'mon-empty'))).agents.find(a => a.screen === 'mon-empty').id;
+  let modeG = null, infoGTotal = null;
+  bG.on('message', raw => { const m = JSON.parse(raw); if (m.type === 'scrollback_info' && m.agentId === emptyId) { modeG = m.mode; infoGTotal = m.total; } });
+  send(bG, { type: 'connect', agentId: emptyId, resume: true, sinceSeq: 999999 });
+  await collect(bG, m => m.type === 'scrollback_end' && m.agentId === emptyId);
+  check('4c. resume on empty buffer → tail, sends nothing (history preserved)', modeG === 'tail' && infoGTotal === 0, `mode=${modeG} total=${infoGTotal}`);
 
   // --- 5. agents broadcast carries the stable key resolution data ---
   const bE = await wsConnect(URL);
@@ -177,7 +199,7 @@ async function main() {
   const bF = await wsConnect(URL);
   send(bF, { type: 'auth', password: 'testpw', username: 'user' });
   await next(bF, m => m.type === 'auth_ok');
-  const agentId3 = (await next(bF, m => m.type === 'agents' && m.agents.some(a => a.screen === 'mon'))).agents.find(a => a.screen === 'mon').id;
+  const agentId3 = (await next(bF, m => (m.type === 'auth_ok' || m.type === 'agents') && m.agents.some(a => a.screen === 'mon'), 12000)).agents.find(a => a.screen === 'mon').id;
   send(bF, { type: 'connect', agentId: agentId3, resume: true, sinceSeq: lastSeq1 });
   const framesF = await collect(bF, m => m.type === 'scrollback_end' && m.agentId === agentId3);
   const textF = framesF.map(f => Buffer.from(f.payload, 'base64').toString()).join('');

@@ -143,23 +143,38 @@ function sendScrollbackReplay(ws, ainfo, done, sinceSeq) {
 
   // Resolve the replay window. Delta mode needs the FIRST buffered chunk's seq
   // to prove contiguity: if sinceSeq sits before it, trimmed history is missing
-  // and xterm cannot prepend anyway — fall back to the full recent window.
+  // and xterm cannot prepend — fall back to 'tail': append whatever the buffer
+  // still has onto the browser's existing content. Clearing (the old full
+  // fallback) destroyed the browser's local history whenever the SERVER had
+  // less than the browser remembered (server restart empties the buffer) —
+  // that erased history instead of restoring it. A full clear is only correct
+  // on a fresh (non-resume) connect.
   let start = 0, mode = 'full';
-  if (Number.isFinite(sinceSeq) && sinceSeq > 0 && term.scrollback.length > 0) {
-    const first = term.scrollback[0];
-    if (first.seq <= sinceSeq) {
-      // Buffer covers the gap: replay only chunks after sinceSeq.
-      start = term.scrollback.length;
-      while (start > 0 && term.scrollback[start - 1].seq > sinceSeq) start--;
-      mode = 'delta';
+  if (Number.isFinite(sinceSeq) && sinceSeq > 0) {
+    if (term.scrollback.length === 0) {
+      // Buffer empty (server restarted / nothing buffered yet): the browser's
+      // own history is the only copy left — keep it, send nothing.
+      mode = 'tail';
+    } else {
+      const first = term.scrollback[0];
+      if (first.seq <= sinceSeq) {
+        // Buffer covers the gap: replay only chunks after sinceSeq.
+        start = term.scrollback.length;
+        while (start > 0 && term.scrollback[start - 1].seq > sinceSeq) start--;
+        mode = 'delta';
+      } else {
+        // Gap not coverable: keep browser content, append our tail.
+        mode = 'tail';
+      }
     }
   }
 
   const total = term.scrollback.length;
   if (total === 0 || (mode === 'delta' && start >= total)) {
-    // Empty buffer still reports info+end: browsers treat scrollback_end as
-    // "replay finished" to trigger their post-connect repaint; with no end
-    // message a fresh session's terminal would never get one.
+    // Empty buffer (or nothing after sinceSeq) still reports info+end:
+    // browsers treat scrollback_end as "replay finished" to trigger their
+    // post-connect repaint; with no end message a fresh session's terminal
+    // would never get one.
     ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total: 0, loadedFrom: 0, hasMore: false, mode }));
     ws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id, lastSeq: sinceSeq || null }));
     finish();
@@ -169,8 +184,8 @@ function sendScrollbackReplay(ws, ainfo, done, sinceSeq) {
   // Walk back from the most recent chunk, stopping at whichever limit —
   // chunk count or total bytes — is hit first. Bounded to at most
   // SCROLLBACK_INIT iterations, so this is a cheap, one-time scan. Delta mode
-  // already fixed `start`; only full mode narrows the window by size.
-  if (mode === 'full') {
+  // already fixed `start`; tail/full modes narrow the window by size.
+  if (mode !== 'delta') {
     let bytes = 0, count = 0;
     let s = total;
     while (s > 0 && count < SCROLLBACK_INIT && bytes < SCROLLBACK_INIT_BYTES) {
