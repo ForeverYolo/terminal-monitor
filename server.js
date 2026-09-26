@@ -1414,7 +1414,8 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
-httpServer.listen(port, () => {
-  console.log(`Screen Web Terminal server listening on http://0.0.0.0:${port}`);
+const listenHost = config.server.host || '0.0.0.0';
+httpServer.listen(port, listenHost, () => {
+  console.log(`Screen Web Terminal server listening on http://${listenHost}:${port}`);
   if (supervisor) supervisor.start();
 });

@@ -37,5 +37,14 @@ function state(term) {
   for (const bytes of suffix) await write(restored, bytes);
   assert.deepStrictEqual(state(restored), state(source.term), 'restored terminal diverged after relative updates');
   source.dispose(); restored.dispose();
+  const resized = new TerminalState(5, 3, () => {});
+  const ordered = new Terminal({allowProposedApi: true, cols: 5, rows: 3});
+  resized.write('ABCDEF');
+  resized.resize(10, 3); // Must wait until ABCDEF has wrapped at width 5.
+  await write(ordered, 'ABCDEF');
+  ordered.resize(10, 3);
+  await new Promise(resolve => resized.snapshot(resolve));
+  assert.deepStrictEqual(state(resized.term), state(ordered), 'resize overtook queued output');
+  resized.dispose(); ordered.dispose();
   console.log('snapshot restore and continuation match');
 })().catch(e => { console.error(e); process.exitCode = 1; });

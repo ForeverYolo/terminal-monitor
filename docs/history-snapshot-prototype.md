@@ -11,10 +11,13 @@ agent 将经过共享过滤器的 PTY 输出同时送到 headless xterm 和 serv
 - `node test/test-terminal-snapshot.js`：比较持续渲染和“快照恢复 + 后续相对移动”的屏幕、历史行和光标。
 - `node test/test-snapshot-protocol.js`：验证首次快照、锚点前的竞争输出、实时续接、连续增量和缺口恢复。
 - `node test/test-offline-queue.js`：用真实 client/server、假 screen 验证 server 重启后快照包含断线期间输出。
-- 其余现有测试通过；尚未在真实浏览器与真实 GNU Screen 会话上做人工验收。
+- `test/test-real-screen-browser.js`：用专门创建的 GNU Screen 会话、真实 client/server 和 Chromium 验证历史、密集输出时连续 resize、浏览器断线重连；测试只绑定 `127.0.0.1`，结束时清理临时会话和进程。此项是可选测试，需要临时安装 Playwright 和 `xterm-addon-fit` 并设置 `PLAYWRIGHT_MODULE`、`XTERM_FIT_JS`、`PLAYWRIGHT_BROWSERS_PATH`。
+- 其余现有测试通过。另用终端模型对照测试发现并修复了 resize 越过待解析输出的顺序错误。
 
 ## 部署前提与边界
 
 首次升级旧 agent 时，旧版文件更新白名单不认识 `terminal-state.js` 和 `terminal-filter.js`。需要把新版文件与 `package.json`、`package-lock.json` 一起传到目标机器，在每个共享安装目录执行一次 `npm ci --omit=dev`，然后重启该目录下的 agent。先升级 server 也可以，旧 agent 会继续走旧协议。`deploy.sh` 只负责复制文件，不会安装依赖或重启服务。
 
-快照只覆盖 agent 启动后观察到、headless 缓冲仍保留的历史；它不能恢复 agent 启动前的 screen scrollback。当前上限为 5000 行和约 2 MB 的序列化内容。真实浏览器人工验收前，不应把这个原型视为已完成生产迁移。
+快照只覆盖 agent 启动后观察到、headless 缓冲仍保留的历史；它不能恢复 agent 启动前的 screen scrollback。当前上限为 5000 行和约 2 MB 的序列化内容。真实会话的浏览器冒烟测试已通过，但还没有对长期高负载或多浏览器不同窗口尺寸做验收。
+
+生产容量仍需评估：在本机用 200×50 终端、6000 行各约 170 字符的合成输出测试，单个 agent 的常驻内存增量约 74 MiB；生成约 878 KiB 的快照耗时约 198 ms，期间 RSS 又上升约 46 MiB。这是偏密集的合成负载，不代表真实会话，但说明多个 agent 同时运行时内存不能忽略。当前不建议直接全量上线。
