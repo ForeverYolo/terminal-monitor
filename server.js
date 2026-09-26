@@ -208,7 +208,12 @@ function sendScrollbackReplay(ws, ainfo, done, sinceSeq) {
       setImmediate(sendBatch);
       return;
     }
-    ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total, loadedFrom: start, hasMore: start > 0, mode }));
+    // Final info: NO `mode` field. The browser clears on info.mode==='full'
+    // — sending the mode again here wiped everything the replay had just
+    // drawn (intermittent blank terminal until a lucky repaint restored it).
+    // The first info already told the browser what to do; this one only
+    // carries the final window position.
+    ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total, loadedFrom: start, hasMore: start > 0 }));
     const lastSeq = total > 0 ? term.scrollback[total - 1].seq : (sinceSeq || null);
     ws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id, lastSeq }));
     finish();

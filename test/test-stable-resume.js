@@ -149,7 +149,13 @@ async function main() {
   send(bD, { type: 'auth', password: 'testpw', username: 'user' });
   await next(bD, m => m.type === 'auth_ok');
   let modeD = null;
-  bD.on('message', raw => { const m = JSON.parse(raw); if (m.type === 'scrollback_info' && m.agentId === agentId2) modeD = m.mode; });
+  // First info carries the mode; the final one deliberately omits it (see
+  // server.js — a second full-clear after the data had been drawn wiped the
+  // replay). Record only the FIRST info's mode.
+  bD.on('message', raw => {
+    const m = JSON.parse(raw);
+    if (m.type === 'scrollback_info' && m.agentId === agentId2 && modeD === null) modeD = m.mode;
+  });
   send(bD, { type: 'connect', agentId: agentId2, resume: true, sinceSeq: 1 });
   const framesD = await collect(bD, m => m.type === 'scrollback_end' && m.agentId === agentId2);
   const textD = framesD.map(f => Buffer.from(f.payload, 'base64').toString()).join('');
