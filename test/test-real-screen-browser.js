@@ -35,7 +35,7 @@ function lines() { return Array.from({length: term.buffer.active.length}, (_, i)
   browser = await chromium.launch({headless:true, args:['--no-sandbox']});
   const page = await browser.newPage({viewport:{width:1200,height:800}});
   const pageErrors = []; page.on('pageerror', e => pageErrors.push(e.message));
-  await page.route('https://cdn.jsdelivr.net/**', route => {
+  async function routeAssets(target) { await target.route('https://cdn.jsdelivr.net/**', route => {
     const url = route.request().url();
     let file, contentType;
     if (url.includes('xterm-addon-fit')) {file=process.env.XTERM_FIT_JS || require.resolve('xterm-addon-fit/lib/xterm-addon-fit.js');contentType='application/javascript';}
@@ -43,7 +43,8 @@ function lines() { return Array.from({length: term.buffer.active.length}, (_, i)
     else if (url.endsWith('/xterm.css')) {file=path.join(project,'node_modules/xterm/css/xterm.css');contentType='text/css';}
     else return route.abort();
     return route.fulfill({path:file,contentType});
-  });
+  }); }
+  await routeAssets(page);
   await page.goto(`http://127.0.0.1:${port}/`);
   await page.locator('#username-input').fill('test');
   await page.locator('#password-input').fill('isolated-pw');
@@ -54,6 +55,55 @@ function lines() { return Array.from({length: term.buffer.active.length}, (_, i)
   let first = await page.evaluate(lines);
   if (!first.some(s=>s.includes('HIST-0230')) || first.length < 150) throw new Error(`history short: ${first.length}, tail=${first.slice(-8).join('|')}`);
   console.log(`browser initial: ${first.length} buffer lines; early and late history visible`);
+  const follower = await browser.newPage({viewport:{width:760,height:560}});
+  follower.on('pageerror', e => pageErrors.push(e.message));
+  await routeAssets(follower);
+  await follower.goto(`http://127.0.0.1:${port}/`);
+  await follower.locator('#username-input').fill('test');
+  await follower.locator('#password-input').fill('isolated-pw');
+  await follower.locator('.login-box button').click();
+  await follower.locator('.agent-card').first().waitFor();
+  await follower.locator('.agent-card').first().click();
+  const secondSize = await follower.evaluate(() => fitAddon.proposeDimensions());
+  await until(async () => await page.evaluate(size => term && term.cols === size.cols && term.rows === size.rows && !pendingSizeSnapshot.has(currentAgentId), secondSize));
+  console.log(`second browser claimed ${secondSize.cols}x${secondSize.rows}; first followed`);
+  const firstSize = await page.evaluate(() => fitAddon.proposeDimensions());
+  await page.locator('#term-container .xterm').click();
+  await page.keyboard.type('x');
+  await until(async () => await follower.evaluate(size => term && term.cols === size.cols && term.rows === size.rows && !pendingSizeSnapshot.has(currentAgentId), firstSize));
+  console.log(`first browser input claimed ${firstSize.cols}x${firstSize.rows}; second followed`);
+  await follower.setViewportSize({width:900,height:600});
+  await follower.waitForFunction(size => {
+    const next = fitAddon.proposeDimensions();
+    return next && (next.cols !== size.cols || next.rows !== size.rows);
+  }, secondSize);
+  await delay(900);
+  const resizedSecond = await follower.evaluate(() => fitAddon.proposeDimensions());
+  await until(async () => await page.evaluate(size => term && term.cols === size.cols && term.rows === size.rows && !pendingSizeSnapshot.has(currentAgentId), resizedSecond));
+  console.log(`second browser resize claimed ${resizedSecond.cols}x${resizedSecond.rows}; first followed`);
+  await follower.close();
+  await until(async () => await page.evaluate(size => term && term.cols === size.cols && term.rows === size.rows && !pendingSizeSnapshot.has(currentAgentId), firstSize));
+  console.log('closing size owner restored remaining browser size');
+  const multiPage = await browser.newPage({viewport:{width:680,height:500}});
+  multiPage.on('pageerror', e => pageErrors.push(e.message));
+  await routeAssets(multiPage);
+  await multiPage.goto(`http://127.0.0.1:${port}/`);
+  await multiPage.locator('#username-input').fill('test');
+  await multiPage.locator('#password-input').fill('isolated-pw');
+  await multiPage.locator('.login-box button').click();
+  await multiPage.locator('.agent-card').first().waitFor();
+  await multiPage.evaluate(() => { selectedAgents.add(lastAgents[0].id); openMultiTerminal(); });
+  await multiPage.waitForFunction(() => Object.values(multiTerms).length === 1 &&
+    lastSeqByAgent.has(Object.values(multiTerms)[0].agentId) &&
+    !pendingSizeSnapshot.has(Object.values(multiTerms)[0].agentId));
+  const multiSize = await multiPage.evaluate(() => {
+    const entry = Object.values(multiTerms)[0];
+    return { cols: entry.term.cols, rows: entry.term.rows };
+  });
+  await until(async () => await page.evaluate(size => term && term.cols === size.cols && term.rows === size.rows && !pendingSizeSnapshot.has(currentAgentId), multiSize));
+  await multiPage.close();
+  await until(async () => await page.evaluate(size => term && term.cols === size.cols && term.rows === size.rows && !pendingSizeSnapshot.has(currentAgentId), firstSize));
+  console.log('multi-terminal browser claimed size and released ownership');
   for (let n=0;n<12;n++) { await page.setViewportSize({width: 800 + (n%3)*160, height: 520 + (n%2)*140}); await delay(80); }
   await delay(1200);
   const afterResize = await page.evaluate(lines);

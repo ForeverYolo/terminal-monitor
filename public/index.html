@@ -81,12 +81,12 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
 .multi-term-header .name { font-size: 13px; color: #fff; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .multi-term-header .close { color: #888; cursor: pointer; font-size: 12px; margin-left: 4px; }
 .multi-term-header .close:hover { color: #ff6b6b; }
-.multi-term-container { flex: 1; padding: 2px; overflow: hidden; min-height: 0; }
+.multi-term-container { flex: 1; padding: 2px; overflow-x: auto; overflow-y: hidden; min-height: 0; }
 
 /* Terminal */
 #term-view { display: none; flex-direction: column; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; }
 #term-header { display: none; }
-#term-container { flex: 1; background: #000; overflow: hidden; min-height: 0; }
+#term-container { flex: 1; background: #000; overflow-x: auto; overflow-y: hidden; min-height: 0; }
 /* xterm.js's own scrollback viewport (xterm.css sets overflow-y:scroll on this
    but not this) — without it, a nested scrollable div inside a position:fixed
    ancestor (#term-view here) is notoriously unreliable to touch-drag-scroll on
@@ -724,6 +724,21 @@ let termFilter = createAltScreenFilter(); // alt-screen filter for the single te
 // the last seq seen per agent so a reconnect resume can ask for "everything
 // after N" instead of skipping the gap entirely (old resume:true behaviour).
 const lastSeqByAgent = new Map();   // agentId -> number
+const pendingSizeSnapshot = new Set(); // agentIds waiting for a canonical-size snapshot
+function isSnapshotAgent(id) {
+  return (lastAgents || []).some(a => a.id === id && a.snapshotV1);
+}
+function proposedSize(addon, terminal) {
+  const proposed = addon && addon.proposeDimensions();
+  return proposed && proposed.cols > 0 && proposed.rows > 0
+    ? { cols: proposed.cols, rows: proposed.rows }
+    : { cols: terminal.cols, rows: terminal.rows };
+}
+function multiSizes() {
+  const sizes = {};
+  for (const [id, entry] of Object.entries(multiTerms)) sizes[id] = proposedSize(entry.fitAddon, entry.term);
+  return sizes;
+}
 // Stable terminal key (clientId|screen) -> agentId, refreshed on every agents
 // broadcast. When an agent reconnects it gets a NEW agentId but the same key —
 // watching browsers use this to re-subscribe to the new id automatically.
@@ -845,17 +860,17 @@ function connect(username, password) {
           lastSeqByAgent.delete(fresh);   // new id: start from a full replay
           if (term) term.clear();
         }
-        if (term && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: term.cols, rows: term.rows }));
-        }
-        ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, resume: true, sinceSeq: lastSeqByAgent.get(currentAgentId) || 0 }));
+        const size = proposedSize(fitAddon, term);
+        ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, ...size,
+          resume: true, sinceSeq: lastSeqByAgent.get(currentAgentId) || 0 }));
+        if (!isSnapshotAgent(currentAgentId)) ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, ...size }));
       } else if (wasReconnecting && inMulti) {
         // Resume multi terminal: re-subscribe previously opened agents.
         // Remap stale ids through the stable key the same way.
         remapMultiTerms();
         const ids = Object.keys(multiTerms);
         if (ids.length > 0) {
-          ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, resume: true, sinceSeqs: resumePayloadFor(ids) }));
+          ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, sizes: multiSizes(), resume: true, sinceSeqs: resumePayloadFor(ids) }));
         }
       } else {
         // Fresh login (or reconnect while not in a terminal): show dashboard.
@@ -899,14 +914,17 @@ function connect(username, password) {
           currentAgentId = fresh;
           lastSeqByAgent.delete(fresh);
           term.clear();
-          ws.send(JSON.stringify({ type: 'connect', agentId: fresh, sinceSeq: 0 }));
+          ws.send(JSON.stringify({ type: 'connect', agentId: fresh, ...proposedSize(fitAddon, term), sinceSeq: 0 }));
         }
       }
       if (views.multi.style.display !== 'none' && remapMultiTerms() && ws.readyState === WebSocket.OPEN) {
         const ids = Object.keys(multiTerms);
-        ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, resume: true, sinceSeqs: resumePayloadFor(ids) }));
+        ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, sizes: multiSizes(), resume: true, sinceSeqs: resumePayloadFor(ids) }));
       }
+    } else if (msg.type === 'terminal_size') {
+      if (msg.snapshot) pendingSizeSnapshot.add(msg.agentId);
     } else if (msg.type === 'data') {
+      if (pendingSizeSnapshot.has(msg.agentId)) return;
       // Track the per-terminal seq position for later incremental resumes.
       // Replay frames carry seq too, so the position advances through both
       // live and replayed data.
@@ -926,6 +944,7 @@ function connect(username, password) {
         feedStructured(msg.payload, msg.agentId);
       }
     } else if (msg.type === 'terminal_snapshot') {
+      pendingSizeSnapshot.delete(msg.agentId);
       if (typeof msg.seq === 'number') lastSeqByAgent.set(msg.agentId, msg.seq);
       const entry = msg.agentId === currentAgentId && term
         ? { term, fitAddon, single: true } : multiTerms[msg.agentId];
@@ -936,24 +955,10 @@ function connect(username, password) {
         target.write('\x1bc');
         target.resize(msg.cols, msg.rows);
         const bytes = Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0));
-        target.write(bytes, () => {
-          if (entry.single && (term !== target || currentAgentId !== msg.agentId)) return;
-          if (!entry.single && multiTerms[msg.agentId] !== entry) return;
-          entry.fitAddon.fit();
-          // The snapshot has an exact cursor at its own size. Ask screen to
-          // repaint at the browser size before subsequent relative updates.
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'resize', agentId: msg.agentId,
-              cols: target.cols, rows: Math.max(1, target.rows - 1) }));
-            setTimeout(() => {
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'resize', agentId: msg.agentId, cols: target.cols, rows: target.rows }));
-              }
-            }, 250);
-          }
-        });
+        target.write(bytes);
       }
     } else if (msg.type === 'terminal_snapshot_error') {
+      pendingSizeSnapshot.delete(msg.agentId);
       console.error('Terminal snapshot failed:', msg.message);
       showFloatingNotice('终端历史恢复失败，请重新打开：' + (msg.message || '未知错误'));
     } else if (msg.type === 'scrollback_info') {
@@ -1413,11 +1418,14 @@ function openTerminal(agentId, agentName) {
     if (termViewMode === 'structured') return;
     if (container.clientWidth === 0 || container.clientHeight === 0) return;
     clearTimeout(resizeFitTimer);
-    resizeFitTimer = setTimeout(() => { fitAddon.fit(); }, mobile ? 60 : 200);
+    resizeFitTimer = setTimeout(() => {
+      if (!isSnapshotAgent(currentAgentId)) fitAddon.fit();
+    }, mobile ? 60 : 200);
     clearTimeout(resizeSendTimer);
     resizeSendTimer = setTimeout(() => {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: term.cols, rows: term.rows }));
+        ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId,
+          ...proposedSize(fitAddon, term) }));
       }
     }, mobile ? 200 : 500);
   });
@@ -1443,8 +1451,9 @@ function openTerminal(agentId, agentName) {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       fitAddon.fit();
-      ws.send(JSON.stringify({ type: 'connect', agentId }));
-      ws.send(JSON.stringify({ type: 'resize', agentId, cols: term.cols, rows: term.rows }));
+      const size = proposedSize(fitAddon, term);
+      ws.send(JSON.stringify({ type: 'connect', agentId, ...size }));
+      if (!isSnapshotAgent(agentId)) ws.send(JSON.stringify({ type: 'resize', agentId, ...size }));
     });
   });
 
@@ -1455,7 +1464,8 @@ function openTerminal(agentId, agentName) {
     const bytes = new TextEncoder().encode(data);
     let bin = '';
     bytes.forEach(b => bin += String.fromCharCode(b));
-    ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId: currentAgentId }));
+    ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId: currentAgentId,
+      ...(isSnapshotAgent(currentAgentId) ? proposedSize(fitAddon, term) : {}) }));
   });
 }
 
@@ -2376,9 +2386,7 @@ function openMultiTerminal() {
   Object.values(multiTerms).forEach(t => { if (t.term) t.term.dispose(); });
   multiTerms = {};
 
-  // Subscribe to all selected agents
   const agentIds = Array.from(selectedAgents);
-  ws.send(JSON.stringify({ type: 'connect_multi', agentIds }));
 
   // Create terminal for each agent
   agentIds.forEach(agentId => {
@@ -2414,7 +2422,6 @@ function openMultiTerminal() {
     term.open(wrap.querySelector('.multi-term-container'));
     // Same DECCKM rationale as openTerminal: keep arrows SS3 for screen apps.
     term.write('\x1b[?1h');
-    setTimeout(() => fitAddon.fit(), 50);
 
     const entry = { agentId, term, fitAddon, container: wrap.querySelector('.multi-term-container'), filter: createAltScreenFilter(), terminalKey: agent ? terminalKeyOf(agent) : null };
     multiTerms[agentId] = entry;
@@ -2433,19 +2440,34 @@ function openMultiTerminal() {
       const bytes = new TextEncoder().encode(data);
       let bin = '';
       bytes.forEach(b => bin += String.fromCharCode(b));
-      ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId: entry.agentId }));
+      ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId: entry.agentId,
+        ...(isSnapshotAgent(entry.agentId) ? proposedSize(entry.fitAddon, entry.term) : {}) }));
     });
 
     // Handle resize
     term.onResize(({ cols, rows }) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({ type: 'resize', agentId: entry.agentId, cols, rows }));
+      if (!isSnapshotAgent(entry.agentId)) ws.send(JSON.stringify({ type: 'resize', agentId: entry.agentId, cols, rows }));
     });
   });
 
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    for (const entry of Object.values(multiTerms)) entry.fitAddon.fit();
+    ws.send(JSON.stringify({ type: 'connect_multi', agentIds, sizes: multiSizes() }));
+  }));
+
   // Handle resize
+  let multiResizeTimer = null;
   window._multiResize = () => {
-    Object.values(multiTerms).forEach(t => { if (t.fitAddon) t.fitAddon.fit(); });
+    clearTimeout(multiResizeTimer);
+    multiResizeTimer = setTimeout(() => {
+      Object.values(multiTerms).forEach(t => {
+        if (isSnapshotAgent(t.agentId)) {
+          ws.send(JSON.stringify({ type: 'resize', agentId: t.agentId,
+            ...proposedSize(t.fitAddon, t.term) }));
+        } else t.fitAddon.fit();
+      });
+    }, 200);
   };
   window.addEventListener('resize', window._multiResize);
 }
@@ -2637,9 +2659,10 @@ function setTermViewMode(mode) {
     toggle.textContent = '结构';
     // Refit xterm to real size + re-send resize (it was hidden while sizing)
     setTimeout(() => {
-      if (fitAddon && term) { try { fitAddon.fit(); } catch {} }
+      if (fitAddon && term && !isSnapshotAgent(currentAgentId)) { try { fitAddon.fit(); } catch {} }
       if (ws && ws.readyState === WebSocket.OPEN && term) {
-        ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: term.cols, rows: term.rows }));
+        ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId,
+          ...proposedSize(fitAddon, term) }));
       }
     }, 60);
   }
@@ -2805,7 +2828,7 @@ function mobileSendEnter() {
       fitScheduled = true;
       requestAnimationFrame(() => {
         fitScheduled = false;
-        if (fitAddon && term) { try { fitAddon.fit(); } catch {} }
+        if (fitAddon && term && !isSnapshotAgent(currentAgentId)) { try { fitAddon.fit(); } catch {} }
       });
     }
   }

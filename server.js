@@ -233,17 +233,80 @@ function sendSnapshotReplay(ws, ainfo) {
   if (!binfo || ainfo.ws.readyState !== ainfo.ws.OPEN) return;
   if (!binfo.replaying) binfo.replaying = new Set();
   binfo.replaying.add(ainfo.id);
+  if (!binfo.activeSnapshots) binfo.activeSnapshots = new Map();
+  const previous = binfo.activeSnapshots.get(ainfo.id);
+  if (previous && pendingSnapshots.has(previous)) {
+    clearTimeout(pendingSnapshots.get(previous).timer);
+    pendingSnapshots.delete(previous);
+  }
   const reqId = crypto.randomUUID();
+  binfo.activeSnapshots.set(ainfo.id, reqId);
   const timer = setTimeout(() => {
     const pending = pendingSnapshots.get(reqId);
     if (!pending) return;
     pendingSnapshots.delete(reqId);
+    binfo.activeSnapshots.delete(ainfo.id);
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'terminal_snapshot_error', agentId: ainfo.id, message: 'Snapshot timed out' }));
     binfo.replaying.delete(ainfo.id);
     if (binfo.pendingLive) binfo.pendingLive.delete(ainfo.id);
   }, 10000);
   pendingSnapshots.set(reqId, { ws, ainfo, binfo, timer });
   ainfo.ws.send(JSON.stringify({ type: 'terminal_snapshot_request', reqId }));
+}
+
+function validTerminalSize(cols, rows) {
+  return Number.isInteger(cols) && Number.isInteger(rows) &&
+    cols >= 1 && cols <= 400 && rows >= 1 && rows <= 200;
+}
+
+// The last browser that opens, resizes, or sends input owns this screen's PTY
+// size. A size change is followed by fresh snapshots for every watcher, so
+// nobody continues parsing old-size output at the new dimensions.
+function claimTerminalSize(ws, ainfo, cols, rows) {
+  const binfo = browsers.get(ws);
+  if (!binfo || !ainfo.snapshotV1) return false;
+  if (!binfo.preferredSizes) binfo.preferredSizes = new Map();
+  if (!binfo.lastSizeClaim) binfo.lastSizeClaim = new Map();
+  if (validTerminalSize(cols, rows)) binfo.preferredSizes.set(ainfo.id, { cols, rows });
+  const preferred = binfo.preferredSizes.get(ainfo.id);
+  if (!preferred) return false;
+  const term = ainfo.term;
+  const changed = term.cols !== preferred.cols || term.rows !== preferred.rows;
+  const ownerChanged = term.sizeOwner !== ws;
+  term.sizeOwner = ws;
+  binfo.lastSizeClaim.set(ainfo.id, Date.now());
+  if (changed) {
+    term.cols = preferred.cols;
+    term.rows = preferred.rows;
+    ainfo.ws.send(JSON.stringify({ type: 'resize', ...preferred }));
+  }
+  if (changed || ownerChanged) {
+    for (const [bws, watching] of browsers) {
+      if (!watching.agentIds.has(ainfo.id) || bws.readyState !== bws.OPEN) continue;
+      bws.send(JSON.stringify({ type: 'terminal_size', agentId: ainfo.id,
+        ...preferred, owner: bws === ws, snapshot: changed }));
+      if (changed) sendSnapshotReplay(bws, ainfo);
+    }
+  }
+  return changed;
+}
+
+function releaseTerminalOwner(ws, agentIds) {
+  for (const agentId of agentIds) {
+    const ainfo = [...agents.values()].find(a => a.id === agentId);
+    if (!ainfo || ainfo.term.sizeOwner !== ws) continue;
+    ainfo.term.sizeOwner = null;
+    let next = null, latest = -1;
+    for (const [bws, binfo] of browsers) {
+      if (bws === ws || bws.readyState !== bws.OPEN || !binfo.agentIds.has(agentId)) continue;
+      const at = binfo.lastSizeClaim && binfo.lastSizeClaim.get(agentId) || 0;
+      if (at > latest) { next = bws; latest = at; }
+    }
+    if (next) {
+      const size = browsers.get(next).preferredSizes?.get(agentId);
+      if (size) claimTerminalSize(next, ainfo, size.cols, size.rows);
+    }
+  }
 }
 
 function getAgentsList(user) {
@@ -256,6 +319,7 @@ function getAgentsList(user) {
         id: a.id,
         name: a.name,
         screen: a.screen || '',
+        snapshotV1: a.snapshotV1,
         attrs: a.attrs || {},
         sys: a.sys || {},
         connectedAt: a.connectedAt,
@@ -648,6 +712,9 @@ wss.on('connection', (ws) => {
         terminals.set(tKey, term);
       }
       info.term = term;
+      term.cols = Number.isInteger(msg.cols) ? msg.cols : 200;
+      term.rows = Number.isInteger(msg.rows) ? msg.rows : 50;
+      term.sizeOwner = null;
       info.lastSeq = term.scrollback.length > 0 ? term.scrollback[term.scrollback.length - 1].seq : null;
       agents.set(ws, info);
       console.log(`[+] Agent connected: ${info.name} (${id})`);
@@ -767,6 +834,7 @@ wss.on('connection', (ws) => {
       pendingSnapshots.delete(msg.reqId);
       clearTimeout(pending.timer);
       const { ws: bws, ainfo, binfo } = pending;
+      binfo.activeSnapshots.delete(ainfo.id);
       const anchor = ainfo.lastSeq || null;
       if (bws.readyState === bws.OPEN && binfo.agentIds.has(ainfo.id) &&
           typeof msg.payload === 'string' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) {
@@ -912,13 +980,18 @@ wss.on('connection', (ws) => {
       const binfo = browsers.get(ws);
       if (binfo) {
         // Single agent mode: clear multi subscriptions and set single agent
+        const previousIds = binfo.agentIds;
         binfo.agentIds = new Set([msg.agentId]);
+        releaseTerminalOwner(ws, [...previousIds].filter(id => id !== msg.agentId));
         console.log(`[*] Browser watching agent: ${msg.agentId} (resume: ${!!msg.resume}, sinceSeq: ${msg.sinceSeq ?? '-'})`);
         // Snapshot-capable agents restore state on a fresh connect or a gap;
         // continuous resumes use the smaller seq delta.
         const ainfo = msg.agentId ? [...agents.values()].find(a => a.id === msg.agentId) : null;
         if (ainfo) {
-          if (ainfo.snapshotV1 && (!msg.resume || !canReplayDelta(ainfo, msg.sinceSeq))) {
+          const resized = ainfo.snapshotV1 && claimTerminalSize(ws, ainfo, msg.cols, msg.rows);
+          if (resized) {
+            // claimTerminalSize already requested snapshots for every watcher.
+          } else if (ainfo.snapshotV1 && (!msg.resume || !canReplayDelta(ainfo, msg.sinceSeq))) {
             sendSnapshotReplay(ws, ainfo);
           } else if (!msg.resume) {
             sendScrollbackReplay(ws, ainfo, () => {});
@@ -936,7 +1009,9 @@ wss.on('connection', (ws) => {
     if (role === 'browser' && msg.type === 'connect_multi') {
       const binfo = browsers.get(ws);
       if (binfo && Array.isArray(msg.agentIds)) {
+        const previousIds = binfo.agentIds;
         binfo.agentIds = new Set(msg.agentIds);
+        releaseTerminalOwner(ws, [...previousIds].filter(id => !binfo.agentIds.has(id)));
         console.log(`[*] Browser watching ${msg.agentIds.length} agents: ${msg.agentIds.join(', ')} (resume: ${!!msg.resume})`);
         // Fresh connect: full replay per agent. Resume: incremental per agent
         // (sinceSeqs maps agentId -> lastSeq; agents missing from the map get 0,
@@ -949,7 +1024,11 @@ wss.on('connection', (ws) => {
           for (const agentId of msg.agentIds) {
             const ainfo = [...agents.values()].find(a => a.id === agentId);
             if (ainfo && (!msg.resume || sinceSeqs)) {
-              if (ainfo.snapshotV1 && (!msg.resume || !canReplayDelta(ainfo, sinceSeqs && sinceSeqs[agentId]))) {
+              const size = msg.sizes && msg.sizes[agentId];
+              const resized = ainfo.snapshotV1 && claimTerminalSize(ws, ainfo, size && size.cols, size && size.rows);
+              if (resized) {
+                // Already requested a new-size snapshot for every watcher.
+              } else if (ainfo.snapshotV1 && (!msg.resume || !canReplayDelta(ainfo, sinceSeqs && sinceSeqs[agentId]))) {
                 sendSnapshotReplay(ws, ainfo);
               } else if (msg.resume && sinceSeqs) {
                 if (!binfo.lastSeq) binfo.lastSeq = new Map();
@@ -967,7 +1046,9 @@ wss.on('connection', (ws) => {
     if (role === 'browser' && msg.type === 'disconnect_multi') {
       const binfo = browsers.get(ws);
       if (binfo) {
+        const previousIds = binfo.agentIds;
         binfo.agentIds = new Set();
+        releaseTerminalOwner(ws, previousIds);
         console.log(`[*] Browser stopped watching all agents`);
       }
     }
@@ -1002,6 +1083,7 @@ wss.on('connection', (ws) => {
       // Find the agent ws and forward
       for (const [aws, ainfo] of agents) {
         if (ainfo.id === msg.agentId && aws.readyState === aws.OPEN) {
+          if (ainfo.snapshotV1) claimTerminalSize(ws, ainfo, msg.cols, msg.rows);
           aws.send(JSON.stringify({ type: 'data', payload: msg.payload }));
           break;
         }
@@ -1014,7 +1096,8 @@ wss.on('connection', (ws) => {
       if (!msg.agentId || !binfo.agentIds.has(msg.agentId)) return;
       for (const [aws, ainfo] of agents) {
         if (ainfo.id === msg.agentId && aws.readyState === aws.OPEN) {
-          aws.send(JSON.stringify({ type: 'resize', cols: msg.cols, rows: msg.rows }));
+          if (ainfo.snapshotV1) claimTerminalSize(ws, ainfo, msg.cols, msg.rows);
+          else aws.send(JSON.stringify({ type: 'resize', cols: msg.cols, rows: msg.rows }));
           break;
         }
       }
@@ -1305,6 +1388,8 @@ wss.on('connection', (ws) => {
     }
     if (role === 'browser') {
       console.log(`[-] Browser disconnected`);
+      const binfo = browsers.get(ws);
+      if (binfo) releaseTerminalOwner(ws, binfo.agentIds);
       browsers.delete(ws);
     }
   });
