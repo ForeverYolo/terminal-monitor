@@ -14,7 +14,7 @@ PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF="$PROJ_DIR/deploy.targets.conf"
 MAX_RETRIES=3
 RETRY_DELAY=5
-DEFAULT_FILES=(server.js client.js supervisor.js ai-overseer.js public/index.html)
+DEFAULT_FILES=(server.js client.js terminal-state.js terminal-filter.js supervisor.js ai-overseer.js package.json package-lock.json public/index.html)
 
 if [ ! -f "$CONF" ]; then
   echo "[!] Target config not found: $CONF"

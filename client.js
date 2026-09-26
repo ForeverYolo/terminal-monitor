@@ -5,6 +5,9 @@ const { execSync, execFileSync, spawn } = require('child_process');
 const crypto = require('crypto');
 const WebSocket = require('ws');
 const pty = require('node-pty');
+let TerminalState = null;
+try { ({ TerminalState } = require('./terminal-state')); }
+catch (e) { console.warn('[snapshot] renderer unavailable, using legacy output:', e.message); }
 const { detectClaudeState } = require('./claude-detector');
 const { validateSpawnRequest, SPAWN_MAX_NODES } = require('./spawn-validator');
 const { loadConfig } = require('./config-loader');
@@ -93,13 +96,13 @@ const clientId = config.client.clientId;
 // Server diffs these hashes against its own copies and pushes only what
 // differs (update_files). Whitelist is strict: only these names may ever be
 // written by the update path.
-const CLIENT_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js'];
+const CLIENT_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js', 'terminal-state.js', 'terminal-filter.js'];
 // Names this agent may be asked to upload (pull_update). Includes the
 // server-side files: when this machine is the designated update source, the
 // server replaces its own copies from here. Strict whitelist — anything else
 // is refused, so the fetch path can never read arbitrary files.
 const FETCHABLE_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
-  'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
+  'terminal-state.js', 'terminal-filter.js', 'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
 
 function sha256File(absPath) {
   return new Promise((resolve, reject) => {
@@ -411,9 +414,9 @@ async function handleFetchFiles(msg) {
 
 // Files we can receive via update_files: everything the server manages
 // (install.sh puts server.js/public/* copies on agent machines too). Only a
-// change to one we actually RUN (the client-side four) triggers a restart.
+// change to one we actually RUN triggers a restart.
 const UPDATABLE_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
-  'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
+  'terminal-state.js', 'terminal-filter.js', 'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
 
 async function handleUpdateFiles(msg) {
   const reqId = msg.reqId;
@@ -540,6 +543,7 @@ const screenArgs = (screenMode || 'auto') === 'auto'
 
 let ws = null;
 let ptyProcess = null;
+let terminalState = null;
 let oscTail = '';   // carry-over bytes between onData chunks, for OSC 7 tracking
 let reconnectDelay = 1000;
 const MAX_DELAY = 30000;
@@ -575,11 +579,9 @@ function stopHeartbeat() {
 let ptyGeneration = 0;  // incremented on every spawn; stale respawn timers no-op
 
 // --- Offline output queue ---
-// While disconnected, the PTY stays attached to screen and its output keeps
-// flowing here. On reconnect the queue is drained to the server BEFORE live
-// data (the onData path also enqueues while disconnected, so ordering is a
-// single FIFO). This is what lets the server's per-terminal scrollback cover
-// the disconnect gap instead of only what arrived over live connections.
+// Legacy mode keeps a bounded output queue while disconnected. Snapshot mode
+// keeps that output in TerminalState instead; reconnecting browsers restore it
+// from the model and do not need a second copy sent over the wire.
 // Byte-capped: if a long outage exceeds the cap, the OLDEST data is dropped
 // (shift-like batch trim) — the tail (current screen state) matters more than
 // the head, and the server-side trim behaves the same way.
@@ -667,7 +669,7 @@ function connect() {
     // Spawn PTY with screen — unless it survived the disconnect (see the
     // keep-PTY logic in ws.on('close')); a fresh `screen -r` attach would
     // repaint one viewport and mark the gap as if nothing happened. The
-    // offline queue covers that gap instead.
+    // the terminal model (or legacy offline queue) covers that gap instead.
     if (!ptyProcess) spawnPty();
 
     // Register with server
@@ -682,6 +684,7 @@ function connect() {
         attrs: { ...(attrs || {}), clientId },
         sys: sysInfo,
         files,
+        snapshotV1: !!TerminalState,
         cols,
         rows
       }));
@@ -694,6 +697,12 @@ function connect() {
   });
 
   function spawnPty() {
+    if (terminalState) terminalState.dispose();
+    terminalState = TerminalState ? new TerminalState(cols, rows, payload => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        sendRawOrQueue(JSON.stringify({ type: 'data', payload, filtered: true }));
+      }
+    }) : null;
     if (ptyProcess) {
       try { ptyProcess.kill(); } catch {}
       ptyProcess.removeAllListeners('data');
@@ -723,14 +732,15 @@ function connect() {
       if (DEBUG_DUMP) dumpStream('OUT', data);
       oscTail = trackOscCwd(oscTail, data);
       pushOutput(data);
-      const payload = Buffer.from(data).toString('base64');
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        sendRawOrQueue(JSON.stringify({ type: 'data', payload }));
+      if (terminalState) {
+        terminalState.write(data);
       } else {
-        // Disconnected: keep the stream for the reconnect replay (see
-        // enqueueOffline). Output still reaches screen's own buffer meanwhile,
-        // but the server never saw these bytes — queue them.
-        enqueueOffline(payload);
+        const payload = Buffer.from(data).toString('base64');
+        if (ws && ws.readyState === WebSocket.OPEN && offlineQueue.length === 0) {
+          sendRawOrQueue(JSON.stringify({ type: 'data', payload }));
+        } else {
+          enqueueOffline(payload);
+        }
       }
     });
 
@@ -761,7 +771,13 @@ function connect() {
     }
 
     if (msg.type === 'resize' && ptyProcess) {
-      ptyProcess.resize(msg.cols || cols, msg.rows || rows);
+      const nextCols = msg.cols || cols, nextRows = msg.rows || rows;
+      if (terminalState) terminalState.resize(nextCols, nextRows);
+      ptyProcess.resize(nextCols, nextRows);
+    }
+
+    if (msg.type === 'terminal_snapshot_request' && terminalState) {
+      terminalState.snapshot(snapshot => sendMsg({ type: 'terminal_snapshot_result', reqId: msg.reqId, ...snapshot }));
     }
 
     // Restart screen session: kill PTY so the existing onExit → respawn path
@@ -1057,8 +1073,8 @@ function connect() {
     // KEEP the PTY attached to screen across reconnects. Killing it used to
     // mean: reconnect → fresh `screen -r` attach → screen repaints one
     // viewport → everything between the disconnect and reconnect was gone
-    // except that one redraw. Now output continues into the offline queue and
-    // is replayed on reconnect, so the server-side scrollback stays complete.
+    // except that one redraw. The terminal model now keeps the gap for a
+    // browser snapshot; legacy mode replays its offline queue on reconnect.
     // (PTY died for real — screen exited — so there is nothing to keep.)
     // Invalidate any pending respawn timer from this connection's pty —
     // the reconnect's spawnPty owns the next generation.

@@ -1,12 +1,11 @@
-// Integration test for client.js offline queue + keep-PTY-across-reconnect.
+// Integration test for agent snapshot + keep-PTY-across-reconnect.
 //
 // Uses a FAKE `screen` executable (a shell script that emits TICK lines) so no
 // real screen session is touched. Runs the REAL client.js against a REAL
 // server, then kills the server to simulate an outage:
 //   - client must keep the PTY alive (no respawn → same fake-screen PID)
-//   - ticks produced during the outage must land in the offline queue
-//   - after the server returns, the queue is drained; a fresh browser sees
-//     the outage-window ticks in the server's scrollback.
+//   - ticks produced during the outage remain in the agent's terminal model
+//   - after the server returns, a fresh browser restores them from a snapshot.
 //
 // Run: node test/test-offline-queue.js
 'use strict';
@@ -27,12 +26,15 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'swt-e2e-'));
 const fakeScreen = path.join(tmpDir, 'screen');
 let ticks = 0;
 const pidFile = path.join(tmpDir, 'fake-screen.pid');
+const tickFile = path.join(tmpDir, 'last-tick');
 // Prints PID + emits TICK lines forever; records PID so the test can assert
 // the PTY was NOT respawned across the reconnect.
 fs.writeFileSync(fakeScreen, `#!/bin/bash
 echo $$ > ${pidFile}
 while true; do
-  echo "TICK $((++SEQ)) at $(date +%s.%N)"
+  SEQ=$((SEQ+1))
+  echo "TICK $SEQ at $(date +%s.%N)"
+  echo "$SEQ" > ${tickFile}
   sleep 0.2
 done
 `, { mode: 0o755 });
@@ -88,11 +90,13 @@ async function main() {
   await sleep(2500); // connect + register + first ticks
 
   const pidBefore = fs.readFileSync(pidFile, 'utf8').trim();
+  const tickBefore = Number(fs.readFileSync(tickFile, 'utf8'));
 
   // --- outage: kill the server, keep client running ---
   server.kill();
-  await sleep(3000); // ~15 ticks go offline into the queue
-  check('outage produced offline queue', /offline|TICK/.test(clientLog) || true); // informational
+  await sleep(3000); // ~15 ticks reach the local model while the server is down
+  const tickAfter = Number(fs.readFileSync(tickFile, 'utf8'));
+  const outageTick = Math.floor((tickBefore + tickAfter) / 2);
 
   // --- server returns ---
   server = startServer();
@@ -101,7 +105,7 @@ async function main() {
   const pidAfter = fs.readFileSync(pidFile, 'utf8').trim();
   check('PTY survived reconnect (same fake-screen pid)', pidBefore === pidAfter, `${pidBefore} vs ${pidAfter}`);
 
-  // --- browser verifies outage-window ticks reached server scrollback ---
+  // --- browser verifies outage-window ticks survived in the agent snapshot ---
   const ws = new WebSocket(URL);
   await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
   ws.send(JSON.stringify({ type: 'auth', password: 'pw', username: 'user' }));
@@ -119,18 +123,19 @@ async function main() {
 
   ws.send(JSON.stringify({ type: 'connect', agentId }));
   const datas = [];
+  let snapshot = '';
   await new Promise((res) => {
     ws.on('message', (raw) => {
       const m = JSON.parse(raw);
       if (m.type === 'data' && m.agentId === agentId) datas.push(Buffer.from(m.payload, 'base64').toString());
+      if (m.type === 'terminal_snapshot' && m.agentId === agentId) snapshot = Buffer.from(m.payload, 'base64').toString();
       if (m.type === 'scrollback_end' && m.agentId === agentId) res();
     });
   });
-  const text = datas.join('');
+  const text = snapshot + datas.join('');
   const tickCount = (text.match(/TICK/g) || []).length;
-  // The server restarted, so its buffer holds ONLY post-restart data — every
-  // TICK there necessarily arrived via the offline-queue drain.
-  check('outage ticks replayed via offline queue (server restarted clean)', tickCount >= 3, `ticks=${tickCount}, log tail: ${clientLog.slice(-300)}`);
+  check('outage ticks restored from agent snapshot', tickCount >= 3 && text.includes(`TICK ${outageTick} at`),
+    `missing outage tick ${outageTick}, ticks=${tickCount}, log tail: ${clientLog.slice(-300)}`);
 
   // live data still flows
   await sleep(1000);

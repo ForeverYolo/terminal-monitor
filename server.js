@@ -119,9 +119,8 @@ function nextSeq() {
 // paced. `done` fires when finished, including when there's nothing to send.
 //
 // sinceSeq enables incremental replay: only chunks with seq > sinceSeq are
-// sent (mode:'delta'). When the requested gap is no longer fully buffered
-// (trimmed tail, or the browser is behind a trim point), fall back to a full
-// window replay (mode:'full') — the browser clears its terminal and redraws.
+// sent (mode:'delta'). Snapshot-capable agents use a state snapshot when the
+// buffered gap is incomplete; legacy agents retain the old tail behavior.
 // seq always rides along on replayed `data` frames so the browser can pick up
 // its lastSeq from either mode.
 function sendScrollbackReplay(ws, ainfo, done, sinceSeq) {
@@ -202,7 +201,7 @@ function sendScrollbackReplay(ws, ainfo, done, sinceSeq) {
     const end = Math.min(i + SCROLLBACK_SEND_BATCH, total);
     for (; i < end; i++) {
       const chunk = term.scrollback[i];
-      ws.send(JSON.stringify({ type: 'data', payload: chunk.payload, agentId: ainfo.id, seq: chunk.seq }));
+      ws.send(JSON.stringify({ type: 'data', payload: chunk.payload, agentId: ainfo.id, seq: chunk.seq, filtered: chunk.filtered }));
     }
     if (i < total) {
       setImmediate(sendBatch);
@@ -220,6 +219,31 @@ function sendScrollbackReplay(ws, ainfo, done, sinceSeq) {
     done();
   }
   sendBatch();
+}
+
+const pendingSnapshots = new Map();
+function canReplayDelta(ainfo, sinceSeq) {
+  const sb = ainfo.term.scrollback;
+  return Number.isFinite(sinceSeq) && sinceSeq > 0 && sb.length > 0 &&
+    sb[0].seq <= sinceSeq && sinceSeq <= sb[sb.length - 1].seq;
+}
+
+function sendSnapshotReplay(ws, ainfo) {
+  const binfo = browsers.get(ws);
+  if (!binfo || ainfo.ws.readyState !== ainfo.ws.OPEN) return;
+  if (!binfo.replaying) binfo.replaying = new Set();
+  binfo.replaying.add(ainfo.id);
+  const reqId = crypto.randomUUID();
+  const timer = setTimeout(() => {
+    const pending = pendingSnapshots.get(reqId);
+    if (!pending) return;
+    pendingSnapshots.delete(reqId);
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'terminal_snapshot_error', agentId: ainfo.id, message: 'Snapshot timed out' }));
+    binfo.replaying.delete(ainfo.id);
+    if (binfo.pendingLive) binfo.pendingLive.delete(ainfo.id);
+  }, 10000);
+  pendingSnapshots.set(reqId, { ws, ainfo, binfo, timer });
+  ainfo.ws.send(JSON.stringify({ type: 'terminal_snapshot_request', reqId }));
 }
 
 function getAgentsList(user) {
@@ -285,6 +309,7 @@ setInterval(() => {
 // including in-flight WebSocket traffic, while it runs. A code change to a
 // cached page needs a server restart to take effect.
 const indexHtml = fs.readFileSync(path.join(__dirname, 'public', 'index.html'));
+const terminalFilterJs = fs.readFileSync(path.join(__dirname, 'terminal-filter.js'));
 const guideHtml = fs.readFileSync(path.join(__dirname, 'public', 'guide.html'));
 const faviconSvg = fs.readFileSync(path.join(__dirname, 'public', 'favicon.svg'));
 
@@ -292,17 +317,17 @@ const faviconSvg = fs.readFileSync(path.join(__dirname, 'public', 'favicon.svg')
 // This server's on-disk copies are the single source of truth: the web UI
 // pushes CLIENT_FILES diffs to agents (see push_update handler) and restarts
 // itself to apply SERVER_FILES landed here out-of-band (deploy.sh/scp).
-const CLIENT_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js'];
+const CLIENT_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js', 'terminal-state.js', 'terminal-filter.js'];
 // client.js is listed here too (though the server never runs it) because the
 // manifest is the diff source for client pushes — without it,
 // update_files_result couldn't record the agent's post-push client.js hash and
 // every subsequent push would resend the whole file.
 const SERVER_FILES = ['server.js', 'supervisor.js', 'client.js', 'claude-detector.js', 'spawn-validator.js',
-  'config-loader.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
+  'config-loader.js', 'terminal-state.js', 'terminal-filter.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
 // Everything an agent may be asked to upload when it's the designated update
 // source (pull_update). Client-side allowlist lives in client.js and must match.
 const FETCHABLE_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
-  'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
+  'terminal-state.js', 'terminal-filter.js', 'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
 
 function sha256File(absPath) {
   return new Promise((resolve, reject) => {
@@ -452,6 +477,9 @@ const httpServer = http.createServer((req, res) => {
   if (req.url === '/' || req.url === '/index.html') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(indexHtml);
+  } else if (req.url === '/terminal-filter.js') {
+    res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+    res.end(terminalFilterJs);
   } else if (req.url === '/guide.html') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(guideHtml);
@@ -598,6 +626,7 @@ wss.on('connection', (ws) => {
         screen: msg.screen || '',
         attrs: msg.attrs || {},
         sys: msg.sys || {},
+        snapshotV1: msg.snapshotV1 === true,
         // sha256 of the agent's file copies (push-update versioning); at
         // register this equals the running version; query_files refreshes
         // update it to fresh DISK state afterwards. runningHashes stays the
@@ -701,7 +730,7 @@ wss.on('connection', (ws) => {
       const seq = nextSeq();
       agentInfo.lastSeq = seq;
       const sb = agentInfo.term.scrollback;
-      sb.push({ payload: msg.payload, seq });
+      sb.push({ payload: msg.payload, seq, filtered: msg.filtered === true });
       agentInfo.term.scrollbackBytes = (agentInfo.term.scrollbackBytes || 0) + msg.payload.length;
       if (agentInfo.term.scrollbackBytes > SCROLLBACK_MAX + SCROLLBACK_TRIM_MARGIN) {
         let dropCount = 0, freed = 0;
@@ -719,7 +748,7 @@ wss.on('connection', (ws) => {
       // otherwise interleave with older frames still being replayed — the
       // browser then draws history on top of the live screen. Hold this
       // agent's live frames per-browser until its replay finishes.
-      const payload = JSON.stringify({ type: 'data', payload: msg.payload, agentId: agentInfo.id, seq });
+      const payload = JSON.stringify({ type: 'data', payload: msg.payload, agentId: agentInfo.id, seq, filtered: msg.filtered === true });
       for (const [bws, binfo] of browsers) {
         if (!binfo.agentIds.has(agentInfo.id) || bws.readyState !== bws.OPEN) continue;
         if (binfo.replaying && binfo.replaying.has(agentInfo.id)) {
@@ -730,6 +759,30 @@ wss.on('connection', (ws) => {
           bws.send(payload);
         }
       }
+    }
+
+    if (role === 'agent' && msg.type === 'terminal_snapshot_result') {
+      const pending = pendingSnapshots.get(msg.reqId);
+      if (!pending || pending.ainfo.ws !== ws) return;
+      pendingSnapshots.delete(msg.reqId);
+      clearTimeout(pending.timer);
+      const { ws: bws, ainfo, binfo } = pending;
+      const anchor = ainfo.lastSeq || null;
+      if (bws.readyState === bws.OPEN && binfo.agentIds.has(ainfo.id) &&
+          typeof msg.payload === 'string' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) {
+        bws.send(JSON.stringify({ type: 'terminal_snapshot', agentId: ainfo.id, payload: msg.payload,
+          cols: msg.cols, rows: msg.rows, seq: anchor }));
+        bws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id, lastSeq: anchor, snapshot: true }));
+        const queued = binfo.pendingLive && binfo.pendingLive.get(ainfo.id);
+        if (queued) for (const frame of queued) {
+          if (!anchor || JSON.parse(frame).seq > anchor) bws.send(frame);
+        }
+      } else if (bws.readyState === bws.OPEN && binfo.agentIds.has(ainfo.id)) {
+        bws.send(JSON.stringify({ type: 'terminal_snapshot_error', agentId: ainfo.id,
+          message: msg.error || 'Invalid snapshot response' }));
+      }
+      binfo.replaying.delete(ainfo.id);
+      if (binfo.pendingLive) binfo.pendingLive.delete(ainfo.id);
     }
 
     // File transfer relay (agent → browser): forward any file_* message as-is.
@@ -861,12 +914,13 @@ wss.on('connection', (ws) => {
         // Single agent mode: clear multi subscriptions and set single agent
         binfo.agentIds = new Set([msg.agentId]);
         console.log(`[*] Browser watching agent: ${msg.agentId} (resume: ${!!msg.resume}, sinceSeq: ${msg.sinceSeq ?? '-'})`);
-        // Fresh connect: full window replay. Resume (reconnect): incremental
-        // replay from the browser's lastSeq — data produced while the browser
-        // was away is delivered, not silently skipped.
+        // Snapshot-capable agents restore state on a fresh connect or a gap;
+        // continuous resumes use the smaller seq delta.
         const ainfo = msg.agentId ? [...agents.values()].find(a => a.id === msg.agentId) : null;
         if (ainfo) {
-          if (!msg.resume) {
+          if (ainfo.snapshotV1 && (!msg.resume || !canReplayDelta(ainfo, msg.sinceSeq))) {
+            sendSnapshotReplay(ws, ainfo);
+          } else if (!msg.resume) {
             sendScrollbackReplay(ws, ainfo, () => {});
           } else {
             // Track the browser's position per agent so later resumes from
@@ -895,7 +949,9 @@ wss.on('connection', (ws) => {
           for (const agentId of msg.agentIds) {
             const ainfo = [...agents.values()].find(a => a.id === agentId);
             if (ainfo && (!msg.resume || sinceSeqs)) {
-              if (msg.resume && sinceSeqs) {
+              if (ainfo.snapshotV1 && (!msg.resume || !canReplayDelta(ainfo, sinceSeqs && sinceSeqs[agentId]))) {
+                sendSnapshotReplay(ws, ainfo);
+              } else if (msg.resume && sinceSeqs) {
                 if (!binfo.lastSeq) binfo.lastSeq = new Map();
                 binfo.lastSeq.set(agentId, Number.isFinite(sinceSeqs[agentId]) ? sinceSeqs[agentId] : 0);
                 sendScrollbackReplay(ws, ainfo, () => {}, sinceSeqs[agentId] || 0);
@@ -1104,11 +1160,11 @@ wss.on('connection', (ws) => {
     }
 
     // --- Push-update: send this server's managed-file diffs to agents ---
-    // ALL of SERVER_FILES, not just the client-side four: agent machines keep
+    // ALL of SERVER_FILES: agent machines keep
     // on-disk copies of server.js/public/* too (install.sh layout), and stale
     // copies there previously tripped the 待拉取 badge as false drift. The
     // agent writes them all but only self-restarts when a file it actually
-    // RUNS (client-side four) changed. Content source is this server's own
+    // RUNS changed. Content source is this server's own
     // on-disk copies (read fresh per push, so out-of-band scp'd updates are
     // picked up without a restart).
     async function buildUpdatePayload(agentInfo) {

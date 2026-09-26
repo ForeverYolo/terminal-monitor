@@ -430,7 +430,7 @@ A：目前仅靠 token 的 `user` 字段做简单隔离（不同用户看到不�
 
 ```
 terminal-monitor/
-├── package.json                       # 依赖：ws, node-pty
+├── package.json                       # 依赖：ws, node-pty, xterm-headless / serializer
 ├── package-lock.json
 ├── .gitignore                         # 忽略真实配置、日志、node_modules
 ├── README.md                          # 本文档
