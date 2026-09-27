@@ -125,25 +125,38 @@ for target in "${TARGETS[@]}"; do
   # that can't parse the app's optional-chaining syntax, with the real runtime
   # in nvm. Non-interactive SSH doesn't load nvm (see NODE_RESOLVE comment), so
   # bare `node` there means v12 → instant SyntaxError crash loop. The probe
-  # picks the first candidate that can actually parse the entry file
-  # (`node --check <file>` — evidence-based, not version guessing). NOTE the
-  # argument order: `node <file> --check` passes --check to the SCRIPT.
+  # picks the first candidate that can parse the entry file and load its
+  # runtime dependencies. Node 24 parses client.js but xterm-headless 5.3
+  # fails there with "window is not defined"; Node 20 works. Probe BEFORE
+  # stopping the current service so a missing runtime does not cause downtime.
   # NODE_RESOLVE is single-quoted: it must expand on the REMOTE side.
   NODE_RESOLVE='NODE_BIN=""
 for P in "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node /usr/bin/node node; do
-  if [ "$P" = "node" ]; then
-    if command -v node >/dev/null 2>&1 && node --check client.js 2>/dev/null; then NODE_BIN=node; fi
-  elif [ -x "$P" ] && "$P" --check client.js 2>/dev/null; then
+  if [ "$P" = "node" ]; then P="$(command -v node 2>/dev/null)"; fi
+  if [ -n "$P" ] && [ -x "$P" ] && "$P" --check "$CHECK_FILE" 2>/dev/null &&
+     "$P" -e "$CHECK_REQUIRE" 2>/dev/null; then
     NODE_BIN="$P"
+    break
   fi
-  [ -n "$NODE_BIN" ] && break
 done
 [ -n "$NODE_BIN" ] || { echo "[restart] no working node found" >&2; exit 1; }
 # Must EXPORT: plain shell variables are not inherited by the bash -c child
 # that screen spawns, and an empty $NODE_BIN there fails as `exec: : not found`.
 export NODE_BIN'
 
-  remote_script="cd $qpath || exit 1"
+  if [ "$MODE" = "client" ]; then
+    check_file='client.js'
+    check_require='require("./terminal-state"); require("node-pty")'
+  else
+    check_file='server.js'
+    check_require='require("ws")'
+  fi
+  printf -v qcheck_file '%q' "$check_file"
+  printf -v qcheck_require '%q' "$check_require"
+  remote_script="cd $qpath || exit 1
+CHECK_FILE=$qcheck_file
+CHECK_REQUIRE=$qcheck_require
+$NODE_RESOLVE"
   do_service=1; do_real=0
   [ "$scope" = "real" ] && do_service=0
   [ "$scope" = "all" ] && do_real=1
@@ -169,8 +182,6 @@ fi"
 # show up as a duplicate agent. Sweep the exact process before relaunching.
 pkill -f 'node.*client.js --config=$node_args' 2>/dev/null || true
 sleep 1"
-    remote_script+="
-$NODE_RESOLVE"
     remote_script+="
 screen -dmS $qscreen bash -c 'cd $qpath && exec \"\$NODE_BIN\" $qpath/$node_args 2>&1 | tee -a $qpath/$qlog'
 sleep 3
