@@ -2173,13 +2173,15 @@ const pendingSpawnReqs = new Map();
 //                  file drift, or client-file edit on disk (A≠R with R==S), or
 //                  agent restarted onto local code (A==R≠S with rPrev==S)
 //   grey    ? 版本未知  old client without hashes
-const CLIENT_FILES_UI = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js'];
+const CLIENT_FILES_UI = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
+  'terminal-state.js', 'terminal-filter.js'];
 // Files the push-update writes on agent machines: everything the server
 // manages (agent machines keep on-disk copies of server files per install.sh
 // layout). The badge compares all of these against S; running-state (R)
 // comparisons still only make sense for the files the agent actually runs.
 const ALL_MANAGED_UI = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
-  'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
+  'terminal-state.js', 'terminal-filter.js', 'server.js', 'supervisor.js',
+  'public/index.html', 'public/guide.html', 'public/favicon.svg'];
 function versionBadge(agent) {
   if (!lastServerFiles || !agent || !agent.fileHashes || !agent.runningHashes) {
     return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
@@ -2202,7 +2204,10 @@ function versionBadge(agent) {
         orange = true;
       }
     } else if (a === undefined) {
-      continue; // file absent on agent (e.g. never installed there) — ignore
+      // A missing client runtime file needs an update; optional server-side
+      // copies on agents can still be absent without blocking the badge.
+      if (CLIENT_FILES_UI.includes(name)) yellow = true;
+      continue;
     } else {
       // Disk differs from server. For files that this process does not run,
       // the startup snapshot is still useful: R==S means this machine edited
