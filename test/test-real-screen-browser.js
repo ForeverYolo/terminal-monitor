@@ -71,6 +71,9 @@ function lines() { return Array.from({length: term.buffer.active.length}, (_, i)
   await page.locator('#term-container .xterm').click();
   await page.keyboard.type('x');
   await until(async () => await follower.evaluate(size => term && term.cols === size.cols && term.rows === size.rows && !pendingSizeSnapshot.has(currentAgentId), firstSize));
+  await delay(800);
+  const stillFirstOwner = await follower.evaluate(size => term && term.cols === size.cols && term.rows === size.rows, firstSize);
+  if (!stillFirstOwner) throw new Error('idle follower reclaimed terminal size after first browser input');
   console.log(`first browser input claimed ${firstSize.cols}x${firstSize.rows}; second followed`);
   await follower.setViewportSize({width:900,height:600});
   await follower.waitForFunction(size => {

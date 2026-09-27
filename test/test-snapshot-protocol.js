@@ -47,6 +47,12 @@ function contents(term) { const b = term.buffer.active; return Array.from({lengt
   const model = new TerminalState(40, 8, payload => send(agent, {type: 'data', payload, filtered: true}));
   agent.on('message', raw => {
     const msg = JSON.parse(raw);
+    if (msg.type === 'resize') model.resize(msg.cols, msg.rows);
+    if (msg.type === 'data' && Buffer.from(msg.payload, 'base64').toString() === 'trigger-redraw') {
+      // A TUI redraw follows the user's keystroke asynchronously, after the
+      // size change has reached GNU Screen.
+      setTimeout(() => model.write('\x1b[HWorking-after-input'), 80);
+    }
     if (msg.type === 'terminal_snapshot_request') {
       model.write('raced-before-anchor\r\n');
       model.snapshot(snapshot => send(agent,
@@ -99,6 +105,17 @@ function contents(term) { const b = term.buffer.active; return Array.from({lengt
   const stale = await collect(resumed, () => send(resumed, {type: 'connect', agentId: id, resume: true, sinceSeq: 1}));
   assert(stale.some(m => m.type === 'terminal_snapshot'), 'gap did not trigger snapshot');
   assert(!stale.some(m => m.type === 'data'), 'gap appended raw tail');
+  const switched = await collect(resumed, () => send(resumed, {type: 'data', agentId: id,
+    cols: 50, rows: 10, payload: Buffer.from('trigger-redraw').toString('base64')}));
+  const switchedSnap = switched.find(m => m.type === 'terminal_snapshot');
+  assert(switchedSnap, 'size claim did not trigger snapshot');
+  assert(!switched.some(m => m.type === 'data' && Buffer.from(m.payload, 'base64').toString().includes('Working-after-input')),
+    'input redraw escaped before the size-change snapshot');
+  const switchedTerm = new Terminal({allowProposedApi: true, cols: switchedSnap.cols, rows: switchedSnap.rows});
+  await write(switchedTerm, Buffer.from(switchedSnap.payload, 'base64'));
+  assert(contents(switchedTerm).some(s => s.includes('Working-after-input')),
+    'size-change snapshot preceded the TUI redraw caused by input');
+  switchedTerm.dispose();
   console.log('snapshot, live continuation, delta resume, and gap recovery passed');
   resumed.close(); agent.close(); restored.dispose(); model.dispose();
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(() => {

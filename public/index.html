@@ -725,8 +725,21 @@ let termFilter = createAltScreenFilter(); // alt-screen filter for the single te
 // after N" instead of skipping the gap entirely (old resume:true behaviour).
 const lastSeqByAgent = new Map();   // agentId -> number
 const pendingSizeSnapshot = new Set(); // agentIds waiting for a canonical-size snapshot
+const requestedSizeByAgent = new Map(); // this browser's latest viewport size claim
 function isSnapshotAgent(id) {
   return (lastAgents || []).some(a => a.id === id && a.snapshotV1);
+}
+function rememberRequestedSize(id, size) {
+  if (isSnapshotAgent(id)) requestedSizeByAgent.set(id, size);
+}
+function sendViewportResize(id, size) {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !id) return;
+  if (isSnapshotAgent(id)) {
+    const previous = requestedSizeByAgent.get(id);
+    if (previous && previous.cols === size.cols && previous.rows === size.rows) return;
+    requestedSizeByAgent.set(id, size);
+  }
+  ws.send(JSON.stringify({ type: 'resize', agentId: id, ...size }));
 }
 function proposedSize(addon, terminal) {
   const proposed = addon && addon.proposeDimensions();
@@ -861,6 +874,7 @@ function connect(username, password) {
           if (term) term.clear();
         }
         const size = proposedSize(fitAddon, term);
+        rememberRequestedSize(currentAgentId, size);
         ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, ...size,
           resume: true, sinceSeq: lastSeqByAgent.get(currentAgentId) || 0 }));
         if (!isSnapshotAgent(currentAgentId)) ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, ...size }));
@@ -870,7 +884,9 @@ function connect(username, password) {
         remapMultiTerms();
         const ids = Object.keys(multiTerms);
         if (ids.length > 0) {
-          ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, sizes: multiSizes(), resume: true, sinceSeqs: resumePayloadFor(ids) }));
+          const sizes = multiSizes();
+          for (const id of ids) rememberRequestedSize(id, sizes[id]);
+          ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, sizes, resume: true, sinceSeqs: resumePayloadFor(ids) }));
         }
       } else {
         // Fresh login (or reconnect while not in a terminal): show dashboard.
@@ -914,12 +930,16 @@ function connect(username, password) {
           currentAgentId = fresh;
           lastSeqByAgent.delete(fresh);
           term.clear();
-          ws.send(JSON.stringify({ type: 'connect', agentId: fresh, ...proposedSize(fitAddon, term), sinceSeq: 0 }));
+          const size = proposedSize(fitAddon, term);
+          rememberRequestedSize(fresh, size);
+          ws.send(JSON.stringify({ type: 'connect', agentId: fresh, ...size, sinceSeq: 0 }));
         }
       }
       if (views.multi.style.display !== 'none' && remapMultiTerms() && ws.readyState === WebSocket.OPEN) {
         const ids = Object.keys(multiTerms);
-        ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, sizes: multiSizes(), resume: true, sinceSeqs: resumePayloadFor(ids) }));
+        const sizes = multiSizes();
+        for (const id of ids) rememberRequestedSize(id, sizes[id]);
+        ws.send(JSON.stringify({ type: 'connect_multi', agentIds: ids, sizes, resume: true, sinceSeqs: resumePayloadFor(ids) }));
       }
     } else if (msg.type === 'terminal_size') {
       if (msg.snapshot) pendingSizeSnapshot.add(msg.agentId);
@@ -1423,10 +1443,7 @@ function openTerminal(agentId, agentName) {
     }, mobile ? 60 : 200);
     clearTimeout(resizeSendTimer);
     resizeSendTimer = setTimeout(() => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId,
-          ...proposedSize(fitAddon, term) }));
-      }
+      if (term) sendViewportResize(currentAgentId, proposedSize(fitAddon, term));
     }, mobile ? 200 : 500);
   });
   resizeObserver.observe(container);
@@ -1452,6 +1469,7 @@ function openTerminal(agentId, agentName) {
     requestAnimationFrame(() => {
       fitAddon.fit();
       const size = proposedSize(fitAddon, term);
+      rememberRequestedSize(agentId, size);
       ws.send(JSON.stringify({ type: 'connect', agentId, ...size }));
       if (!isSnapshotAgent(agentId)) ws.send(JSON.stringify({ type: 'resize', agentId, ...size }));
     });
@@ -1464,8 +1482,10 @@ function openTerminal(agentId, agentName) {
     const bytes = new TextEncoder().encode(data);
     let bin = '';
     bytes.forEach(b => bin += String.fromCharCode(b));
+    const size = isSnapshotAgent(currentAgentId) ? proposedSize(fitAddon, term) : null;
+    if (size) rememberRequestedSize(currentAgentId, size);
     ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId: currentAgentId,
-      ...(isSnapshotAgent(currentAgentId) ? proposedSize(fitAddon, term) : {}) }));
+      ...(size || {}) }));
   });
 }
 
@@ -2445,8 +2465,10 @@ function openMultiTerminal() {
       const bytes = new TextEncoder().encode(data);
       let bin = '';
       bytes.forEach(b => bin += String.fromCharCode(b));
+      const size = isSnapshotAgent(entry.agentId) ? proposedSize(entry.fitAddon, entry.term) : null;
+      if (size) rememberRequestedSize(entry.agentId, size);
       ws.send(JSON.stringify({ type: 'data', payload: btoa(bin), agentId: entry.agentId,
-        ...(isSnapshotAgent(entry.agentId) ? proposedSize(entry.fitAddon, entry.term) : {}) }));
+        ...(size || {}) }));
     });
 
     // Handle resize
@@ -2458,7 +2480,9 @@ function openMultiTerminal() {
 
   requestAnimationFrame(() => requestAnimationFrame(() => {
     for (const entry of Object.values(multiTerms)) entry.fitAddon.fit();
-    ws.send(JSON.stringify({ type: 'connect_multi', agentIds, sizes: multiSizes() }));
+    const sizes = multiSizes();
+    for (const id of agentIds) rememberRequestedSize(id, sizes[id]);
+    ws.send(JSON.stringify({ type: 'connect_multi', agentIds, sizes }));
   }));
 
   // Handle resize
@@ -2468,8 +2492,7 @@ function openMultiTerminal() {
     multiResizeTimer = setTimeout(() => {
       Object.values(multiTerms).forEach(t => {
         if (isSnapshotAgent(t.agentId)) {
-          ws.send(JSON.stringify({ type: 'resize', agentId: t.agentId,
-            ...proposedSize(t.fitAddon, t.term) }));
+          sendViewportResize(t.agentId, proposedSize(t.fitAddon, t.term));
         } else t.fitAddon.fit();
       });
     }, 200);
@@ -2655,7 +2678,7 @@ function setTermViewMode(mode) {
     // Tell the PTY to render at a phone-friendly width so Claude wraps output
     // for reading instead of using the default 200-col layout.
     if (ws && ws.readyState === WebSocket.OPEN && currentAgentId) {
-      ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: 100, rows: 40 }));
+      sendViewportResize(currentAgentId, { cols: 100, rows: 40 });
     }
   } else {
     sv.style.display = 'none';
@@ -2666,8 +2689,7 @@ function setTermViewMode(mode) {
     setTimeout(() => {
       if (fitAddon && term && !isSnapshotAgent(currentAgentId)) { try { fitAddon.fit(); } catch {} }
       if (ws && ws.readyState === WebSocket.OPEN && term) {
-        ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId,
-          ...proposedSize(fitAddon, term) }));
+        sendViewportResize(currentAgentId, proposedSize(fitAddon, term));
       }
     }, 60);
   }

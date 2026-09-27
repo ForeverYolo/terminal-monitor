@@ -228,7 +228,7 @@ function canReplayDelta(ainfo, sinceSeq) {
     sb[0].seq <= sinceSeq && sinceSeq <= sb[sb.length - 1].seq;
 }
 
-function sendSnapshotReplay(ws, ainfo) {
+function sendSnapshotReplay(ws, ainfo, delayMs = 0) {
   const binfo = browsers.get(ws);
   if (!binfo || ainfo.ws.readyState !== ainfo.ws.OPEN) return;
   if (!binfo.replaying) binfo.replaying = new Set();
@@ -237,21 +237,32 @@ function sendSnapshotReplay(ws, ainfo) {
   const previous = binfo.activeSnapshots.get(ainfo.id);
   if (previous && pendingSnapshots.has(previous)) {
     clearTimeout(pendingSnapshots.get(previous).timer);
+    clearTimeout(pendingSnapshots.get(previous).requestTimer);
     pendingSnapshots.delete(previous);
   }
   const reqId = crypto.randomUUID();
   binfo.activeSnapshots.set(ainfo.id, reqId);
-  const timer = setTimeout(() => {
+  const fail = () => {
     const pending = pendingSnapshots.get(reqId);
     if (!pending) return;
     pendingSnapshots.delete(reqId);
+    clearTimeout(pending.requestTimer);
+    clearTimeout(pending.timer);
     binfo.activeSnapshots.delete(ainfo.id);
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'terminal_snapshot_error', agentId: ainfo.id, message: 'Snapshot timed out' }));
     binfo.replaying.delete(ainfo.id);
     if (binfo.pendingLive) binfo.pendingLive.delete(ainfo.id);
-  }, 10000);
-  pendingSnapshots.set(reqId, { ws, ainfo, binfo, timer });
-  ainfo.ws.send(JSON.stringify({ type: 'terminal_snapshot_request', reqId }));
+  };
+  const timer = setTimeout(fail, 10000 + delayMs);
+  const pending = { ws, ainfo, binfo, timer, requestTimer: null };
+  pendingSnapshots.set(reqId, pending);
+  const request = () => {
+    if (!pendingSnapshots.has(reqId)) return;
+    if (ainfo.ws.readyState !== ainfo.ws.OPEN) return fail();
+    ainfo.ws.send(JSON.stringify({ type: 'terminal_snapshot_request', reqId }));
+  };
+  if (delayMs > 0) pending.requestTimer = setTimeout(request, delayMs);
+  else request();
 }
 
 function validTerminalSize(cols, rows) {
@@ -285,7 +296,10 @@ function claimTerminalSize(ws, ainfo, cols, rows) {
       if (!watching.agentIds.has(ainfo.id) || bws.readyState !== bws.OPEN) continue;
       bws.send(JSON.stringify({ type: 'terminal_size', agentId: ainfo.id,
         ...preferred, owner: bws === ws, snapshot: changed }));
-      if (changed) sendSnapshotReplay(bws, ainfo);
+      // GNU Screen and the TUI repaint asynchronously after SIGWINCH. When a
+      // follower claims the size by typing, the input-triggered redraw must
+      // reach the agent model before we freeze it for every browser.
+      if (changed) sendSnapshotReplay(bws, ainfo, 250);
     }
   }
   return changed;
@@ -833,6 +847,7 @@ wss.on('connection', (ws) => {
       if (!pending || pending.ainfo.ws !== ws) return;
       pendingSnapshots.delete(msg.reqId);
       clearTimeout(pending.timer);
+      clearTimeout(pending.requestTimer);
       const { ws: bws, ainfo, binfo } = pending;
       binfo.activeSnapshots.delete(ainfo.id);
       const anchor = ainfo.lastSeq || null;
