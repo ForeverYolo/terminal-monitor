@@ -22,6 +22,15 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
 .login-box button:hover { background: #3a8eef; }
 .login-error { color: #ff6b6b; font-size: 13px; margin-bottom: 12px; display: none; }
 
+/* ICP 备案号页脚 */
+.icp-footer { text-align: center; padding: 8px 0; font-size: 12px; flex-shrink: 0; }
+.icp-footer a { color: #666; text-decoration: none; }
+.icp-footer a:hover { color: #4a9eff; }
+/* 登录页是横向居中 flex，footer 作为子元素会被排到登录框旁边 —
+   改为绝对定位钉在视口底部，登录框保持居中不受影响 */
+#login-view { position: relative; }
+#login-view .icp-footer { position: absolute; bottom: 6px; left: 0; right: 0; padding: 0; }
+
 /* Dashboard */
 #dash-view { display: none; flex-direction: column; height: 100vh; }
 #dash-header { background: #16213e; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #2a2a4a; }
@@ -540,6 +549,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
     <button onclick="doLogin()">Login</button>
     <p style="margin:16px 0 0; font-size:12px;"><a href="/guide.html" target="_blank" style="color:#4a9eff; text-decoration:none;">📖 第一次用？看使用指南</a></p>
   </div>
+  <div class="icp-footer"><a href="https://beian.miit.gov.cn/" target="_blank">京ICP备2026065181号-1</a></div>
 </div>
 
 <!-- Dashboard View -->
@@ -621,6 +631,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
     <button id="dash-multi-open" onclick="openMultiTerminal()" disabled style="background:#4a9eff; color:#fff; border:none; padding:8px 18px; border-radius:6px; cursor:pointer; font-size:13px;">打开多屏</button>
     <button onclick="cancelMultiSelect()" style="background:#333; color:#aaa; border:none; padding:8px 14px; border-radius:6px; cursor:pointer; font-size:13px;">取消</button>
   </div>
+  <div class="icp-footer"><a href="https://beian.miit.gov.cn/" target="_blank">京ICP备2026065181号-1</a></div>
 </div>
 
 <!-- Multi View -->
