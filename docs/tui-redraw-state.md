@@ -19,7 +19,7 @@ client 在同一个输出解析边界捕获 `parserState`：滚动上下边界�
 
 直接发送 DECSTBM 来恢复区域会移动光标，并可能破坏右边界的待换行状态。因此对当前固定版本的 xterm/headless 5.3.0 使用内部 buffer 字段恢复，前端校验字段和坐标范围。这处依赖在升级 xterm 时需要重新验证。旧 client 没有附带字段时继续使用原有恢复流程。
 
-需要同时更新 `terminal-state.js`、`server.js` 和 `public/index.html`，更新后重新进入终端取得新快照。网页推送清单已包含这些文件。
+需要同时更新 `terminal-state.js`、`server.js` 和 `public/connection.js`，更新后重新进入终端取得新快照。网页推送清单已包含这些文件。
 
 ## 验证
 
@@ -44,3 +44,5 @@ node test/test-scroll-region-browser.js
 ## 后续排查记录
 
 完整终端状态的补齐暂缓实施。当前快照覆盖范围、已知缺失项和恢复顺序风险见 [终端快照已知状态缺口与排查记录](../KNOWN_TERMINAL_STATE_GAPS.md)。后续遇到刷新暂时恢复、继续绘制又错乱时，可按该清单排查。
+
+前端拆分后的首次升级需完整同步运行文件；后续网页更新由 `managed-files.js` 统一列出，详见 [重构与升级说明](refactoring.md)。

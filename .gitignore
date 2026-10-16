@@ -24,3 +24,12 @@ config.client-monitor-*.json
 backups/
 *.png
 screenlog.*
+
+# Private configurations for every installation/session name
+config.json
+config.client.json
+config.ai-overseer.json
+config.client-*.json
+config.test-*.json
+.test-config-*.json
+__pycache__/

@@ -6,6 +6,7 @@ const { WebSocketServer } = require('ws');
 const { createSupervisor } = require('./supervisor');
 const { stripAnsi } = require('./claude-detector');
 const { loadConfig } = require('./config-loader');
+const { PendingRequests } = require('./pending-requests');
 
 // --- Load config (support --config flag) ---
 const { config, configFile } = loadConfig('config.json', __dirname);
@@ -27,7 +28,7 @@ function terminalKey(attrs, screen) {
   const cid = (attrs || {}).clientId || 'nokey';
   return `${cid}|${screen || ''}`;
 }
-const terminals = new Map(); // terminalKey -> { scrollback: [], scrollbackBytes: 0, nextSeq }
+const terminals = new Map(); // terminalKey -> { scrollback: [], scrollbackBytes: 0 }
 const browsers = new Map(); // ws -> { ws, agentIds: Set }
 // Configurable so a low-resource VPS can shrink per-agent memory: config.server.scrollbackMax (bytes).
 const SCROLLBACK_MAX = config.server.scrollbackMax || 2000000; // ~2MB scrollback per agent
@@ -71,8 +72,8 @@ const MAX_AGENTS = config.server.maxAgents || 200;                  // concurren
 config.server.supervisor = config.server.supervisor || {};
 
 const pendingScreenQueries = new Map(); // reqId -> (result) => void
-const pendingUpdateReqs = new Map();    // reqId -> browser ws awaiting update_files_result/query_files_result
-const pendingPulls = new Map();         // reqId -> { ws, agentName } awaiting fetch_files_result
+const pendingUpdateReqs = new PendingRequests();    // reqId -> browser ws awaiting update_files_result/query_files_result
+const pendingPulls = new PendingRequests();         // reqId -> { ws, agentName } awaiting fetch_files_result
 // clientId -> { r, rPrev } — the running-version hashes this machine's agents
 // reported at their last TWO registers. Used by the badge to disambiguate
 // "agent restarted onto an unpublished local version" (rPrev==server, r!=server
@@ -123,205 +124,10 @@ function nextSeq() {
 // buffered gap is incomplete; legacy agents retain the old tail behavior.
 // seq always rides along on replayed `data` frames so the browser can pick up
 // its lastSeq from either mode.
-function sendScrollbackReplay(ws, ainfo, done, sinceSeq) {
-  const term = terminals.get(terminalKey(ainfo.attrs, ainfo.screen)) || { scrollback: [] };
-  const binfo = browsers.get(ws);
-  if (binfo) {
-    if (!binfo.replaying) binfo.replaying = new Set();
-    binfo.replaying.add(ainfo.id);
-  }
-  const finish = () => {
-    if (!binfo) return;
-    binfo.replaying.delete(ainfo.id);
-    const queued = binfo.pendingLive && binfo.pendingLive.get(ainfo.id);
-    if (binfo.pendingLive) binfo.pendingLive.delete(ainfo.id);
-    if (queued && ws.readyState === ws.OPEN) {
-      for (const p of queued) ws.send(p);
-    }
-  };
-
-  // Resolve the replay window. Delta mode needs the FIRST buffered chunk's seq
-  // to prove contiguity: if sinceSeq sits before it, trimmed history is missing
-  // and xterm cannot prepend — fall back to 'tail': append whatever the buffer
-  // still has onto the browser's existing content. Clearing (the old full
-  // fallback) destroyed the browser's local history whenever the SERVER had
-  // less than the browser remembered (server restart empties the buffer) —
-  // that erased history instead of restoring it. A full clear is only correct
-  // on a fresh (non-resume) connect.
-  let start = 0, mode = 'full';
-  if (Number.isFinite(sinceSeq) && sinceSeq > 0) {
-    if (term.scrollback.length === 0) {
-      // Buffer empty (server restarted / nothing buffered yet): the browser's
-      // own history is the only copy left — keep it, send nothing.
-      mode = 'tail';
-    } else {
-      const first = term.scrollback[0];
-      if (first.seq <= sinceSeq) {
-        // Buffer covers the gap: replay only chunks after sinceSeq.
-        start = term.scrollback.length;
-        while (start > 0 && term.scrollback[start - 1].seq > sinceSeq) start--;
-        mode = 'delta';
-      } else {
-        // Gap not coverable: keep browser content, append our tail.
-        mode = 'tail';
-      }
-    }
-  }
-
-  const total = term.scrollback.length;
-  if (total === 0 || (mode === 'delta' && start >= total)) {
-    // Empty buffer (or nothing after sinceSeq) still reports info+end:
-    // browsers treat scrollback_end as "replay finished" to trigger their
-    // post-connect repaint; with no end message a fresh session's terminal
-    // would never get one.
-    ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total: 0, loadedFrom: 0, hasMore: false, mode }));
-    ws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id, lastSeq: sinceSeq || null }));
-    finish();
-    done();
-    return;
-  }
-  // Walk back from the most recent chunk, stopping at whichever limit —
-  // chunk count or total bytes — is hit first. Bounded to at most
-  // SCROLLBACK_INIT iterations, so this is a cheap, one-time scan. Delta mode
-  // already fixed `start`; tail/full modes narrow the window by size.
-  if (mode !== 'delta') {
-    let bytes = 0, count = 0;
-    let s = total;
-    while (s > 0 && count < SCROLLBACK_INIT && bytes < SCROLLBACK_INIT_BYTES) {
-      s--;
-      bytes += term.scrollback[s].payload.length;
-      count++;
-    }
-    start = s;
-  }
-  ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total, loadedFrom: start, hasMore: start > 0, mode }));
-  let i = start;
-  function sendBatch() {
-    if (ws.readyState !== ws.OPEN) { finish(); done(); return; } // browser gone mid-replay
-    const end = Math.min(i + SCROLLBACK_SEND_BATCH, total);
-    for (; i < end; i++) {
-      const chunk = term.scrollback[i];
-      ws.send(JSON.stringify({ type: 'data', payload: chunk.payload, agentId: ainfo.id, seq: chunk.seq, filtered: chunk.filtered }));
-    }
-    if (i < total) {
-      setImmediate(sendBatch);
-      return;
-    }
-    // Final info: NO `mode` field. The browser clears on info.mode==='full'
-    // — sending the mode again here wiped everything the replay had just
-    // drawn (intermittent blank terminal until a lucky repaint restored it).
-    // The first info already told the browser what to do; this one only
-    // carries the final window position.
-    ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total, loadedFrom: start, hasMore: start > 0 }));
-    const lastSeq = total > 0 ? term.scrollback[total - 1].seq : (sinceSeq || null);
-    ws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id, lastSeq }));
-    finish();
-    done();
-  }
-  sendBatch();
-}
-
-const pendingSnapshots = new Map();
-function canReplayDelta(ainfo, sinceSeq) {
-  const sb = ainfo.term.scrollback;
-  return Number.isFinite(sinceSeq) && sinceSeq > 0 && sb.length > 0 &&
-    sb[0].seq <= sinceSeq && sinceSeq <= sb[sb.length - 1].seq;
-}
-
-function sendSnapshotReplay(ws, ainfo, delayMs = 0) {
-  const binfo = browsers.get(ws);
-  if (!binfo || ainfo.ws.readyState !== ainfo.ws.OPEN) return;
-  if (!binfo.replaying) binfo.replaying = new Set();
-  binfo.replaying.add(ainfo.id);
-  if (!binfo.activeSnapshots) binfo.activeSnapshots = new Map();
-  const previous = binfo.activeSnapshots.get(ainfo.id);
-  if (previous && pendingSnapshots.has(previous)) {
-    clearTimeout(pendingSnapshots.get(previous).timer);
-    clearTimeout(pendingSnapshots.get(previous).requestTimer);
-    pendingSnapshots.delete(previous);
-  }
-  const reqId = crypto.randomUUID();
-  binfo.activeSnapshots.set(ainfo.id, reqId);
-  const fail = () => {
-    const pending = pendingSnapshots.get(reqId);
-    if (!pending) return;
-    pendingSnapshots.delete(reqId);
-    clearTimeout(pending.requestTimer);
-    clearTimeout(pending.timer);
-    binfo.activeSnapshots.delete(ainfo.id);
-    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'terminal_snapshot_error', agentId: ainfo.id, message: 'Snapshot timed out' }));
-    binfo.replaying.delete(ainfo.id);
-    if (binfo.pendingLive) binfo.pendingLive.delete(ainfo.id);
-  };
-  const timer = setTimeout(fail, 10000 + delayMs);
-  const pending = { ws, ainfo, binfo, timer, requestTimer: null };
-  pendingSnapshots.set(reqId, pending);
-  const request = () => {
-    if (!pendingSnapshots.has(reqId)) return;
-    if (ainfo.ws.readyState !== ainfo.ws.OPEN) return fail();
-    ainfo.ws.send(JSON.stringify({ type: 'terminal_snapshot_request', reqId }));
-  };
-  if (delayMs > 0) pending.requestTimer = setTimeout(request, delayMs);
-  else request();
-}
-
-function validTerminalSize(cols, rows) {
-  return Number.isInteger(cols) && Number.isInteger(rows) &&
-    cols >= 1 && cols <= 400 && rows >= 1 && rows <= 200;
-}
-
-// The last browser that opens, resizes, or sends input owns this screen's PTY
-// size. A size change is followed by fresh snapshots for every watcher, so
-// nobody continues parsing old-size output at the new dimensions.
-function claimTerminalSize(ws, ainfo, cols, rows) {
-  const binfo = browsers.get(ws);
-  if (!binfo || !ainfo.snapshotV1) return false;
-  if (!binfo.preferredSizes) binfo.preferredSizes = new Map();
-  if (!binfo.lastSizeClaim) binfo.lastSizeClaim = new Map();
-  if (validTerminalSize(cols, rows)) binfo.preferredSizes.set(ainfo.id, { cols, rows });
-  const preferred = binfo.preferredSizes.get(ainfo.id);
-  if (!preferred) return false;
-  const term = ainfo.term;
-  const changed = term.cols !== preferred.cols || term.rows !== preferred.rows;
-  const ownerChanged = term.sizeOwner !== ws;
-  term.sizeOwner = ws;
-  binfo.lastSizeClaim.set(ainfo.id, Date.now());
-  if (changed) {
-    term.cols = preferred.cols;
-    term.rows = preferred.rows;
-    ainfo.ws.send(JSON.stringify({ type: 'resize', ...preferred }));
-  }
-  if (changed || ownerChanged) {
-    for (const [bws, watching] of browsers) {
-      if (!watching.agentIds.has(ainfo.id) || bws.readyState !== bws.OPEN) continue;
-      bws.send(JSON.stringify({ type: 'terminal_size', agentId: ainfo.id,
-        ...preferred, owner: bws === ws, snapshot: changed }));
-      // GNU Screen and the TUI repaint asynchronously after SIGWINCH. When a
-      // follower claims the size by typing, the input-triggered redraw must
-      // reach the agent model before we freeze it for every browser.
-      if (changed) sendSnapshotReplay(bws, ainfo, 250);
-    }
-  }
-  return changed;
-}
-
-function releaseTerminalOwner(ws, agentIds) {
-  for (const agentId of agentIds) {
-    const ainfo = [...agents.values()].find(a => a.id === agentId);
-    if (!ainfo || ainfo.term.sizeOwner !== ws) continue;
-    ainfo.term.sizeOwner = null;
-    let next = null, latest = -1;
-    for (const [bws, binfo] of browsers) {
-      if (bws === ws || bws.readyState !== bws.OPEN || !binfo.agentIds.has(agentId)) continue;
-      const at = binfo.lastSizeClaim && binfo.lastSizeClaim.get(agentId) || 0;
-      if (at > latest) { next = bws; latest = at; }
-    }
-    if (next) {
-      const size = browsers.get(next).preferredSizes?.get(agentId);
-      if (size) claimTerminalSize(next, ainfo, size.cols, size.rows);
-    }
-  }
-}
+const { createTerminalReplay } = require('./terminal-replay');
+const { sendScrollbackReplay, pendingSnapshots, canReplayDelta, sendSnapshotReplay, claimTerminalSize, releaseTerminalOwner, cancelSocket } = createTerminalReplay({
+  agents, terminals, browsers, terminalKey, limits: { SCROLLBACK_INIT, SCROLLBACK_INIT_BYTES, SCROLLBACK_SEND_BATCH }
+});
 
 function getAgentsList(user) {
   return Array.from(agents.values())
@@ -387,45 +193,13 @@ setInterval(() => {
 // request — fs.readFileSync() stalls the whole (single-threaded) event loop,
 // including in-flight WebSocket traffic, while it runs. A code change to a
 // cached page needs a server restart to take effect.
-const indexHtml = fs.readFileSync(path.join(__dirname, 'public', 'index.html'));
-const terminalFilterJs = fs.readFileSync(path.join(__dirname, 'terminal-filter.js'));
-const guideHtml = fs.readFileSync(path.join(__dirname, 'public', 'guide.html'));
-const faviconSvg = fs.readFileSync(path.join(__dirname, 'public', 'favicon.svg'));
-
 // --- Push-update: file manifests and known-good backup ---
 // This server's on-disk copies are the single source of truth: the web UI
-// pushes CLIENT_FILES diffs to agents (see push_update handler) and restarts
+// pushes managed-file diffs to agents (see push_update handler) and restarts
 // itself to apply SERVER_FILES landed here out-of-band (deploy.sh/scp).
-const CLIENT_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js', 'terminal-state.js', 'terminal-filter.js'];
-// client.js is listed here too (though the server never runs it) because the
-// manifest is the diff source for client pushes — without it,
-// update_files_result couldn't record the agent's post-push client.js hash and
-// every subsequent push would resend the whole file.
-const SERVER_FILES = ['server.js', 'supervisor.js', 'client.js', 'claude-detector.js', 'spawn-validator.js',
-  'config-loader.js', 'terminal-state.js', 'terminal-filter.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
-// Everything an agent may be asked to upload when it's the designated update
-// source (pull_update). Client-side allowlist lives in client.js and must match.
-const FETCHABLE_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
-  'terminal-state.js', 'terminal-filter.js', 'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
-
-function sha256File(absPath) {
-  return new Promise((resolve, reject) => {
-    const h = crypto.createHash('sha256');
-    const s = fs.createReadStream(absPath);
-    s.on('data', d => h.update(d));
-    s.on('error', reject);
-    s.on('end', () => resolve(h.digest('hex')));
-  });
-}
-
-// {name: hash} for the given list; missing files are omitted.
-async function buildFileManifest(list) {
-  const out = {};
-  for (const name of list) {
-    try { out[name] = await sha256File(path.join(__dirname, name)); } catch { /* omitted */ }
-  }
-  return out;
-}
+const { SERVER_FILES, FETCHABLE_FILES } = require('./managed-files');
+const { sha256File, buildFileManifest: manifestFor, installFiles } = require('./file-update');
+const buildFileManifest = list => manifestFor(__dirname, list);
 
 // Snapshot the booting (i.e. known-good) files for the restart rollback guard.
 // Flat names in one dir to keep the restore `cp` simple; public/ files get
@@ -438,7 +212,7 @@ async function ensureRestartBackup() {
     const src = path.join(__dirname, name);
     const dst = path.join(bakDir, flat);
     try {
-      const [srcHash] = await Promise.all([sha256File(src)]);
+      const srcHash = await sha256File(src);
       let dstHash = null;
       try { dstHash = await sha256File(dst); } catch { /* no backup yet */ }
       if (srcHash !== dstHash) fs.copyFileSync(src, dst);
@@ -470,24 +244,7 @@ async function snapshotBeforePull(names) {
 // Write files received from an agent (pull_update): verify sha256, then
 // atomically replace. Any validation failure aborts the whole batch.
 function applyPulledFiles(files) {
-  const decoded = [];
-  for (const f of files) {
-    if (!FETCHABLE_FILES.includes(f.name)) throw new Error(`refusing non-whitelisted file: ${f.name}`);
-    const buf = Buffer.from(f.content, 'base64');
-    if (crypto.createHash('sha256').update(buf).digest('hex') !== f.sha256) {
-      throw new Error(`sha256 mismatch for ${f.name}`);
-    }
-    decoded.push({ name: f.name, buf });
-  }
-  // All valid — write atomically (temp + rename) so a crash can't leave a
-  // half-written file behind (server.js may be mid-replacement).
-  for (const { name, buf } of decoded) {
-    const dst = path.join(__dirname, name);
-    const tmp = dst + '.pull-new';
-    fs.writeFileSync(tmp, buf);
-    fs.renameSync(tmp, dst);
-  }
-  return decoded.map(d => d.name);
+  return installFiles(__dirname, files, FETCHABLE_FILES);
 }
 
 // Verify + write the files an agent uploaded, snapshotting our old copies
@@ -521,133 +278,15 @@ async function handleFetchFilesResult(msg, agentInfo, pull) {
 // doesn't come up within 5s, restore the known-good boot snapshot and try once
 // more. Runs detached — it must survive this process exiting.
 function spawnRestartScript() {
-  const DIR = __dirname;
-  const NODE = process.execPath;
-  const BAK = path.join(DIR, 'backups', 'pre-restart-latest');
-  const script = `
-set -u
-sleep 1
-screen -ls 2>/dev/null | grep -q '[.]swt-server' && screen -S swt-server -X quit
-sleep 1
-screen -dmS swt-server bash -c "cd '${DIR}' && exec '${NODE}' server.js 2>&1 | tee -a '${DIR}/server.log'"
-sleep 5
-if ! screen -ls 2>/dev/null | grep -q '[.]swt-server'; then
-  echo "[self-update] relaunch failed, restoring backup and retrying once" >> '${DIR}/server.log'
-  for f in '${BAK}'/*; do
-    [ -f "$f" ] || continue
-    base="$(basename "$f")"
-    case "$base" in
-      public__*) cp -f "$f" '${DIR}/public/'"$` + `{base#public__}" 2>/dev/null ;;
-      *)         cp -f "$f" '${DIR}/'"$base" 2>/dev/null ;;
-    esac
-  done
-  screen -dmS swt-server bash -c "cd '${DIR}' && exec '${NODE}' server.js 2>&1 | tee -a '${DIR}/server.log'"
-fi
-`;
-  try {
-    const child = require('child_process').spawn('bash', ['-c', script], { detached: true, stdio: 'ignore' });
-    child.unref();
-  } catch (e) {
-    console.log('[!] failed to spawn restart script:', e.message);
-  }
+  require('./service-restart').restartServer({
+    root: __dirname, node: process.execPath, configFile, backup: path.join(__dirname, 'backups/pre-restart-latest')
+  });
 }
 
-const httpServer = http.createServer((req, res) => {
-  if (req.url === '/' || req.url === '/index.html') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(indexHtml);
-  } else if (req.url === '/terminal-filter.js') {
-    res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
-    res.end(terminalFilterJs);
-  } else if (req.url === '/guide.html') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(guideHtml);
-  } else if (req.url === '/favicon.ico' || req.url === '/favicon.svg') {
-    res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
-    res.end(faviconSvg);
-  } else if (req.url === '/api/agents') {
-    // API: return agent status as JSON (for CLI monitoring / supervisor)
-    const list = Array.from(agents.values()).map(a => {
-      const lines = a.lastOutput.split('\n');
-      const lastLines = lines.slice(-10).join('\n');
-      return {
-        id: a.id,
-        name: a.name,
-        screen: a.screen || '',
-        attrs: a.attrs || {},
-        sys: a.sys || {},
-        connectedAt: a.connectedAt,
-        lastLines,
-        needsInput: hasPrompt(a.lastOutput),
-        scrollbackSize: a.term ? a.term.scrollback.length : 0,
-        nativeTui: a.nativeTui,
-        claudeState: a.claudeState || null,
-        clientId: a.attrs && a.attrs.clientId ? a.attrs.clientId : null
-      };
-    });
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ time: new Date().toISOString(), agents: list }, null, 2));
-  } else if (req.url === '/api/supervisor') {
-    // API: return current supervisor summary (or 503 if disabled)
-    if (!supervisor) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'supervisor disabled' }));
-    } else {
-      const s = supervisor.buildSummary();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ time: new Date().toISOString(), ...s }, null, 2));
-    }
-  } else if (req.url === '/api/action' && req.method === 'POST') {
-    // API: send input to an agent's terminal
-    let body = '';
-    let bodyTooLarge = false;
-    req.on('data', chunk => {
-      if (bodyTooLarge) return;
-      body += chunk;
-      if (body.length > MAX_ACTION_BODY) {
-        bodyTooLarge = true;
-        res.writeHead(413, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
-        req.destroy();
-      }
-    });
-    req.on('end', () => {
-      try {
-        const { agentId, input } = JSON.parse(body);
-        if (!agentId || input === undefined) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'Missing agentId or input' }));
-          return;
-        }
-        const bytes = new TextEncoder().encode(input);
-        let bin = '';
-        bytes.forEach(b => bin += String.fromCharCode(b));
-        const payload = btoa(bin);
-        let sent = false;
-        for (const [aws, ainfo] of agents) {
-          if (ainfo.id === agentId && aws.readyState === aws.OPEN) {
-            aws.send(JSON.stringify({ type: 'data', payload }));
-            sent = true;
-            break;
-          }
-        }
-        if (sent) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        } else {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'Agent not found or offline' }));
-        }
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
-      }
-    });
-  } else {
-    res.writeHead(404);
-    res.end('Not Found');
-  }
-});
+const { createHttpHandler } = require('./server-http');
+const httpServer = http.createServer(createHttpHandler({
+  root: __dirname, config, agents, getSupervisor: () => supervisor, hasPrompt, maxActionBody: MAX_ACTION_BODY
+}));
 
 // --- WebSocket server ---
 // perMessageDeflate defaults to on in `ws`, costing a zlib context (~50-100KB)
@@ -1395,6 +1034,9 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    cancelSocket(ws);
+    pendingUpdateReqs.forgetSocket(ws);
+    pendingPulls.forgetSocket(ws);
     if (role === 'agent') {
       const info = agents.get(ws);
       if (info) {
@@ -1520,5 +1162,4 @@ setInterval(() => {
 const listenHost = config.server.host || '0.0.0.0';
 httpServer.listen(port, listenHost, () => {
   console.log(`Screen Web Terminal server listening on http://${listenHost}:${port}`);
-  if (supervisor) supervisor.start();
 });

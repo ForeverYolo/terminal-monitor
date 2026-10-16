@@ -11,14 +11,10 @@
 const WebSocket = require('ws');
 const http = require('http');
 const https = require('https');
-const fs = require('fs');
-const path = require('path');
 
 // --- Config ---
-const configArg = process.argv.find(a => a.startsWith('--config='))?.split('=')[1]
-  || (process.argv.indexOf('--config') !== -1 ? process.argv[process.argv.indexOf('--config') + 1] : null);
-const configFile = configArg || path.join(__dirname, 'config.ai-overseer.json');
-const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+const { loadConfig } = require('./config-loader');
+const { config } = loadConfig('config.ai-overseer.json', __dirname);
 const cfg = config.aiOverseer;
 
 // --- Validate ---

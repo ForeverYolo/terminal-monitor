@@ -25,8 +25,8 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  await until(async()=>{const a=(await(await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents;return a.some(x=>x.nativeTui===true);});
  browser=await launchBrowser();
  const errors=[];
- async function openPage(){
-  const p=await browser.newPage({viewport:{width:1200,height:800}});p.on('pageerror',e=>errors.push(e.message));
+ async function openPage(viewport={width:1200,height:800}){
+  const p=await browser.newPage({viewport});p.on('pageerror',e=>errors.push(e.stack));
   await routeTerminalAssets(p);
   await login(p,`http://127.0.0.1:${port}/`);await p.locator('.agent-card').first().click();
   await until(async()=> (await p.evaluate(screenText)).includes('NATIVE-PAGER'));return p;
@@ -158,6 +158,43 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  const toggleBox=await page.locator('#term-container .xterm-screen').boundingBox();await page.mouse.move(toggleBox.x+80,toggleBox.y+80);await page.mouse.wheel(0,-100);
  await until(async()=>fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel')).length>beforeToggleWheel);
  console.log('PASS native/legacy/native configuration switching with browser still open');
+
+ // Rapid close/reopen must cancel the old view's frame and resize work.
+ await page.evaluate(()=>{
+  window.closedViewMessages=[];
+  const send=ws.send;
+  window.restoreViewSend=()=>{ws.send=send;};
+  ws.send=function(data){const m=JSON.parse(data);if(m.type==='resize'||m.type==='connect_multi'||(m.type==='connect'&&m.agentId))closedViewMessages.push(m);return send.call(this,data);};
+  const id=currentAgentId;
+  closeTerminal();
+  for(let i=0;i<3;i++){openTerminal(id,'rapid reopen');window.dispatchEvent(new Event('resize'));closeTerminal();}
+  selectedAgents.add(id);openMultiTerminal();window.dispatchEvent(new Event('resize'));closeMultiView();
+ });
+ await delay(700);
+ assert.deepStrictEqual(await page.evaluate(()=>closedViewMessages),[],'closed view sent stale subscriptions or resizes');
+ await page.evaluate(()=>restoreViewSend());
+ await page.locator('.agent-card').first().click();
+ await until(async()=>(await page.evaluate(screenText)).includes('NATIVE-PAGER'));
+ console.log('PASS rapid single/multi view close cancels delayed subscriptions and resizes');
+
+ const phone=await openPage({width:390,height:844});
+ await phone.locator('#float-toggle-view').click();
+ assert.equal(await phone.evaluate(()=>termViewMode),'structured');
+ const phoneKeyCount=fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(m=>m.kind==='key').length;
+ await phone.evaluate(()=>structSendRaw('\x1b[5~'));
+ await until(()=>fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(m=>m.kind==='key').length>phoneKeyCount);
+ await phone.locator('#float-toggle-view').click();
+ assert.equal(await phone.evaluate(()=>termViewMode),'xterm');
+ const beforeComposition=fs.readFileSync(events,'utf8');
+ const input=phone.locator('#mobile-text-input');
+ await input.dispatchEvent('compositionstart');await input.fill('中文');
+ await delay(100);assert.equal(fs.readFileSync(events,'utf8'),beforeComposition,'uncommitted IME input reached app');
+ await input.dispatchEvent('compositionend');
+ await until(()=>fs.readFileSync(events,'utf8').slice(beforeComposition.length).split('\n').filter(Boolean).map(JSON.parse).map(m=>m.hex).join('').includes(Buffer.from('中文').toString('hex')));
+ assert.equal(await input.inputValue(),'');
+ await phone.close();
+ await until(async()=>await page.evaluate(()=>!pendingSizeSnapshot.has(currentAgentId)));
+ console.log('PASS phone structured/raw switch and committed IME text through shared input');
 
  await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('q');
  await until(async()=>(await page.evaluate(screenText)).includes('NORMAL-AFTER'));

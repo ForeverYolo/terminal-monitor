@@ -1,0 +1,495 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* Login */
+#login-view { display: flex; justify-content: center; align-items: center; height: 100vh; }
+.login-box { background: #16213e; border-radius: 12px; padding: 40px; width: 90%; max-width: 360px; text-align: center; }
+.login-box h1 { margin-bottom: 8px; font-size: 22px; color: #fff; }
+.login-box p { margin-bottom: 24px; color: #888; font-size: 14px; }
+.login-box input { width: 100%; padding: 12px; border: 1px solid #333; border-radius: 6px; background: #0f0f23; color: #fff; font-size: 14px; margin-bottom: 16px; outline: none; }
+.login-box input:focus { border-color: #4a9eff; }
+.login-box button { width: 100%; padding: 12px; border: none; border-radius: 6px; background: #4a9eff; color: #fff; font-size: 15px; cursor: pointer; }
+.login-box button:hover { background: #3a8eef; }
+.login-error { color: #ff6b6b; font-size: 13px; margin-bottom: 12px; display: none; }
+
+/* ICP 备案号页脚 */
+.icp-footer { text-align: center; padding: 8px 0; font-size: 12px; flex-shrink: 0; }
+.icp-footer a { color: #666; text-decoration: none; }
+.icp-footer a:hover { color: #4a9eff; }
+/* 登录页是横向居中 flex，footer 作为子元素会被排到登录框旁边 —
+   改为绝对定位钉在视口底部，登录框保持居中不受影响 */
+#login-view { position: relative; }
+#login-view .icp-footer { position: absolute; bottom: 6px; left: 0; right: 0; padding: 0; }
+
+/* Dashboard */
+#dash-view { display: none; flex-direction: column; height: 100vh; }
+#dash-header { background: #16213e; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #2a2a4a; }
+#dash-header h2 { font-size: 18px; color: #fff; }
+#dash-header .right-area { display: flex; align-items: center; gap: 12px; }
+#dash-header .logout { color: #888; cursor: pointer; font-size: 13px; }
+#dash-header .logout:hover { color: #4a9eff; }
+
+/* Mode switch */
+.mode-switch { display: flex; gap: 2px; background: #0f0f23; padding: 3px; border-radius: 6px; }
+.mode-switch button { background: transparent; border: none; color: #888; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; transition: all 0.2s; }
+.mode-switch button:hover { color: #fff; }
+.mode-switch button.active { background: #4a9eff; color: #fff; }
+
+#agent-list { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-wrap: wrap; gap: 12px; align-content: flex-start; }
+.agent-card { background: #16213e; border: 1px solid #2a2a4a; border-radius: 10px; padding: 16px; width: 100%; max-width: 400px; cursor: pointer; transition: border-color 0.2s; }
+.agent-card:hover { border-color: #4a9eff; }
+.agent-card .name-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.agent-card .name { font-size: 16px; font-weight: 600; color: #fff; }
+.agent-card .pin-btn { background: none; border: none; cursor: pointer; font-size: 14px; padding: 0 4px 0 0; opacity: 0.3; line-height: 1; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.agent-card .pin-btn.pinned { opacity: 1; }
+.agent-card .screen-badge { background: #1a3a5c; color: #4a9eff; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-family: monospace; }
+.agent-card .hostname { font-size: 11px; color: #666; margin-bottom: 10px; }
+.agent-card .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 8px; }
+.agent-card .info-item { font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-card .info-item span { color: #bbb; }
+.agent-card .bar-wrap { height: 4px; background: #2a2a4a; border-radius: 2px; margin: 2px 0 6px; }
+.agent-card .bar-fill { height: 100%; border-radius: 2px; }
+.agent-card .bar-label { font-size: 11px; color: #666; display: flex; justify-content: space-between; }
+.agent-card .gpu-list { margin-bottom: 6px; }
+.agent-card .gpu-item { font-size: 11px; color: #888; font-family: monospace; }
+.agent-card .tags { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+.agent-card .tag { background: #2a2a4a; color: #aaa; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.agent-card .status-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.agent-card .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.agent-card .status-dot.idle { background: #ff6b6b; } /* waiting for input */
+.agent-card .status-dot.busy { background: #4caf50; } /* running/outputting */
+.agent-card .status-text { font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 10px; color: #6a9955; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.no-agents { color: #555; font-size: 14px; padding-top: 40px; text-align: center; width: 100%; }
+
+/* Multi-select mode */
+.agent-card.selectable { cursor: pointer; position: relative; }
+.agent-card .card-checkbox { position: absolute; top: 12px; left: 12px; width: 18px; height: 18px; cursor: pointer; z-index: 1; display: none; }
+.agent-card.selectable .card-checkbox { display: block; }
+.agent-card.selectable.selected { border-color: #4a9eff; background: #1a2a4a; }
+
+/* Multi view */
+#multi-view { display: none; flex-direction: column; height: 100vh; }
+#multi-toolbar { background: #16213e; padding: 10px 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #2a2a4a; flex-shrink: 0; }
+#multi-toolbar .back { cursor: pointer; color: #4a9eff; font-size: 13px; }
+#multi-toolbar .title { font-size: 14px; color: #ccc; }
+#multi-toolbar .open-btn { background: #4a9eff; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+#multi-toolbar .open-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+#multi-container { flex: 1; display: flex; flex-wrap: wrap; gap: 2px; overflow: hidden; background: #000; }
+.multi-term-wrap { flex: 1; min-width: 400px; min-height: 200px; display: flex; flex-direction: column; background: #0f0f23; }
+.multi-term-header { background: #16213e; padding: 6px 12px; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.multi-term-header .name { font-size: 13px; color: #fff; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-term-header .close { color: #888; cursor: pointer; font-size: 12px; margin-left: 4px; }
+.multi-term-header .close:hover { color: #ff6b6b; }
+.multi-term-container { flex: 1; padding: 2px; overflow-x: auto; overflow-y: hidden; min-height: 0; }
+
+/* Terminal */
+#term-view { display: none; flex-direction: column; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; }
+#term-header { display: none; }
+#term-container { flex: 1; background: #000; overflow-x: auto; overflow-y: hidden; min-height: 0; }
+/* xterm.js's own scrollback viewport (xterm.css sets overflow-y:scroll on this
+   but not this) — without it, a nested scrollable div inside a position:fixed
+   ancestor (#term-view here) is notoriously unreliable to touch-drag-scroll on
+   iOS Safari, which is why swiping up never revealed scrollback on mobile. */
+#term-container .xterm-viewport { -webkit-overflow-scrolling: touch; }
+
+/* Floating overlay for agent name */
+#term-overlay {
+  display: none;
+  position: fixed;
+  top: 8px;
+  right: 12px;
+  z-index: 100;
+  background: rgba(15, 15, 35, 0.7);
+  color: #888;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 11px;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+
+/* Claude state badge on agent cards */
+.claude-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  margin: 2px 4px 0 0;
+  border-radius: 10px;
+  font-size: 11px;
+  background: #2d1a4a;
+  color: #c896ff;
+  border: 1px solid #5a3a8e;
+}
+.claude-badge.kind-working { background:#1a3a4a; color:#7ad6ff; border-color:#2a5a8e; }
+.claude-badge.kind-yesno, .claude-badge.kind-bash { background:#4a2a2a; color:#ff9b9b; border-color:#8e3a3a; }
+.claude-badge.kind-option { background:#4a4218; color:#ffe27a; border-color:#8e7a2a; }
+.claude-badge.kind-input { background:#1a4a2a; color:#9bffb0; border-color:#2a8e4a; }
+
+/* Attention: a Claude session is waiting on yes/no, a permission prompt, or an
+   option list — pulse the card border so it's noticeable without staring at it. */
+@keyframes swt-attention-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0.55); border-color: #ff6b6b; }
+  50% { box-shadow: 0 0 0 6px rgba(255, 107, 107, 0); border-color: #ff9b9b; }
+}
+.agent-card.attention {
+  animation: swt-attention-pulse 1.6s ease-in-out infinite;
+}
+.mgmt-agent-row.attention {
+  animation: swt-attention-pulse 1.6s ease-in-out infinite;
+}
+#notif-toggle {
+  background: transparent; border: 1px solid #333; color: #888;
+  padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+#notif-toggle.on { color: #ffe27a; border-color: #8e7a2a; }
+
+/* Management panel client card */
+.mgmt-client {
+  background:#0d1117; border:1px solid #21262d; border-radius:8px; padding:12px;
+}
+.mgmt-client h4 { margin:0 0 8px 0; font-size:13px; color:#8b949e; }
+.mgmt-client .add-node-row { display:flex; gap:6px; margin:8px 0; align-items:center; flex-wrap:wrap; }
+.mgmt-client .add-node-row input {
+  background:#161b22; color:#c9d1d9; border:1px solid #30363d; border-radius:4px;
+  padding:4px 8px; font-size:12px; width:160px;
+}
+.mgmt-client .add-node-row select {
+  background:#161b22; color:#c9d1d9; border:1px solid #30363d; border-radius:4px;
+  padding:4px 8px; font-size:12px;
+}
+.mgmt-client .add-node-row button {
+  background:#238636; color:#fff; border:none; padding:6px 12px; border-radius:4px;
+  cursor:pointer; font-size:12px;
+}
+.mgmt-client .add-node-row button:disabled { background:#21262d; color:#6e7681; cursor:not-allowed; }
+.mgmt-agent-list { display:flex; flex-direction:column; gap:4px; }
+.mgmt-agent-row {
+  display:flex; align-items:center; gap:8px; padding:6px 8px; background:#161b22; border-radius:4px; font-size:12px;
+  border: 1px solid transparent;
+}
+.mgmt-agent-row .name { color:#c9d1d9; font-weight:600; }
+.mgmt-agent-row .screen { color:#8b949e; }
+.mgmt-agent-row .state { color:#a0a0a0; flex: 1; }
+.mgmt-agent-row .kill-btn {
+  background:#21262d; color:#c9d1d9; border:none; border-radius:4px;
+  padding:4px 8px; font-size:11px; cursor:pointer; flex-shrink:0;
+}
+.mgmt-agent-row .kill-btn:hover { background:#30363d; }
+.mgmt-agent-row .kill-btn.danger { background:#4a2222; color:#ff9b9b; }
+.mgmt-agent-row .kill-btn.danger:hover { background:#6e2f2f; }
+
+/* Network disconnect overlay — shown on top of any view */
+#network-overlay {
+  display: none;
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  background: rgba(180, 40, 40, 0.92);
+  color: #fff;
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+
+/* Floating upload/download buttons in terminal view */
+#float-upload, #float-download {
+  display: none;
+  position: fixed;
+  top: 8px;
+  z-index: 100;
+  background: rgba(15, 15, 35, 0.6);
+  color: #4a9eff;
+  border: none;
+  border-radius: 16px;
+  padding: 4px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: opacity 0.3s, background 0.2s;
+}
+#float-upload { left: 72px; }
+#float-download { left: 120px; }
+#float-upload:hover, #float-download:hover { background: rgba(15, 15, 35, 0.9); }
+
+/* File browser modal */
+#file-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(0, 0, 0, 0.6);
+  align-items: center;
+  justify-content: center;
+}
+#file-modal.show { display: flex; }
+.file-modal-box {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  width: min(560px, 92vw);
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+.file-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #21262d;
+}
+.file-modal-title { color: #c9d1d9; font-size: 14px; font-weight: 600; }
+.file-modal-close {
+  background: none; border: none; color: #8b949e; font-size: 16px; cursor: pointer;
+  padding: 2px 8px; border-radius: 4px;
+}
+.file-modal-close:hover { color: #fff; background: #21262d; }
+.file-modal-path {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px; border-bottom: 1px solid #21262d;
+  font-size: 12px; color: #8b949e; font-family: monospace;
+}
+.file-modal-path button {
+  background: #21262d; color: #c9d1d9; border: none; border-radius: 4px;
+  padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.file-modal-path button:hover { background: #30363d; }
+.file-modal-list { flex: 1; overflow-y: auto; padding: 6px 8px; }
+.file-entry {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  color: #c9d1d9; user-select: none;
+}
+.file-entry:hover { background: #161b22; }
+.file-entry .fe-icon { width: 18px; text-align: center; }
+.file-entry .fe-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-entry .fe-size { color: #6e7681; font-size: 11px; font-family: monospace; }
+.file-entry.is-dir .fe-name { color: #58a6ff; }
+
+/* File transfer progress overlay */
+#file-progress {
+  display: none;
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 300;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px 16px;
+  width: 280px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  color: #c9d1d9;
+}
+#file-progress.show { display: block; }
+#file-progress-name { font-weight: 600; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-progress-bar {
+  height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; margin-bottom: 6px;
+}
+#file-progress-fill {
+  height: 100%; width: 0%; background: #4a9eff; transition: width 0.2s;
+}
+#file-progress-status { color: #8b949e; font-size: 11px; }
+#file-progress.success #file-progress-fill { background: #2ea043; }
+#file-progress.error #file-progress-fill { background: #da3633; }
+#file-progress.error #file-progress-status { color: #f85149; }
+
+/* Lightweight toast for quick feedback (copy/restart/mutex) */
+#toast {
+  display: none;
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 400;
+  background: rgba(30, 30, 50, 0.95);
+  color: #e6e6e6;
+  padding: 9px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  transition: opacity 0.25s;
+  max-width: 80vw;
+  text-align: center;
+}
+#toast.show { display: block; }
+#toast.error { background: rgba(80, 20, 20, 0.95); color: #ffb3b3; }
+#toast.warn { background: rgba(74, 66, 24, 0.95); color: #ffe27a; }
+
+/* Multi-view panel action buttons */
+.term-actions { display: flex; gap: 3px; align-items: center; }
+.term-actions button {
+  background: rgba(15, 15, 35, 0.6);
+  color: #4a9eff;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.4;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.term-actions button:hover { background: rgba(15, 15, 35, 0.95); }
+.term-actions button.restarting {
+  background: rgba(180, 40, 40, 0.7);
+  color: #fff;
+  animation: pulse 0.8s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* Floating back button */
+#float-back {
+  display: none;
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  background: rgba(15, 15, 35, 0.6);
+  color: #4a9eff;
+  border: none;
+  border-radius: 16px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: opacity 0.3s;
+}
+#float-back:hover { background: rgba(15, 15, 35, 0.9); }
+
+/* Mobile toolbar */
+#mobile-toolbar {
+  display: none;
+  background: #0d1117;
+  border-top: 1px solid #21262d;
+  padding: 4px 4px 8px;
+  flex-shrink: 0;
+}
+#mobile-toolbar .tb-row {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 3px;
+}
+#mobile-toolbar .tb-row:last-child { margin-bottom: 0; }
+#mobile-toolbar button {
+  flex: 1;
+  background: #21262d;
+  color: #c9d1d9;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  height: 34px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+#mobile-toolbar button:active { background: #4a9eff; color: #fff; }
+#mobile-toolbar button.active { background: #4a9eff; color: #fff; }
+
+/* Mobile live input bar */
+#mobile-input-area { display: none; margin-bottom: 4px; }
+#mobile-input-wrap { display: flex; gap: 4px; align-items: stretch; }
+#mobile-text-input {
+  flex: 1; min-height: 38px; max-height: 96px; overflow-y: auto;
+  background: #0f0f23; color: #fff;
+  border: 1px solid #333; border-radius: 4px; padding: 7px 8px;
+  font-size: 16px; font-family: monospace; resize: none; outline: none;
+  line-height: 1.3;
+}
+#mobile-text-input:focus { border-color: #4a9eff; }
+#mobile-send-btn {
+  flex: 0 0 44px; background: #4a9eff; color: #fff; border: none;
+  border-radius: 4px; font-size: 18px; touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+#mobile-send-btn:active { background: #2a7ad6; }
+
+/* ===== Mobile structured view (alternative to raw xterm) ===== */
+#structured-view {
+  display: none;
+  flex: 1; min-height: 0;
+  flex-direction: column;
+  background: #0f0f23;
+}
+#struct-transcript {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 10px 12px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.45; color: #d7dcec;
+  white-space: pre-wrap; word-break: break-word;
+  -webkit-overflow-scrolling: touch;
+}
+#struct-transcript .struct-line { margin: 0; }
+#struct-transcript .struct-dim { color: #6e7681; }
+#struct-actionbar {
+  display: none; flex-shrink: 0; padding: 6px 8px; gap: 6px;
+  flex-wrap: wrap; background: #0d1117; border-top: 1px solid #21262d;
+}
+#struct-actionbar button {
+  flex: 1 1 auto; min-width: 64px; padding: 10px 12px; font-size: 14px;
+  border: none; border-radius: 6px; background: #21262d; color: #c9d1d9;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+#struct-actionbar button.primary { background: #238636; color: #fff; }
+#struct-actionbar button.danger { background: #8e3a3a; color: #fff; }
+#struct-actionbar button:active { filter: brightness(1.2); }
+#struct-input-row {
+  display: flex; gap: 6px; padding: 6px 8px; flex-shrink: 0;
+  background: #0d1117; border-top: 1px solid #21262d;
+}
+#struct-input {
+  flex: 1; min-height: 38px; padding: 8px 10px;
+  background: #0f0f23; color: #fff; border: 1px solid #333; border-radius: 6px;
+  font-size: 16px; font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+#struct-input:focus { border-color: #4a9eff; outline: none; }
+#struct-send {
+  flex: 0 0 54px; background: #4a9eff; color: #fff; border: none; border-radius: 6px;
+  font-size: 15px; touch-action: manipulation;
+}
+#struct-quickkeys {
+  display: flex; gap: 4px; padding: 6px 8px 8px; flex-shrink: 0;
+  background: #0d1117; border-top: 1px solid #21262d; overflow-x: auto;
+}
+#struct-quickkeys button {
+  flex: 0 0 auto; padding: 9px 14px; font-size: 13px; border: none; border-radius: 5px;
+  background: #21262d; color: #c9d1d9; touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+#struct-quickkeys button:active { background: #4a9eff; color: #fff; }
+#float-toggle-view {
+  /* No `left`/`right` here previously meant it fell back to its static
+     position (near the left edge, since float-back/upload/download are all
+     position:fixed and removed from flow) — landing right on top of
+     #float-back. Anchored to the right instead, below #term-overlay's row
+     (top 8px) so it doesn't sit under the fading agent-name tag either. */
+  display: none; position: fixed; top: 44px; right: 8px; z-index: 100;
+  background: rgba(15,15,35,0.85); color: #4a9eff; border: none;
+  border-radius: 16px; padding: 4px 12px; font-size: 13px;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+
+/* Mobile responsive */
+@media (max-width: 600px) {
+  .login-box { padding: 28px 20px; }
+  #dash-header { padding: 12px 16px; }
+  #dash-header h2 { font-size: 16px; }
+  .agent-card { padding: 14px; }
+  .agent-card .info-grid { grid-template-columns: 1fr; }
+  #mobile-toolbar { display: block; }
+  #mobile-input-area { display: block; }   /* live input bar always visible on mobile */
+  [data-mode="multi"] { display: none; }   /* multi-terminal grid doesn't fit a phone screen */
+  #notif-toggle { display: none; }         /* Notification API isn't usable on mobile Safari/Chrome-iOS */
+}

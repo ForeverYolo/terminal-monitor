@@ -42,6 +42,8 @@ def package(ref, archive):
                 html = html.replace('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js', '/vendor/xterm.js')
                 html = html.replace('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js', '/vendor/xterm-addon-fit.js')
                 data = html.encode(); entry.size = len(data)
+            elif entry.name in ['public/connection.js', 'public/bootstrap.js']:
+                data = data.decode().replace("|| 'zzb'", "|| 'test'").encode(); entry.size = len(data)
             target.addfile(entry, io.BytesIO(data) if data is not None else None)
         extras = {
             'public/vendor/xterm.css': (deps / 'node_modules/xterm/css/xterm.css').read_bytes(),

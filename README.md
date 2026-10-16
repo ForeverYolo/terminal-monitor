@@ -55,7 +55,7 @@
 |------|------|------|
 | **服务端** | `server.js` | 公网机器上运行。HTTP 静态页面 + WebSocket broker，维护 scrollback 缓冲、鉴权 |
 | **客户端 (Agent)** | `client.js` | 内网机器上运行。用 node-pty 挂载 screen 会话，把 I/O 通过 ws 上行 |
-| **前端** | `public/index.html` | 单 HTML 文件（xterm.js，CDN 加载），零构建。登录 → 仪表盘 → 终端三视图 |
+| **前端** | `public/index.html` | HTML + 按职责拆分的 JS/CSS（xterm.js，CDN 加载），零构建。登录 → 仪表盘 → 终端三视图 |
 
 ### 数据流
 
@@ -306,12 +306,13 @@ screen -S swt-client-mywork -X quit    # 停止某客户端
 
 ### 6.5 HTTP API
 
-服务端暴露两个简单接口（可用于外部脚本监控 / CI 集成）：
+服务端提供状态查询和输入接口（可用于外部脚本监控 / CI 集成）：
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
 | `/api/agents` | GET | 返回所有在线 agent 状态 JSON（最后 10 行输出、是否等待输入等） |
-| `/api/action` | POST | body `{agentId, input}`，向指定 agent 终端注入输入 |
+| `/api/supervisor` | GET | 返回监督器汇总；未启用时返回 503 |
+| `/api/action` | POST | 请求头 `Authorization: Bearer <agent-token>`，body `{agentId, input}`，仅向该 token 用户的 agent 注入输入 |
 
 ---
 
@@ -448,30 +449,25 @@ A：目前仅靠 token 的 `user` 字段做简单隔离（不同用户看到不�
 
 ## 十一、项目结构
 
-```
+```text
 terminal-monitor/
-├── package.json                       # 依赖：ws, node-pty, xterm-headless / serializer
-├── package-lock.json
-├── .gitignore                         # 忽略真实配置、日志、node_modules
-├── README.md                          # 本文档
-│
-├── server.js                          # 服务端：WS broker + HTTP 静态页 + scrollback
-├── client.js                          # 客户端：PTY + screen + WS 上行 + 文件传输
-├── supervisor.js                      # 可选：状态汇总 / 空闲告警 / webhook
-├── ai-overseer.js                     # 可选：AI 督工，LLM 驱动终端任务
-│
-├── public/
-│   └── index.html                     # 前端 SPA（xterm.js，CDN，零构建）
-│
-├── install.sh                         # 一键部署：server / client / debug
-├── deploy.sh                          # 批量 scp 推送（读 deploy.targets.conf）
-├── deploy.targets.example.conf        # 部署目标模板（复制为 .conf 后编辑）
-├── backup.sh                          # git 备份 / 还原脚本
-│
-├── config.example.json                # 服务端配置模板
-├── config.client.example.json         # 客户端配置模板
-└── config.ai-overseer.example.json    # AI 督工配置模板
+├── server.js / server-http.js          # WS 中继 / 静态资源与 HTTP API
+├── terminal-replay.js                  # 历史恢复、快照与尺寸接管
+├── client.js / file-transfer.js        # PTY 连接 / 文件传输
+├── terminal-state.js / terminal-filter.js
+├── managed-files.js / file-update.js   # 共享更新清单与文件安装
+├── config-loader.js / pending-requests.js
+├── service-runtime.sh / service-restart.js
+├── supervisor.js / ai-overseer.js      # 建议型监督器 / 自动执行督工
+├── claude-detector.js / spawn-validator.js
+├── public/                            # HTML、CSS、按功能拆分的 JS；无需构建
+├── install.sh / deploy.sh / restart.sh / backup.sh
+├── infra/staging/                     # 独立测试平台与公网验收脚本
+├── test/                              # 单元、协议、Screen 和浏览器测试
+└── docs/                              # 部署、测试、架构与历史设计记录
 ```
+
+测试入口见 [测试说明](docs/testing.md)。模块职责和首次升级方式见 [重构说明](docs/refactoring.md)。旧版网页更新器的白名单不能安装新增模块，跨到此结构时先用 Git 或新版 `deploy.sh` 完整升级并重启；之后网页拉取、推送覆盖全部拆分后的运行文件。
 
 ---
 

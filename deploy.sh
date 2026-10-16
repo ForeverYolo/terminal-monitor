@@ -14,7 +14,10 @@ PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF="$PROJ_DIR/deploy.targets.conf"
 MAX_RETRIES=3
 RETRY_DELAY=5
-DEFAULT_FILES=(server.js client.js terminal-state.js terminal-filter.js supervisor.js ai-overseer.js package.json package-lock.json public/index.html)
+# Node is already a project prerequisite. Read the same inventory as the UI
+# and runtime updater, so newly split modules cannot be silently omitted.
+mapfile -t DEFAULT_FILES < <(node -e 'require(process.argv[1]).DEPLOY_FILES.forEach(f => console.log(f))' "$PROJ_DIR/managed-files.js")
+[ "${#DEFAULT_FILES[@]}" -gt 0 ] || { echo '[!] Cannot read deployment inventory'; exit 1; }
 
 if [ ! -f "$CONF" ]; then
   echo "[!] Target config not found: $CONF"
@@ -49,10 +52,15 @@ for target in "${TARGETS[@]}"; do
   for file in "${FILES[@]}"; do
     src="$PROJ_DIR/$file"
     if [ ! -f "$src" ]; then
-      echo "  [SKIP] $file not found"
+      echo "  [FAIL] $file not found"
+      failed=$((failed + 1))
       continue
     fi
     echo "  scp $file -> $path/"
+    if ! ssh -p "$port" "$user@$host" "mkdir -p -- $(printf '%q' "$path/$(dirname "$file")")"; then
+      failed=$((failed + 1))
+      continue
+    fi
     retry=0
     while [ $retry -lt $MAX_RETRIES ]; do
       if scp -P "$port" "$src" "$user@$host:$path/$file"; then

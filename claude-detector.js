@@ -204,9 +204,12 @@ function detectClaudeState(rawOutput) {
   return result;
 }
 
-module.exports = {
+const claudeDetectorExports = {
   detectClaudeState,
   stripAnsi,
   // exported for testing
   _INTERNAL: { CLAUDE_BANNER_PATTERNS, SPINNER_PATTERNS, YESNO_PATTERNS, BASH_PROMPT_PATTERNS, OPTION_LIST_PATTERNS, IDLE_PROMPT_PATTERNS }
 };
+
+if (typeof module !== "undefined" && module.exports) module.exports = claudeDetectorExports;
+else globalThis.ClaudeDetector = claudeDetectorExports;

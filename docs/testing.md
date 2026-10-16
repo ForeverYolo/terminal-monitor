@@ -8,9 +8,9 @@ external CDN requests. Run `npm run test:setup` once to install Chromium.
 | Command | Coverage / prerequisites |
 | --- | --- |
 | `npm test` | Unit and mock-agent protocol tests; no model calls |
-| `npm run test:unit` | Detectors, filters, snapshots, supervisor |
+| `npm run test:unit` | Detectors, filters, snapshots, supervisor, HTTP/update contracts and stream lifecycle |
 | `npm run test:protocol` | Broker/client registration, reconnect, updates |
-| `npm run test:screen` | Disposable real GNU Screen sessions and restart fixtures |
+| `npm run test:screen` | Disposable real GNU Screen sessions, restart/rollback and quoted-path fixtures |
 | `npm run test:browser` | Chromium, real Screen, terminal selection, paging, redraw |
 | `npm run test:codex` | Logged-in Codex, isolated synthetic history; no new prompts |
 | `npm run test:all` | All local groups, including real Codex |

@@ -28,19 +28,9 @@ check_node() {
 # 而是证据：能通过 `node --check` 解析本仓库的 client.js 才算可用。
 # 注意参数顺序是 `node --check <file>`，`node <file> --check` 会把 --check
 # 传给脚本本身。
+source "$REPO_DIR/service-runtime.sh"
 resolve_node() {
-    for p in "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node /usr/bin/node; do
-        if [ -x "$p" ] && "$p" --check "$REPO_DIR/client.js" 2>/dev/null; then
-            NODE_BIN="$p"
-            return 0
-        fi
-    done
-    if command -v node >/dev/null 2>&1 && node --check "$REPO_DIR/client.js" 2>/dev/null; then
-        NODE_BIN=node
-        return 0
-    fi
-    echo "[!] 没有找到能解析本项目的 node，请安装 Node 20+ 或 nvm" >&2
-    return 1
+    resolve_service_node "$REPO_DIR" client.js 'require("./terminal-state"); require("node-pty")'
 }
 
 # --- 复用本机已有 clientId ---
@@ -126,12 +116,11 @@ EOF
     # 在 screen 里启动
     resolve_node
     local sn="swt-server"
-    if screen -list | grep -q "\.$sn"; then
+    if screen_exists "$sn"; then
         echo "[!] screen session '$sn' 已存在，先关闭..."
-        screen -S "$sn" -X quit
-        sleep 1
+        stop_screen "$sn"
     fi
-    screen -dmS "$sn" bash -c "cd $PROJ_DIR && exec '$NODE_BIN' server.js 2>&1 | tee -a $PROJ_DIR/server.log"
+    start_service_screen "$sn" "$PROJ_DIR" "$NODE_BIN" server.js "$PROJ_DIR/config.json" "$PROJ_DIR/server.log"
 
     echo ""
     echo "=== 部署完成 ==="
@@ -251,12 +240,11 @@ EOF
     # 在 screen 里启动，用 screen session 名做后缀避免冲突
     resolve_node
     local sn="swt-client-${SCREEN_SESSION}"
-    if screen -list | grep -q "\.$sn"; then
+    if screen_exists "$sn"; then
         echo "[!] screen session '$sn' 已存在，先关闭..."
-        screen -S "$sn" -X quit
-        sleep 1
+        stop_screen "$sn"
     fi
-    screen -dmS "$sn" bash -c "cd $PROJ_DIR && exec '$NODE_BIN' client.js --config=$CFG_NAME 2>&1 | tee -a $PROJ_DIR/client-${SCREEN_SESSION}.log"
+    start_service_screen "$sn" "$PROJ_DIR" "$NODE_BIN" client.js "$PROJ_DIR/$CFG_NAME" "$PROJ_DIR/client-${SCREEN_SESSION}.log"
 
     echo ""
     echo "=== 部署完成 ==="

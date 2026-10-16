@@ -5,6 +5,7 @@ const { execSync, execFileSync, spawn } = require('child_process');
 const crypto = require('crypto');
 const WebSocket = require('ws');
 const pty = require('node-pty');
+const { createFileTransfer } = require('./file-transfer');
 let TerminalState = null;
 try { ({ TerminalState } = require('./terminal-state')); }
 catch (e) { console.warn('[snapshot] renderer unavailable, using legacy output:', e.message); }
@@ -98,23 +99,8 @@ const clientId = config.client.clientId;
 // Server diffs these hashes against its own copies and pushes only what
 // differs (update_files). Whitelist is strict: only these names may ever be
 // written by the update path.
-const CLIENT_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js', 'terminal-state.js', 'terminal-filter.js'];
-// Names this agent may be asked to upload (pull_update). Includes the
-// server-side files: when this machine is the designated update source, the
-// server replaces its own copies from here. Strict whitelist — anything else
-// is refused, so the fetch path can never read arbitrary files.
-const FETCHABLE_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
-  'terminal-state.js', 'terminal-filter.js', 'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
-
-function sha256File(absPath) {
-  return new Promise((resolve, reject) => {
-    const h = crypto.createHash('sha256');
-    const s = fs.createReadStream(absPath);
-    s.on('data', d => h.update(d));
-    s.on('error', reject);
-    s.on('end', () => resolve(h.digest('hex')));
-  });
-}
+const { CLIENT_FILES, FETCHABLE_FILES } = require('./managed-files');
+const { buildFileManifest, installFiles } = require('./file-update');
 
 // {name: hash} of our FETCHABLE_FILES copies; missing files are omitted.
 // Deliberately wider than CLIENT_FILES: the server-side files (server.js,
@@ -140,11 +126,7 @@ async function hashSelfFiles() {
 // since this process started (deployed updates, local edits), which the
 // running-version snapshot above deliberately freezes out.
 async function hashDiskFiles() {
-  const out = {};
-  for (const name of FETCHABLE_FILES) {
-    try { out[name] = await sha256File(path.join(__dirname, name)); } catch { /* omitted */ }
-  }
-  return out;
+  return buildFileManifest(__dirname, FETCHABLE_FILES);
 }
 
 // --- Debug byte-stream dump (toggle with --dump flag) ---
@@ -176,10 +158,6 @@ function dumpStream(dir, data) {
 //      window's shell; acceptable for a single-window monitoring setup.
 //   3. static `fileRoot` (from config) as the last resort.
 const staticFileRoot = path.resolve(config.client.fileRoot || process.cwd());
-const MAX_FILE_SIZE = 200 * 1024 * 1024;        // 200MB per file
-const CHUNK_SIZE = 256 * 1024;                  // 256KB raw per chunk
-const activeUploads = new Map();                // uploadId -> { stream, size, received, target }
-const activeDownloads = new Map();              // downloadId -> { rs, aborted }
 let oscCwd = null;                              // shell cwd from last OSC 7 report
 
 // Match an OSC 7 sequence: ESC ] 7 ; file://host/path terminated by BEL or ST.
@@ -252,14 +230,6 @@ function getShellCwd() {
 
 // Resolve a relative path against a base directory. Returns null if the result
 // escapes the base (which itself is constrained to $HOME for safety).
-function safeResolveAgainst(base, rel) {
-  const resolved = path.resolve(base, rel || '.');
-  const home = os.homedir();
-  // Allow navigation anywhere under the user's home directory.
-  if (resolved !== home && !resolved.startsWith(home + path.sep)) return null;
-  return resolved;
-}
-
 function sendMsg(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     sendRawOrQueue(JSON.stringify(obj));
@@ -417,39 +387,14 @@ async function handleFetchFiles(msg) {
 // Files we can receive via update_files: everything the server manages
 // (install.sh puts server.js/public/* copies on agent machines too). Only a
 // change to one we actually RUN triggers a restart.
-const UPDATABLE_FILES = ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js',
-  'terminal-state.js', 'terminal-filter.js', 'server.js', 'supervisor.js', 'public/index.html', 'public/guide.html', 'public/favicon.svg'];
-
 async function handleUpdateFiles(msg) {
   const reqId = msg.reqId;
   if (!Array.isArray(msg.files)) {
     sendMsg({ type: 'update_files_result', reqId, ok: false, error: 'files must be an array', updated: [] });
     return;
   }
-  // Validate everything BEFORE touching disk: strict whitelist (no paths, no
-  // traversal beyond the known public/ subdir) and content must match its
-  // declared sha256.
-  for (const f of msg.files) {
-    if (!f || !UPDATABLE_FILES.includes(f.name)) {
-      throw new Error(`file not allowed: ${f && f.name}`);
-    }
-    const buf = Buffer.from(f.content, 'base64');
-    const sum = crypto.createHash('sha256').update(buf).digest('hex');
-    if (sum !== f.sha256) throw new Error(`checksum mismatch: ${f.name}`);
-  }
-  // Atomic install: write temp sibling then rename. Overwriting the running
-  // client.js is safe on Linux — node holds the old inode until exit.
-  const updated = [];
-  let ranFilesChanged = false;
-  for (const f of msg.files) {
-    const finalPath = path.join(__dirname, f.name);
-    const tmpPath = finalPath + '.swt-new';
-    fs.mkdirSync(path.dirname(finalPath), { recursive: true });
-    fs.writeFileSync(tmpPath, Buffer.from(f.content, 'base64'), { mode: 0o644 });
-    fs.renameSync(tmpPath, finalPath);
-    updated.push(f.name);
-    if (CLIENT_FILES.includes(f.name)) ranFilesChanged = true;
-  }
+  const updated = installFiles(__dirname, msg.files, FETCHABLE_FILES);
+  const ranFilesChanged = updated.some(name => CLIENT_FILES.includes(name));
   console.log(`[update] applied: ${updated.join(', ')}${ranFilesChanged ? ' — scheduling self-restart' : ' (data-only, no restart needed)'}`);
   sendMsg({ type: 'update_files_result', reqId, ok: true, updated });
   if (ranFilesChanged) scheduleSelfRestart();
@@ -464,43 +409,10 @@ let selfRestartScheduled = false;
 function scheduleSelfRestart() {
   if (selfRestartScheduled) return;
   selfRestartScheduled = true;
-  const SESSION = screenName;
-  const CFG = path.basename(configFile);
-  const NODE = process.execPath;
-  const DIR = __dirname;
-  const PID = process.pid;
-  const script = `
-sleep 2
-kill -TERM ${PID} 2>/dev/null || true
-sleep 2
-if screen -ls 2>/dev/null | grep -q '[.]swt-client-${SESSION}'; then
-  screen -S swt-client-${SESSION} -X quit 2>/dev/null
-  sleep 1
-fi
-# Honor termination: if the node was killed via web UI (kill_node), the .stop
-# marker must not be bypassed by an in-flight update restart. But if the task
-# screen exists again, the node is being revived on purpose — clear and relaunch.
-if [ -f '${DIR}/${CFG}.stop' ]; then
-  if screen -ls 2>/dev/null | grep -qE '[.]${SESSION}(\\s|$)'; then
-    rm -f '${DIR}/${CFG}.stop'
-  else
-    echo "[self-restart] .stop marker present — node terminated, not relaunching" >&2
-    exit 0
-  fi
-fi
-# Relaunch unconditionally. Two setups exist out there:
-#  - install.sh's restart-on-crash wrapper: killing us above makes the wrapper
-#    relaunch with the NEW files, and the screen we create below would be a
-#    duplicate... except the wrapper's screen has the SAME name, so
-#    screen -dmS with an existing session is refused (duplicate name check),
-#    which makes this a safe no-op in that case.
-#  - manually launched screen (no wrapper): without this the agent would be
-#    gone forever after a push — 5060Ti incident, Sep 2026.
-screen -dmS swt-client-${SESSION} bash -c "cd '${DIR}' && exec '${NODE}' client.js --config=${CFG} 2>&1 | tee -a '${DIR}/client-${SESSION}.log'"
-`;
-  const child = spawn('bash', ['-c', script], { detached: true, stdio: 'ignore', env: { ...process.env } });
-  child.unref();
-  console.log(`[update] self-restart scheduled (screen swt-client-${SESSION})`);
+  require('./service-restart').restartClient({
+    root: __dirname, node: process.execPath, configFile, screenName, pid: process.pid
+  });
+  console.log(`[update] self-restart scheduled (screen swt-client-${screenName})`);
 }
 
 // --- Claude state detection ---
@@ -631,7 +543,7 @@ function drainOfflineQueue() {
   }, 10);
 }
 
-// Register handshake is async (hashSelfFiles reads 4 files from disk). The
+// Register handshake is async (hashSelfFiles reads the managed files from disk). The
 // server closes any connection whose first message isn't register, and a
 // freshly attached screen's initial redraw fires through onData immediately —
 // so outbound data/claude_state/ping that beat the register message must be
@@ -661,6 +573,15 @@ function connect() {
 
   ws = new WebSocket(serverUrl);
 
+  const transferSocket = ws;
+  const fileTransfers = createFileTransfer({
+    send: message => {
+      if (transferSocket.readyState !== WebSocket.OPEN) return false;
+      transferSocket.send(JSON.stringify(message));
+      return true;
+    },
+    getSocket: () => transferSocket, getShellCwd
+  });
   ws.on('open', () => {
     console.log('Connected to server');
     reconnectDelay = 1000;
@@ -844,7 +765,7 @@ function connect() {
       shutdown();
     }
 
-    // --- Push-update: server sends diffs of CLIENT_FILES ---
+    // --- Push-update: server sends diffs of the managed inventory ---
     if (msg.type === 'update_files') {
       handleUpdateFiles(msg).catch(e => {
         console.error('[update] failed:', e.message);
@@ -890,187 +811,9 @@ function connect() {
     // --- File transfer ---
     if (typeof msg.type === 'string' && msg.type.startsWith('file_')) {
       console.log('[file] recv', msg.type, msg.reqId || msg.uploadId || msg.downloadId || '');
-      handleFileMsg(msg).catch(e => console.error('[file] handler error:', e.message));
+      fileTransfers.handle(msg).catch(e => console.error('[file] handler error:', e.message));
     }
   });
-
-  // --- File transfer handlers ---
-  async function handleFileMsg(msg) {
-    const agentId = msg.agentId;  // echoed back in responses for routing
-    try {
-      if (msg.type === 'file_ls') return await handleFileLs(msg);
-      if (msg.type === 'file_upload_start') return await handleUploadStart(msg);
-      if (msg.type === 'file_chunk') return handleUploadChunk(msg);
-      if (msg.type === 'file_upload_end') return handleUploadEnd(msg);
-      if (msg.type === 'file_download_start') return await handleDownloadStart(msg);
-    } catch (e) {
-      console.error('[file] error:', e.message);
-    }
-  }
-
-  async function handleFileLs(msg) {
-    console.log('[file] file_ls start, dir=', msg.dir);
-    const base = getShellCwd();
-    const target = safeResolveAgainst(base, msg.dir || '.');
-    if (!target) {
-      sendMsg({ type: 'file_ls_result', agentId: msg.agentId, reqId: msg.reqId, dir: msg.dir || '', error: '路径超出允许范围（仅限 $HOME 内）' });
-      return;
-    }
-    try {
-      const entries = await fs.promises.readdir(target, { withFileTypes: true });
-      const result = [];
-      for (const ent of entries) {
-        const full = path.join(target, ent.name);
-        let size = 0, mtime = 0, isDir = ent.isDirectory();
-        try {
-          const st = await fs.promises.stat(full);
-          size = st.size; mtime = st.mtimeMs; isDir = st.isDirectory();
-        } catch { /* unreadable entry: include with zero stat */ }
-        result.push({ name: ent.name, size, mtime, isDir });
-      }
-      result.sort((a, b) => (a.isDir === b.isDir) ? a.name.localeCompare(b.name) : (a.isDir ? -1 : 1));
-      // Compute display path: relative to base when inside, else absolute
-      let displayPath;
-      if (target === base) displayPath = '.';
-      else if (target.startsWith(base + path.sep)) displayPath = path.relative(base, target);
-      else displayPath = target;
-      console.log('[file] file_ls ok, cwd=', base, 'target=', target, 'n=', result.length);
-      sendMsg({
-        type: 'file_ls_result',
-        agentId: msg.agentId,
-        reqId: msg.reqId,
-        dir: msg.dir || '',
-        cwd: base,
-        displayPath,
-        entries: result
-      });
-    } catch (e) {
-      sendMsg({ type: 'file_ls_result', agentId: msg.agentId, reqId: msg.reqId, dir: msg.dir || '', cwd: base, error: e.message });
-    }
-  }
-
-  async function handleUploadStart(msg) {
-    const filename = path.basename(msg.filename || '');   // strip any dir components
-    if (!filename || filename === '.' || filename === '..') {
-      sendMsg({ type: 'file_upload_ack', agentId: msg.agentId, uploadId: msg.uploadId, ok: false, error: 'Invalid filename' });
-      return;
-    }
-    if (!Number.isFinite(msg.size) || msg.size <= 0 || msg.size > MAX_FILE_SIZE) {
-      sendMsg({ type: 'file_upload_ack', agentId: msg.agentId, uploadId: msg.uploadId, ok: false, error: `Size out of range (max ${MAX_FILE_SIZE} bytes)` });
-      return;
-    }
-    const base = getShellCwd();
-    const target = safeResolveAgainst(base, filename);
-    if (!target) {
-      sendMsg({ type: 'file_upload_ack', agentId: msg.agentId, uploadId: msg.uploadId, ok: false, error: 'Invalid target path' });
-      return;
-    }
-    try {
-      const stream = fs.createWriteStream(target, { flags: 'w' });
-      await new Promise((res, rej) => {
-        stream.once('open', res);
-        stream.once('error', rej);
-      });
-      stream.removeAllListeners('error');
-      stream.on('error', (e) => {
-        console.error('[file] upload stream error:', e.message);
-        activeUploads.delete(msg.uploadId);
-        try { stream.destroy(); } catch {}
-        sendMsg({ type: 'file_upload_done', agentId: msg.agentId, uploadId: msg.uploadId, ok: false, error: e.message });
-      });
-      activeUploads.set(msg.uploadId, { stream, size: msg.size, received: 0, target });
-      console.log(`[file] upload start: ${filename} (${msg.size} bytes) → ${target}`);
-      sendMsg({ type: 'file_upload_ack', agentId: msg.agentId, uploadId: msg.uploadId, ok: true });
-    } catch (e) {
-      sendMsg({ type: 'file_upload_ack', agentId: msg.agentId, uploadId: msg.uploadId, ok: false, error: e.message });
-    }
-  }
-
-  function handleUploadChunk(msg) {
-    const up = activeUploads.get(msg.uploadId);
-    if (!up) return;  // unknown / already finished — drop silently
-    const buf = Buffer.from(msg.data || '', 'base64');
-    up.received += buf.length;
-    const ok = up.stream.write(buf);
-    // Backpressure hint (optional): browser may track but we don't enforce windowing here.
-    sendMsg({ type: 'file_chunk_ack', agentId: msg.agentId, uploadId: msg.uploadId, index: msg.index, received: up.received });
-    void ok;
-  }
-
-  function handleUploadEnd(msg) {
-    const up = activeUploads.get(msg.uploadId);
-    if (!up) return;
-    up.stream.end(() => {
-      console.log(`[file] upload done: ${path.basename(up.target)} (${up.received} bytes)`);
-      activeUploads.delete(msg.uploadId);
-      sendMsg({ type: 'file_upload_done', agentId: msg.agentId, uploadId: msg.uploadId, ok: true, savedPath: path.basename(up.target) });
-    });
-  }
-
-  async function handleDownloadStart(msg) {
-    const rel = msg.path || '';
-    const base = getShellCwd();
-    const target = safeResolveAgainst(base, rel);
-    if (!target) {
-      sendMsg({ type: 'file_download_end', agentId: msg.agentId, downloadId: msg.downloadId, ok: false, error: 'Invalid path' });
-      return;
-    }
-    let st;
-    try {
-      st = await fs.promises.stat(target);
-    } catch (e) {
-      sendMsg({ type: 'file_download_end', agentId: msg.agentId, downloadId: msg.downloadId, ok: false, error: e.message });
-      return;
-    }
-    if (st.isDirectory()) {
-      sendMsg({ type: 'file_download_end', agentId: msg.agentId, downloadId: msg.downloadId, ok: false, error: 'Is a directory' });
-      return;
-    }
-    if (st.size > MAX_FILE_SIZE) {
-      sendMsg({ type: 'file_download_end', agentId: msg.agentId, downloadId: msg.downloadId, ok: false, error: `File too large (max ${MAX_FILE_SIZE} bytes)` });
-      return;
-    }
-    const name = path.basename(target);
-    const totalChunks = Math.max(1, Math.ceil(st.size / CHUNK_SIZE));
-    const state = { rs: fs.createReadStream(target, { highWaterMark: CHUNK_SIZE }), aborted: false, index: 0, size: st.size };
-    activeDownloads.set(msg.downloadId, state);
-    sendMsg({ type: 'file_download_meta', agentId: msg.agentId, downloadId: msg.downloadId, name, size: st.size, totalChunks });
-    console.log(`[file] download start: ${name} (${st.size} bytes)`);
-
-    state.rs.on('data', (chunk) => {
-      if (state.aborted) return;
-      // Pause until the ws send buffer drains — crude backpressure.
-      const ok = sendMsg({
-        type: 'file_download_chunk',
-        agentId: msg.agentId,
-        downloadId: msg.downloadId,
-        index: state.index++,
-        data: chunk.toString('base64')
-      });
-      if (!ok || ws.bufferedAmount > 4 * CHUNK_SIZE) {
-        state.rs.pause();
-        const drain = () => {
-          if (ws && ws.readyState === WebSocket.OPEN && ws.bufferedAmount <= 2 * CHUNK_SIZE) {
-            ws.off('drain', drain);
-            state.rs.resume();
-          }
-        };
-        if (ws && ws.readyState === WebSocket.OPEN) ws.on('drain', drain);
-        else setTimeout(() => state.rs.resume(), 100);
-      }
-    });
-    state.rs.on('end', () => {
-      console.log(`[file] download done: ${name}`);
-      activeDownloads.delete(msg.downloadId);
-      sendMsg({ type: 'file_download_end', agentId: msg.agentId, downloadId: msg.downloadId, ok: true });
-    });
-    state.rs.on('error', (e) => {
-      console.error('[file] download stream error:', e.message);
-      state.aborted = true;
-      activeDownloads.delete(msg.downloadId);
-      sendMsg({ type: 'file_download_end', agentId: msg.agentId, downloadId: msg.downloadId, ok: false, error: e.message });
-    });
-  }
 
   ws.on('close', () => {
     console.log('Disconnected from server');
@@ -1087,10 +830,7 @@ function connect() {
     // still owns recovery. Only spawnPty increments the generation, which
     // also invalidates old respawn timers if reconnect creates a replacement.
     // Abort any in-flight file transfers — streams won't survive a reconnect.
-    for (const [, up] of activeUploads) { try { up.stream.destroy(); } catch {} }
-    activeUploads.clear();
-    for (const [, dl] of activeDownloads) { dl.aborted = true; try { dl.rs.destroy(); } catch {} }
-    activeDownloads.clear();
+    fileTransfers.dispose();
     scheduleReconnect();
   });
 

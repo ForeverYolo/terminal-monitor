@@ -11,9 +11,9 @@
 // a split sequence misses the exact match and passes through unfiltered, and
 // xterm switches buffers behind the TUI's back — every later incremental
 // redraw then lands on the wrong canvas and overlays old frames.
-// Private modes whose enable/disable switches we strip from the output stream:
+// Legacy mode strips these private enable/disable switches from output:
 // normal(1000), button(1002), any-motion(1003), focus(1004), utf8(1005),
-// sgr(1006), alt-scroll(1007), urxvt(1015), sgtpix(1016).  xterm.js must never
+// sgr(1006), alt-scroll(1007), urxvt(1015), sgtpix(1016). Legacy xterm must not
 // enter mouse/focus tracking: TUI apps (claude) that enable it expect the
 // terminal to deliver events, but GNU screen between us and the app mangles
 // SGR mouse sequences — the app then receives coordinate tails like "31;6M"

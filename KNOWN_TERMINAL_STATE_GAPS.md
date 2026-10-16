@@ -23,7 +23,7 @@
 
 - `terminal-state.js`：过滤输出后解析到 headless 模型，`takeSnapshot()` 生成 payload 和 parserState；目前 parserState 只补充滚动上下边界及当前光标坐标。
 - `server.js`：`sendSnapshotReplay()` 请求快照，`terminal_snapshot_result` 分支转发元数据并衔接后续输出。
-- `public/index.html`：`terminal_snapshot` 分支先重置，再写入 payload，解析回调中恢复 parserState；实时 data 分支则继续执行指令。
+- `public/connection.js`：`terminal_snapshot` 分支先重置，再写入 payload，解析回调中恢复 parserState；实时 data 分支则继续执行指令。
 - `terminal-filter.js`：显示端虚拟化备用缓冲，保留原生鼠标协议；对部分跨 chunk 指令做缓冲，但不等价于覆盖所有解析状态。
 - 现有 [`test/test-scroll-region-browser.js`](test/test-scroll-region-browser.js) 验证滚动区域修复，不是本清单全部状态的完整性测试。
 

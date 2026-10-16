@@ -76,32 +76,12 @@ if [ "$MODE" = client ]; then
   screen_name="swt-client-$SCREEN_SESSION"
   log_file="client-$SCREEN_SESSION.log"
   config="config.client-$SCREEN_SESSION.json"
-  node_args=("--config=$config")
 else
   screen_name='swt-server'
   log_file='server.log'
   config='config.json'
-  node_args=()
 fi
-screen_exists() {
-  local name tail output
-  output=$(screen -ls 2>/dev/null || true)
-  while read -r name tail; do
-    if [[ "$name" = *.* && "${name#*.}" = "$1" ]]; then return 0; fi
-  done <<< "$output"
-  return 1
-}
-stop_screen() {
-  if screen_exists "$1"; then
-    screen -S "$1" -X quit
-    for ((i=0; i<30; i++)); do
-      screen_exists "$1" || return 0
-      sleep 0.1
-    done
-    echo "[restart] Screen did not stop: $1" >&2
-    return 1
-  fi
-}
+source "$ROOT/service-runtime.sh"
 if [ "$SCOPE" != real ]; then
   if [ "$MODE" = client ] && [ -f "$config.stop" ]; then
     echo '[restart] .stop marker present — node was terminated, skipping relaunch'
@@ -115,17 +95,7 @@ if [ "$SCOPE" != real ]; then
   fi
   # Probe the runtime before stopping anything. Nvm is not loaded by SSH;
   # parsing the entry alone also misses incompatible terminal dependencies.
-  NODE_BIN=''
-  for candidate in "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node /usr/bin/node node; do
-    if [ "$candidate" = node ]; then candidate=$(command -v node || true); fi
-    if [ -n "$candidate" ] && [ -x "$candidate" ] &&
-       "$candidate" --check "$entry" 2>/dev/null &&
-       "$candidate" -e "$check_require" 2>/dev/null; then
-      NODE_BIN="$candidate"
-      break
-    fi
-  done
-  [ -n "$NODE_BIN" ] || { echo '[restart] no working node found' >&2; exit 1; }
+  resolve_service_node "$ROOT" "$entry" "$check_require"
   "$NODE_BIN" -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$config"
   stop_screen "$screen_name"
   # A node-pty client can survive Screen's SIGHUP. Match the exact project,
@@ -168,9 +138,7 @@ if [ "$SCOPE" = real ] || [ "$SCOPE" = all ]; then
   screen_exists "$SCREEN_SESSION" || { echo '[restart] task Screen did not come up' >&2; exit 1; }
 fi
 if [ "$SCOPE" != real ]; then
-  screen -dmS "$screen_name" bash -c \
-    'cd "$1" && exec "$2" "$3" "${@:5}" 2>&1 | tee -a "$4"' \
-    _ "$ROOT" "$NODE_BIN" "$entry" "$log_file" "${node_args[@]}"
+  start_service_screen "$screen_name" "$ROOT" "$NODE_BIN" "$entry" "$config" "$ROOT/$log_file"
   sleep 1
   screen_exists "$screen_name" || { echo "[restart] Screen did not come up, check $log_file" >&2; exit 1; }
 fi

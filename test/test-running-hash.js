@@ -104,12 +104,9 @@ async function main() {
   // with a try/finally guard, in a throwaway clone:
   const cloneDir = path.join(tmpDir, 'proj');
   fs.mkdirSync(cloneDir);
-  for (const f of ['client.js', 'claude-detector.js', 'spawn-validator.js', 'config-loader.js', 'server.js', 'supervisor.js']) {
+  for (const f of require('../managed-files').SERVER_FILES) {
+    fs.mkdirSync(path.dirname(path.join(cloneDir, f)), { recursive: true });
     fs.copyFileSync(path.join(PROJECT, f), path.join(cloneDir, f));
-  }
-  fs.mkdirSync(path.join(cloneDir, 'public'));
-  for (const f of ['index.html', 'guide.html', 'favicon.svg']) {
-    fs.copyFileSync(path.join(PROJECT, 'public', f), path.join(cloneDir, 'public', f));
   }
   // Clone needs ws/node-pty — symlink the real node_modules (read-only use).
   fs.symlinkSync(path.join(PROJECT, 'node_modules'), path.join(cloneDir, 'node_modules'));

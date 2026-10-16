@@ -70,6 +70,8 @@ async function main() {
   const [uA, uB] = await Promise.all([pA, pB]);
   check('push_update reaches process A', Array.isArray(uA.files) && uA.files.length > 0);
   check('push_update reaches process B', Array.isArray(uB.files) && uB.files.length > 0);
+  const inventory = require('../managed-files').SERVER_FILES;
+  check('push includes every split runtime module and browser asset', inventory.every(name => uA.files.some(file => file.name === name)));
   check('both get the same reqId', uA.reqId === uB.reqId && uA.reqId === 'req-push-1');
 
   // browser gets exactly one aggregated result (first reply wins; second ignored)

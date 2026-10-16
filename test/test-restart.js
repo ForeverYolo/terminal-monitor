@@ -19,7 +19,7 @@ const cfg=JSON.parse(fs.readFileSync(file));
 fs.writeFileSync(file+'.pid',JSON.stringify({pid:process.pid,nativeTui:cfg.client?.nativeTui}));
 setInterval(()=>{},1000);`;
 function prepare(dir){
- fs.mkdirSync(dir,{recursive:true});fs.copyFileSync(path.join(project,'restart.sh'),path.join(dir,'restart.sh'));
+ fs.mkdirSync(dir,{recursive:true});for(const f of ['restart.sh','service-runtime.sh'])fs.copyFileSync(path.join(project,f),path.join(dir,f));
  fs.writeFileSync(path.join(dir,'client.js'),fixture);fs.writeFileSync(path.join(dir,'server.js'),fixture);
  fs.writeFileSync(path.join(dir,'terminal-state.js'),'module.exports={};');
  for(const dep of ['node-pty','ws']){fs.mkdirSync(path.join(dir,'node_modules',dep),{recursive:true});fs.writeFileSync(path.join(dir,'node_modules',dep,'index.js'),'module.exports={};');}
