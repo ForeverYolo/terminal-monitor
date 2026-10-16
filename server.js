@@ -7,6 +7,7 @@ const { createSupervisor } = require('./supervisor');
 const { stripAnsi } = require('./claude-detector');
 const { loadConfig } = require('./config-loader');
 const { PendingRequests } = require('./pending-requests');
+const { PROTOCOL_VERSION, validSize, validParserState } = require('./terminal-protocol');
 
 // --- Load config (support --config flag) ---
 const { config, configFile } = loadConfig('config.json', __dirname);
@@ -19,14 +20,9 @@ for (const [token, info] of Object.entries(tokens || {})) {
 
 // --- State ---
 const agents = new Map();   // ws -> { id, name, screen, attrs, sys, ws, ... } (per-connection registration)
-// Terminal identity key: "clientId|screen". Stable across agent reconnects —
-// the scrollback buffer and seq counter hang off this, so a reconnect (new
-// agent-N id) no longer resets history. Agents without a clientId (legacy
-// configs) fall back to "nokey|<screen>", which is still better than keying
-// on the per-connection agent id.
+// Terminal identity remains stable across agent reconnects.
 function terminalKey(attrs, screen) {
-  const cid = (attrs || {}).clientId || 'nokey';
-  return `${cid}|${screen || ''}`;
+  return `${attrs.clientId}|${screen}`;
 }
 const terminals = new Map(); // terminalKey -> { scrollback: [], scrollbackBytes: 0 }
 const browsers = new Map(); // ws -> { ws, agentIds: Set }
@@ -36,24 +32,6 @@ const SCROLLBACK_MAX = config.server.scrollbackMax || 2000000; // ~2MB scrollbac
 // O(n) Array.shift()/splice() on every single incoming chunk once the buffer
 // is full (which is most of the time under any sustained output).
 const SCROLLBACK_TRIM_MARGIN = Math.max(20000, Math.round(SCROLLBACK_MAX * 0.1));
-// Chunks of scrollback replayed to a browser on connect. Configurable via
-// config.server.scrollbackInit — kept modest by default (older history is
-// available on demand via scrollback_more) since every chunk here is a
-// synchronous ws.send() cost paid at connect time (see sendScrollbackReplay).
-const SCROLLBACK_INIT = config.server.scrollbackInit || 3000;
-// A *byte* cap on top of the chunk-count one above. Chunk sizes vary wildly —
-// a chunk can be a few bytes (one keystroke's echo) or tens of KB (a big PTY
-// read) — so "last 3000 chunks" alone doesn't reliably bound how much data a
-// browser has to receive, base64-decode, and hand to xterm.js to parse/render
-// before the terminal feels ready. Whichever limit is hit first wins.
-const SCROLLBACK_INIT_BYTES = config.server.scrollbackInitBytes || 600000;
-const SCROLLBACK_PAGE = 500;    // chunks per lazy-load request
-// How many scrollback chunks to send per event-loop tick during replay. Node
-// is single-threaded — a tight loop sending thousands of chunks synchronously
-// would freeze EVERY other connection (all agents' live output, all other
-// browsers, HTTP requests) for the duration. Batching + yielding via
-// setImmediate keeps each pause small regardless of how much history there is.
-const SCROLLBACK_SEND_BATCH = 200;
 const LAST_OUTPUT_MAX = 10000; // keep last 10KB for status preview
 const LAST_LINES_COUNT = 3;    // show last 3 lines in dashboard
 
@@ -113,21 +91,9 @@ function nextSeq() {
   return ms * 1024 + (++seqCounter);
 }
 
-// Replay an agent's buffered scrollback to a browser in small batches, yielding
-// to the event loop between each so a large history doesn't stall every other
-// connection on the server (see SCROLLBACK_SEND_BATCH). Wire format is
-// unchanged — same `data`/`scrollback_info`/`scrollback_end` messages, just
-// paced. `done` fires when finished, including when there's nothing to send.
-//
-// sinceSeq enables incremental replay: only chunks with seq > sinceSeq are
-// sent (mode:'delta'). Snapshot-capable agents use a state snapshot when the
-// buffered gap is incomplete; legacy agents retain the old tail behavior.
-// seq always rides along on replayed `data` frames so the browser can pick up
-// its lastSeq from either mode.
 const { createTerminalReplay } = require('./terminal-replay');
-const { sendScrollbackReplay, pendingSnapshots, canReplayDelta, sendSnapshotReplay, claimTerminalSize, releaseTerminalOwner, cancelSocket } = createTerminalReplay({
-  agents, terminals, browsers, terminalKey, limits: { SCROLLBACK_INIT, SCROLLBACK_INIT_BYTES, SCROLLBACK_SEND_BATCH }
-});
+const { subscribe, pendingSnapshots, claimTerminalSize, releaseTerminalOwner, cancelSocket } =
+  createTerminalReplay({ agents, browsers });
 
 function getAgentsList(user) {
   return Array.from(agents.values())
@@ -139,8 +105,7 @@ function getAgentsList(user) {
         id: a.id,
         name: a.name,
         screen: a.screen || '',
-        snapshotV1: a.snapshotV1,
-        nativeTui: a.nativeTui,
+        protocolVersion: a.protocolVersion,
         attrs: a.attrs || {},
         sys: a.sys || {},
         connectedAt: a.connectedAt,
@@ -319,6 +284,13 @@ wss.on('connection', (ws) => {
         ws.close();
         return;
       }
+      if (msg.protocolVersion !== PROTOCOL_VERSION ||
+          typeof msg.attrs?.clientId !== 'string' || !msg.attrs.clientId ||
+          typeof msg.screen !== 'string' || !msg.screen || !validSize(msg.cols, msg.rows)) {
+        ws.send(JSON.stringify({ type: 'error', message: `Agent protocol ${PROTOCOL_VERSION} required; upgrade client and dependencies` }));
+        ws.close();
+        return;
+      }
       if (agents.size >= MAX_AGENTS) {
         console.log(`[!] Agent registration rejected: at MAX_AGENTS (${MAX_AGENTS})`);
         ws.send(JSON.stringify({ type: 'error', message: 'Server at max agent capacity' }));
@@ -345,8 +317,7 @@ wss.on('connection', (ws) => {
         screen: msg.screen || '',
         attrs: msg.attrs || {},
         sys: msg.sys || {},
-        snapshotV1: msg.snapshotV1 === true,
-        nativeTui: msg.nativeTui === true,
+        protocolVersion: PROTOCOL_VERSION,
         // sha256 of the agent's file copies (push-update versioning); at
         // register this equals the running version; query_files refreshes
         // update it to fresh DISK state afterwards. runningHashes stays the
@@ -367,9 +338,11 @@ wss.on('connection', (ws) => {
         term = { scrollback: [], scrollbackBytes: 0 };
         terminals.set(tKey, term);
       }
+      term.scrollback = [];
+      term.scrollbackBytes = 0;
       info.term = term;
-      term.cols = Number.isInteger(msg.cols) ? msg.cols : 200;
-      term.rows = Number.isInteger(msg.rows) ? msg.rows : 50;
+      term.cols = msg.cols;
+      term.rows = msg.rows;
       term.sizeOwner = null;
       info.lastSeq = term.scrollback.length > 0 ? term.scrollback[term.scrollback.length - 1].seq : null;
       agents.set(ws, info);
@@ -453,7 +426,7 @@ wss.on('connection', (ws) => {
       const seq = nextSeq();
       agentInfo.lastSeq = seq;
       const sb = agentInfo.term.scrollback;
-      sb.push({ payload: msg.payload, seq, filtered: msg.filtered === true });
+      sb.push({ payload: msg.payload, seq });
       agentInfo.term.scrollbackBytes = (agentInfo.term.scrollbackBytes || 0) + msg.payload.length;
       if (agentInfo.term.scrollbackBytes > SCROLLBACK_MAX + SCROLLBACK_TRIM_MARGIN) {
         let dropCount = 0, freed = 0;
@@ -471,7 +444,7 @@ wss.on('connection', (ws) => {
       // otherwise interleave with older frames still being replayed — the
       // browser then draws history on top of the live screen. Hold this
       // agent's live frames per-browser until its replay finishes.
-      const payload = JSON.stringify({ type: 'data', payload: msg.payload, agentId: agentInfo.id, seq, filtered: msg.filtered === true });
+      const payload = JSON.stringify({ type: 'data', payload: msg.payload, agentId: agentInfo.id, seq });
       for (const [bws, binfo] of browsers) {
         if (!binfo.agentIds.has(agentInfo.id) || bws.readyState !== bws.OPEN) continue;
         if (binfo.replaying && binfo.replaying.has(agentInfo.id)) {
@@ -494,10 +467,10 @@ wss.on('connection', (ws) => {
       binfo.activeSnapshots.delete(ainfo.id);
       const anchor = ainfo.lastSeq || null;
       if (bws.readyState === bws.OPEN && binfo.agentIds.has(ainfo.id) &&
-          typeof msg.payload === 'string' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) {
+          typeof msg.payload === 'string' && validParserState(msg.parserState, msg.cols, msg.rows)) {
         bws.send(JSON.stringify({ type: 'terminal_snapshot', agentId: ainfo.id, payload: msg.payload,
           cols: msg.cols, rows: msg.rows, parserState: msg.parserState, seq: anchor }));
-        bws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id, lastSeq: anchor, snapshot: true }));
+        bws.send(JSON.stringify({ type: 'terminal_ready', agentId: ainfo.id, lastSeq: anchor, snapshot: true }));
         const queued = binfo.pendingLive && binfo.pendingLive.get(ainfo.id);
         if (queued) for (const frame of queued) {
           if (!anchor || JSON.parse(frame).seq > anchor) bws.send(frame);
@@ -641,25 +614,8 @@ wss.on('connection', (ws) => {
         binfo.agentIds = new Set([msg.agentId]);
         releaseTerminalOwner(ws, [...previousIds].filter(id => id !== msg.agentId));
         console.log(`[*] Browser watching agent: ${msg.agentId} (resume: ${!!msg.resume}, sinceSeq: ${msg.sinceSeq ?? '-'})`);
-        // Snapshot-capable agents restore state on a fresh connect or a gap;
-        // continuous resumes use the smaller seq delta.
-        const ainfo = msg.agentId ? [...agents.values()].find(a => a.id === msg.agentId) : null;
-        if (ainfo) {
-          const resized = ainfo.snapshotV1 && claimTerminalSize(ws, ainfo, msg.cols, msg.rows);
-          if (resized) {
-            // claimTerminalSize already requested snapshots for every watcher.
-          } else if (ainfo.snapshotV1 && (!msg.resume || !canReplayDelta(ainfo, msg.sinceSeq))) {
-            sendSnapshotReplay(ws, ainfo);
-          } else if (!msg.resume) {
-            sendScrollbackReplay(ws, ainfo, () => {});
-          } else {
-            // Track the browser's position per agent so later resumes from
-            // this connection can pick up where this replay ends.
-            if (!binfo.lastSeq) binfo.lastSeq = new Map();
-            binfo.lastSeq.set(msg.agentId, Number.isFinite(msg.sinceSeq) ? msg.sinceSeq : 0);
-            sendScrollbackReplay(ws, ainfo, () => {}, msg.sinceSeq || 0);
-          }
-        }
+        const ainfo = [...agents.values()].find(a => a.id === msg.agentId);
+        if (ainfo) subscribe(ws, ainfo, msg);
       }
     }
 
@@ -670,32 +626,10 @@ wss.on('connection', (ws) => {
         binfo.agentIds = new Set(msg.agentIds);
         releaseTerminalOwner(ws, [...previousIds].filter(id => !binfo.agentIds.has(id)));
         console.log(`[*] Browser watching ${msg.agentIds.length} agents: ${msg.agentIds.join(', ')} (resume: ${!!msg.resume})`);
-        // Fresh connect: full replay per agent. Resume: incremental per agent
-        // (sinceSeqs maps agentId -> lastSeq; agents missing from the map get 0,
-        // i.e. the full recent window).
-        const sinceSeqs = msg.resume && msg.sinceSeqs && typeof msg.sinceSeqs === 'object' ? msg.sinceSeqs : null;
-        if (!msg.resume || sinceSeqs) {
-          // Each agent's replay is independently paced (sendScrollbackReplay) and
-          // kicked off without waiting on the others, so they interleave fairly
-          // across event-loop ticks instead of one agent's history blocking the rest.
-          for (const agentId of msg.agentIds) {
-            const ainfo = [...agents.values()].find(a => a.id === agentId);
-            if (ainfo && (!msg.resume || sinceSeqs)) {
-              const size = msg.sizes && msg.sizes[agentId];
-              const resized = ainfo.snapshotV1 && claimTerminalSize(ws, ainfo, size && size.cols, size && size.rows);
-              if (resized) {
-                // Already requested a new-size snapshot for every watcher.
-              } else if (ainfo.snapshotV1 && (!msg.resume || !canReplayDelta(ainfo, sinceSeqs && sinceSeqs[agentId]))) {
-                sendSnapshotReplay(ws, ainfo);
-              } else if (msg.resume && sinceSeqs) {
-                if (!binfo.lastSeq) binfo.lastSeq = new Map();
-                binfo.lastSeq.set(agentId, Number.isFinite(sinceSeqs[agentId]) ? sinceSeqs[agentId] : 0);
-                sendScrollbackReplay(ws, ainfo, () => {}, sinceSeqs[agentId] || 0);
-              } else {
-                sendScrollbackReplay(ws, ainfo, () => {});
-              }
-            }
-          }
+        for (const agentId of binfo.agentIds) {
+          const ainfo = [...agents.values()].find(a => a.id === agentId);
+          if (ainfo) subscribe(ws, ainfo, { ...msg.sizes?.[agentId],
+            resume: msg.resume, sinceSeq: msg.sinceSeqs?.[agentId] });
         }
       }
     }
@@ -710,29 +644,6 @@ wss.on('connection', (ws) => {
       }
     }
 
-    if (role === 'browser' && msg.type === 'scrollback_more') {
-      // Lazy load: browser requests older chunks
-      for (const [, ainfo] of agents) {
-        if (ainfo.id === msg.agentId) {
-          const from = Math.max(0, msg.fromIndex - SCROLLBACK_PAGE);
-          const chunks = [];
-          for (let i = from; i < msg.fromIndex; i++) {
-            chunks.push(ainfo.term.scrollback[i]);
-          }
-          ws.send(JSON.stringify({
-            type: 'scrollback_data',
-            agentId: ainfo.id,
-            chunks,
-            fromIndex: from,
-            toIndex: msg.fromIndex,
-            hasMore: from > 0
-          }));
-          console.log(`[*] Sent scrollback batch ${from}-${msg.fromIndex} (${chunks.length} chunks)`);
-          break;
-        }
-      }
-    }
-
     if (role === 'browser' && msg.type === 'data') {
       const binfo = browsers.get(ws);
       if (!binfo || binfo.agentIds.size === 0) return;
@@ -740,7 +651,7 @@ wss.on('connection', (ws) => {
       // Find the agent ws and forward
       for (const [aws, ainfo] of agents) {
         if (ainfo.id === msg.agentId && aws.readyState === aws.OPEN) {
-          if (ainfo.snapshotV1) claimTerminalSize(ws, ainfo, msg.cols, msg.rows);
+          claimTerminalSize(ws, ainfo, msg.cols, msg.rows);
           aws.send(JSON.stringify({ type: 'data', payload: msg.payload }));
           break;
         }
@@ -753,8 +664,7 @@ wss.on('connection', (ws) => {
       if (!msg.agentId || !binfo.agentIds.has(msg.agentId)) return;
       for (const [aws, ainfo] of agents) {
         if (ainfo.id === msg.agentId && aws.readyState === aws.OPEN) {
-          if (ainfo.snapshotV1) claimTerminalSize(ws, ainfo, msg.cols, msg.rows);
-          else aws.send(JSON.stringify({ type: 'resize', cols: msg.cols, rows: msg.rows }));
+          claimTerminalSize(ws, ainfo, msg.cols, msg.rows);
           break;
         }
       }

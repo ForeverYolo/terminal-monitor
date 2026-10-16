@@ -1,31 +1,7 @@
-// Shared terminal output filter: agent snapshot and browser legacy streams use identical rules.
 'use strict';
-// Virtualize the alternate screen so the browser can keep one scrollback
-// buffer.  On exit, clear only the visible viewport (not scrollback) and reset
-// SGR attributes; otherwise Claude's inverse-video notifications can remain on
-// the shell prompt after the TUI exits.
-//
-// Each terminal stream needs its own filter instance (createAltScreenFilter).
-// The filter is stateful: an escape sequence split across two WebSocket chunks
-// is buffered until the rest arrives, then matched as a whole.  Without this,
-// a split sequence misses the exact match and passes through unfiltered, and
-// xterm switches buffers behind the TUI's back — every later incremental
-// redraw then lands on the wrong canvas and overlays old frames.
-// Legacy mode strips these private enable/disable switches from output:
-// normal(1000), button(1002), any-motion(1003), focus(1004), utf8(1005),
-// sgr(1006), alt-scroll(1007), urxvt(1015), sgtpix(1016). Legacy xterm must not
-// enter mouse/focus tracking: TUI apps (claude) that enable it expect the
-// terminal to deliver events, but GNU screen between us and the app mangles
-// SGR mouse sequences — the app then receives coordinate tails like "31;6M"
-// as literal text.  With tracking suppressed, mouse actions stay native in
-// the browser (selection, wheel scroll) and no event bytes are ever produced.
-const MOUSE_REPORT_MODE = /^(100[0-7]|101[56])$/;
-
-function createAltScreenFilter(options = {}) {
-  // Direct native terminals are byte-preserving. Screen relays virtualize the
-  // outer alternate buffer while retaining the application mouse/cursor modes.
-  const nativeTui = options.nativeTui === true;
-  if (nativeTui && !options.screenRelay) return bytes => bytes;
+// Screen owns the outer alternate buffer. Keep browser scrollback while
+// preserving application mouse, cursor and graphics modes. One filter per PTY.
+function createAltScreenFilter() {
   let pending = null;  // head of an escape sequence split across chunks
   let orphanTail = false;  // dropping a BEL-split title garbage tail across chunks
   let orphanCount = 0;
@@ -53,9 +29,7 @@ function createAltScreenFilter(options = {}) {
     }
     const len = data.length;
     if (len === 0) return data;
-    // An 8-byte alt-screen exit is replaced by an 11-byte reset/clear/home
-    // sequence.  Twice the input size safely covers multiple exits in a chunk.
-    const result = new Uint8Array(len * 2 + 16);
+    const result = new Uint8Array(len);
     let out = 0;
     let i = 0;
     while (i < len) {
@@ -97,42 +71,17 @@ function createAltScreenFilter(options = {}) {
           pending = data.slice(i);
           break;
         }
-        // ESC [ ? <mode> h/l — private mode switches.  Drop mouse/focus
-        // reporting switches (see MOUSE_REPORT_MODE above) so tracking is
-        // never enabled.  The enabling app simply never receives mouse bytes,
-        // which is the safest steady state on this relayed link.
+        // Remove only Screen's outer alternate-buffer switches, including
+        // combined private-mode commands; retain all application modes.
         if (data[i + 2] === 0x3f && (data[end] === 0x68 || data[end] === 0x6c)) {
-          const mode = String.fromCharCode(...data.slice(i + 3, end));
-          if (nativeTui) {
-            // Screen owns the outer alternate buffer for the whole attachment,
-            // including shell time. Virtualize only those switches, retaining
-            // the application's mouse, focus and cursor modes in the main
-            // buffer so wheel ownership follows the actual mouse protocol.
-            const modes = mode.split(';');
-            const kept = modes.filter(value => !['47', '1047', '1049'].includes(value));
-            if (kept.length !== modes.length) {
-              if (kept.length) {
-                const replacement = `\x1b[?${kept.join(';')}${String.fromCharCode(data[end])}`;
-                result.set(Uint8Array.from(replacement, c => c.charCodeAt(0)), out);
-                out += replacement.length;
-              }
-              i = end + 1;
-              continue;
+          const modes = String.fromCharCode(...data.slice(i + 3, end)).split(';');
+          const kept = modes.filter(value => !['47', '1047', '1049'].includes(value));
+          if (kept.length !== modes.length) {
+            if (kept.length) {
+              const replacement = `\x1b[?${kept.join(';')}${String.fromCharCode(data[end])}`;
+              result.set(Uint8Array.from(replacement, c => c.charCodeAt(0)), out);
+              out += replacement.length;
             }
-          }
-          // Claude draws its text cursor as a one-cell reverse-video block and
-          // also hides xterm's native cursor while the TUI is active.  Reverse
-          // video is filtered below because it turns the virtual scrollback
-          // into large background-colour blocks, so keep the native cursor
-          // visible as a reliable replacement.  Convert every hide request to
-          // show; the application still controls the cursor position.
-          if (!nativeTui && mode === '25' && data[end] === 0x6c) {
-            result.set([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x68], out);
-            out += 6;
-            i = end + 1;
-            continue;
-          }
-          if (!nativeTui && MOUSE_REPORT_MODE.test(mode)) {
             i = end + 1;
             continue;
           }
@@ -142,78 +91,6 @@ function createAltScreenFilter(options = {}) {
           i = end + 1;
           continue;
         }
-        // ESC [ ? 1049 h/l = alternate screen (1047 is the older variant).
-        // Suppress entry to preserve scrollback.  When leaving, reset graphics
-        // and erase only the viewport, which keeps history scrollable while
-        // removing the temporary TUI/white inverse-video status blocks.
-        if (end === i + 7 && data[i + 2] === 0x3f &&
-            data[i + 3] === 0x31 && data[i + 4] === 0x30 && data[i + 5] === 0x34 &&
-            (data[i + 6] === 0x39 || data[i + 6] === 0x37) &&
-            (data[i + 7] === 0x68 || data[i + 7] === 0x6c)) {
-          if (data[i + 7] === 0x6c) {
-            // ESC[0m (reset SGR), ESC[2J (erase display), ESC[H (home).
-            result.set([0x1b, 0x5b, 0x30, 0x6d, 0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x48], out);
-            out += 11;
-          }
-          i = end + 1;
-          continue;
-        }
-
-        // Claude uses reverse video and explicit ANSI background colours for
-        // transient badges/status bars.  In the virtual main buffer these become
-        // persistent white/red blocks in scrollback.  Keep text, foreground
-        // colours and other attributes, but remove background-related SGR flags.
-        if (!nativeTui && data[end] === 0x6d) { // CSI ... m
-          const params = String.fromCharCode(...data.slice(i + 2, end)).split(';');
-        const kept = [];
-        let changed = false;
-        for (let p = 0; p < params.length; p++) {
-          const value = params[p];
-          // Do not mistake indexed/true-colour values (for example 38;5;7)
-          // for the reverse-video flag.
-          if (value === '48' || value.startsWith('48:') ||
-              /^(4[0-9]|10[0-7])$/.test(value)) {
-            // 40-49/100-107 are standard backgrounds; 48 is extended
-            // background colour (48;5;n or 48;2;r;g;b).
-            changed = true;
-            if (value === '48') {
-              if (params[p + 1] === '5') {
-                p += Math.min(2, params.length - p - 1);
-              } else if (params[p + 1] === '2') {
-                p += Math.min(4, params.length - p - 1);
-              }
-            }
-          } else if (value === '38' || value === '58') {
-            kept.push(value);
-            if (params[p + 1] === '5') {
-              kept.push(params[++p]);
-              if (p + 1 < params.length) kept.push(params[++p]);
-            } else if (params[p + 1] === '2') {
-              kept.push(params[++p]);
-              for (let n = 0; n < 3 && p + 1 < params.length; n++) kept.push(params[++p]);
-            }
-          } else if (value === '7' || value === '27') {
-            changed = true;
-          } else {
-            kept.push(value);
-          }
-        }
-        if (changed && kept.length > 0) {
-          result.set([0x1b, 0x5b], out);
-          out += 2;
-          for (let p = 0; p < kept.length; p++) {
-            const value = kept[p];
-            for (const ch of value) result[out++] = ch.charCodeAt(0);
-            if (p < kept.length - 1) result[out++] = 0x3b;
-          }
-          result[out++] = 0x6d;
-        } else if (!changed) {
-          result.set(data.slice(i, end + 1), out);
-          out += end + 1 - i;
-        }
-        i = end + 1;
-        continue;
-      }
       }
       // ESC ] = OSC.  GNU screen re-encodes the multibyte spinner characters in
       // claude's window-title updates ("<spinner> Unfurling…") as mojibake whose
@@ -286,8 +163,7 @@ function createAltScreenFilter(options = {}) {
 // GNU Screen 4.09 can request SGR reports on its display yet consume only the
 // classic six-byte mouse reports on input. Convert at the PTY boundary, where
 // bytes can stay binary instead of being UTF-8 encoded by the browser.
-function encodeScreenInput(text, nativeTui = false) {
-  if (!nativeTui) return text;
+function encodeScreenInput(text) {
   const chunks = [];
   const pattern = /\x1b\[<(\d+);(\d+);(\d+)([Mm])|\x1b\[M([\s\S]{3})|\x1b\[(\d+);(\d+);(\d+)M/g;
   let offset = 0;
@@ -315,4 +191,4 @@ function encodeScreenInput(text, nativeTui = false) {
   return Buffer.concat(chunks);
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { createAltScreenFilter, encodeScreenInput };
+module.exports = { createAltScreenFilter, encodeScreenInput };

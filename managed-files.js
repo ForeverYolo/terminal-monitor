@@ -7,6 +7,7 @@
   "spawn-validator.js",
   "config-loader.js",
   "terminal-state.js",
+  "terminal-protocol.js",
   "terminal-filter.js",
   "managed-files.js",
   "file-update.js",

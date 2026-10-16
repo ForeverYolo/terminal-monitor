@@ -28,11 +28,11 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  execFileSync('screen',['-dmS',session,'python3',path.join(dir,'bin/run-task.py')]);
  const scfg=path.join(dir,'server.json'),ccfg=path.join(dir,'client.json');
  fs.writeFileSync(scfg,JSON.stringify({mode:'server',server:{host:'127.0.0.1',port,password:'pw',tokens:{token:{user:'test'}},supervisor:{enabled:false}}}));
- fs.writeFileSync(ccfg,JSON.stringify({mode:'client',client:{serverUrl:`ws://127.0.0.1:${port}`,token:'token',name:'native-test',screen:session,clientId:'native-test',nativeTui:true}}));
+ fs.writeFileSync(ccfg,JSON.stringify({mode:'client',client:{serverUrl:`ws://127.0.0.1:${port}`,token:'token',name:'native-test',screen:session,clientId:'native-test'}}));
  server=spawn(process.execPath,[path.join(project,'server.js'),`--config=${scfg}`],{cwd:project});server.stdout.on('data',x=>serverLog+=x);server.stderr.on('data',x=>serverLog+=x);
  await until(async()=> (await fetch(`http://127.0.0.1:${port}/api/agents`)).ok);
  client=spawn(process.execPath,[path.join(project,'client.js'),`--config=${ccfg}`],{cwd:project});client.stdout.on('data',x=>clientLog+=x);client.stderr.on('data',x=>clientLog+=x);
- await until(async()=>{const a=(await(await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents;return a.some(x=>x.nativeTui===true);});
+ await until(async()=>{const a=(await(await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents;return a.some(x=>x.protocolVersion===2);});
  browser=await launchBrowser();
  const errors=[];
  async function openPage(){

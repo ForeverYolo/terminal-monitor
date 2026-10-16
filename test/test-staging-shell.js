@@ -6,7 +6,7 @@ const {TerminalState}=require('../terminal-state');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'swt-staging-shell-'));
 const session=`swt-shell-${process.pid}`;
 let attachment;
-const term=new TerminalState(120,30,()=>{},{nativeTui:true});
+const term=new TerminalState(120,30,()=>{});
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const view=()=>new Promise(r=>term.snapshot(()=>{const b=term.term.buffer.active;r(Array.from({length:b.length},(_,i)=>b.getLine(i).translateToString(true)));}));
 async function until(fn){const end=Date.now()+10000;while(Date.now()<end){if(await fn())return;await delay(100);}throw Error('timeout');}

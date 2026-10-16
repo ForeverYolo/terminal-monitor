@@ -123,7 +123,6 @@ function setTermViewMode(mode) {
     toggle.textContent = '结构';
     // Refit xterm to real size + re-send resize (it was hidden while sizing)
     if (singleSession) singleSession.scope.debounce('structured-fit', () => {
-      if (fitAddon && term && !isSnapshotAgent(currentAgentId)) { try { fitAddon.fit(); } catch {} }
       if (ws && ws.readyState === WebSocket.OPEN && term) {
         sendViewportResize(currentAgentId, proposedSize(fitAddon, term));
       }
@@ -200,7 +199,7 @@ function focusMobileInput() {
 // mouse wheel would, with no dependency on touch gesture handling at all.
 function scrollTermPages(n) {
   if (!term) return;
-  if (isNativeTuiAgent(currentAgentId) && applicationOwnsScrolling(term)) {
+  if (applicationOwnsScrolling(term)) {
     send(n < 0 ? '\x1b[5~' : '\x1b[6~');
   } else term.scrollPages(n);
 }
@@ -268,24 +267,19 @@ function mobileSendEnter() {
 // height so that when the soft keyboard pushes up, the terminal view (and the
 // mobile toolbar inside it) shrinks instead of being obscured. On desktop,
 // visualViewport.height === innerHeight, so this is a harmless no-op there.
-// We also refit xterm within one animation frame so the terminal snaps to the
-// new size instead of lagging behind the debounce (which read as "jumping").
+// Size changes use the canonical PTY resize and snapshot path.
 (function () {
   const termView = document.getElementById('term-view');
   if (!termView || !window.visualViewport) return;
   const vv = window.visualViewport;
-  let fitScheduled = false;
   function syncTermHeight() {
     termView.style.height = vv.height + 'px';
     termView.style.bottom = 'auto';   // height drives sizing, not bottom:0
     termView.style.top = vv.offsetTop + 'px';
-    if (!fitScheduled) {
-      fitScheduled = true;
-      requestAnimationFrame(() => {
-        fitScheduled = false;
-        if (fitAddon && term && !isSnapshotAgent(currentAgentId)) { try { fitAddon.fit(); } catch {} }
-      });
-    }
+    if (singleSession) singleSession.scope.debounce('viewport-resize', () => {
+      if (term && ws && ws.readyState === WebSocket.OPEN)
+        sendViewportResize(currentAgentId, proposedSize(fitAddon, term));
+    }, 200);
   }
   vv.addEventListener('resize', syncTermHeight);
   vv.addEventListener('scroll', syncTermHeight);

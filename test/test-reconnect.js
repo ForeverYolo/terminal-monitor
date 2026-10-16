@@ -7,7 +7,7 @@
 //   - ticks produced during the outage remain in the agent's terminal model
 //   - after the server returns, a fresh browser restores them from a snapshot.
 //
-// Run: node test/test-offline-queue.js
+// Run: node test/test-reconnect.js
 'use strict';
 
 const fs = require('fs');
@@ -102,7 +102,7 @@ async function main() {
 
   // --- server returns ---
   server = startServer();
-  await sleep(6000); // client reconnects (backoff) + drains queue
+  await sleep(6000); // client reconnects (backoff) + snapshot readiness
 
   const pidAfter = fs.readFileSync(pidFile, 'utf8').trim();
   check('PTY survived reconnect (same fake-screen pid)', pidBefore === pidAfter, `${pidBefore} vs ${pidAfter}`);
@@ -131,7 +131,7 @@ async function main() {
       const m = JSON.parse(raw);
       if (m.type === 'data' && m.agentId === agentId) datas.push(Buffer.from(m.payload, 'base64').toString());
       if (m.type === 'terminal_snapshot' && m.agentId === agentId) snapshot = Buffer.from(m.payload, 'base64').toString();
-      if (m.type === 'scrollback_end' && m.agentId === agentId) res();
+      if (m.type === 'terminal_ready' && m.agentId === agentId) res();
     });
   });
   const text = snapshot + datas.join('');

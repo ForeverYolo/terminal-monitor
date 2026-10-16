@@ -49,7 +49,7 @@ async function main() {
   });
 
   ws.send(JSON.stringify({
-    type: 'register', token: TOKEN, name: 'regq-box', screen: 'scr',
+    type: 'register', protocolVersion: 2, token: TOKEN, name: 'regq-box', screen: 'scr',
     attrs: { clientId: 'c-regq' }, sys: {}, files: { 'client.js': 'OLDHASH' }, cols: 80, rows: 24
   }));
 

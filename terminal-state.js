@@ -8,31 +8,28 @@ const { createAltScreenFilter } = require('./terminal-filter');
 // server. Resize and snapshot operations wait for preceding writes to finish;
 // subsequent output waits behind them. This preserves cursor and wrap state.
 class TerminalState {
-  constructor(cols, rows, emit, options = {}) {
+  constructor(cols, rows, emit) {
     this.term = new Terminal({ allowProposedApi: true, cols, rows, scrollback: 5000 });
     this.serializer = new SerializeAddon();
     this.term.loadAddon(this.serializer);
-    this.filter = createAltScreenFilter(options);
-    this.nativeTui = options.nativeTui === true;
+    this.filter = createAltScreenFilter();
     // SerializeAddon 0.11 restores tracking, but omits mouse encoding and
     // cursor visibility. Record parsed switches (including split sequences)
     // so a fresh browser uses the same protocol after a snapshot.
     this.privateModes = new Map();
-    if (this.nativeTui) {
-      // Tracking (1000/1002/1003) is mutually exclusive and is already
-      // serialized from the effective terminal state by SerializeAddon.
-      const tracked = new Set([25, 1004, 1005, 1006, 1007, 1015, 1016]);
-      for (const [final, enabled] of [['h', true], ['l', false]]) {
-        this.term.parser.registerCsiHandler({ prefix: '?', final }, params => {
-          for (const mode of params) if (tracked.has(mode)) this.privateModes.set(mode, enabled);
-          return false;
-        });
-      }
-      this.term.parser.registerEscHandler({ final: 'c' }, () => {
-        this.privateModes.clear();
+    // Tracking (1000/1002/1003) is mutually exclusive and is already
+    // serialized from the effective terminal state by SerializeAddon.
+    const tracked = new Set([25, 1004, 1005, 1006, 1007, 1015, 1016]);
+    for (const [final, enabled] of [['h', true], ['l', false]]) {
+      this.term.parser.registerCsiHandler({ prefix: '?', final }, params => {
+        for (const mode of params) if (tracked.has(mode)) this.privateModes.set(mode, enabled);
         return false;
       });
     }
+    this.term.parser.registerEscHandler({ final: 'c' }, () => {
+      this.privateModes.clear();
+      return false;
+    });
     this.emit = emit;
     this.pending = 0;
     this.blocked = false;

@@ -45,7 +45,7 @@ async function main() {
     const ws = new WebSocket(URL);
     await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
     ws.send(JSON.stringify({
-      type: 'register', token: TOKEN, name: 'multi-box', screen,
+      type: 'register', protocolVersion: 2, token: TOKEN, name: 'multi-box', screen,
       attrs: { clientId: 'c-multi' }, sys: {}, files: { 'client.js': 'OLDHASH' }, cols: 80, rows: 24
     }));
     await sleep(200);

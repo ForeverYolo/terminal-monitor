@@ -6,7 +6,7 @@ const { SERVER_FILES } = require('./managed-files');
 function createHttpHandler({ root, config, agents, getSupervisor, hasPrompt, maxActionBody }) {
   const assets = new Map();
   const publicNames = SERVER_FILES.filter(name => name.startsWith('public/'));
-  for (const name of [...publicNames, 'terminal-filter.js', 'claude-detector.js', 'managed-files.js']) {
+  for (const name of [...publicNames, 'claude-detector.js', 'managed-files.js']) {
     const url = '/' + name.replace(/^public\//, '');
     const type = name.endsWith('.js') ? 'application/javascript' : name.endsWith('.css') ? 'text/css' : name.endsWith('.svg') ? 'image/svg+xml' : 'text/html';
     assets.set(url, { content: fs.readFileSync(path.join(root, name)), type });
@@ -32,7 +32,7 @@ function createHttpHandler({ root, config, agents, getSupervisor, hasPrompt, max
         id: a.id, name: a.name, screen: a.screen || '', attrs: a.attrs || {}, sys: a.sys || {},
         connectedAt: a.connectedAt, lastLines: a.lastOutput.split('\n').slice(-10).join('\n'),
         needsInput: hasPrompt(a.lastOutput), scrollbackSize: a.term ? a.term.scrollback.length : 0,
-        nativeTui: a.nativeTui, claudeState: a.claudeState || null, clientId: a.attrs?.clientId || null
+        protocolVersion: a.protocolVersion, claudeState: a.claudeState || null, clientId: a.attrs?.clientId || null
       }));
       json(res, 200, { time: new Date().toISOString(), agents: list });
       return;

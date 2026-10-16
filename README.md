@@ -162,7 +162,7 @@ bash restart.sh client mywork gpu-box        # gpu-box 上的 swt-client-mywork
 
 `restart.sh` 不指定目标时直接在脚本所在项目目录重启本机，无需部署配置或 SSH。指定 `deploy.targets.conf` 中的目标 label 时通过 SSH 重启远程服务；客户端必须指定对应的 Screen 会话名。脚本自动选择能加载项目依赖的 Node，重启前检查配置文件，并清理同一项目、同一配置的残留进程。
 
-客户端默认 `service` 只重启监控进程；`real` 和 `all` 会重建任务 Screen 并终止里面的任务。显式指定本机和 scope 的写法为 `bash restart.sh client monitor-1 --local service`。重启只应用磁盘上已有的代码和配置；启用原生 TUI 时，在对应 `config.client-<会话名>.json` 的 `client` 对象中设置 `"nativeTui": true` 后重启即可。
+客户端默认 `service` 只重启监控进程；`real` 和 `all` 会重建任务 Screen 并终止里面的任务。显式指定本机和 scope 的写法为 `bash restart.sh client monitor-1 --local service`。重启只应用磁盘上已有的代码和配置；终端统一启用原生 TUI，无需额外配置。
 
 ### 4.5 后台常驻
 
@@ -274,7 +274,7 @@ config.client-download.json  # 监控 download 会话
 
 ### 原生 TUI 翻页（可选）
 
-新版 Codex 的会话历史可能保存在应用内部，屏幕重绘不会产生可滚动的终端历史。可在对应 client 配置中设置 `"nativeTui": true`，重启 monitor client，保留鼠标协议，让应用自己处理滚轮和 PageUp/PageDown；虚拟化 Screen 显示端的备用屏幕，保留 shell 输出历史。默认关闭，沿用现有过滤方式；单终端和多终端均支持。
+新版 Codex 的会话历史可能保存在应用内部，屏幕重绘不会产生可滚动的终端历史。终端统一保留鼠标协议，让应用自己处理滚轮和 PageUp/PageDown；虚拟化 Screen 显示端的备用屏幕，保留 shell 输出历史。单终端和多终端均支持，无需配置开关。旧过滤模式已移除，服务端与所有 client 需要一起升级并安装依赖；旧协议 client 会被拒绝注册。
 
 原生模式下，应用启用鼠标跟踪时，上翻/下翻按钮发送翻页键，“最新”按钮禁用；退出到 shell 后，滚轮和这些按钮恢复操作浏览器历史。当前 Screen 4.09 的鼠标输入由 client 做兼容转换，超出 223 的点击坐标不支持。实现、实测结果及复现步骤见 [原生 TUI 模式说明](docs/native-tui-mode.md)。
 
@@ -362,7 +362,7 @@ screen -S swt-client-mywork -X quit    # 停止某客户端
 
 | 方向 | type | 字段 | 说明 |
 |------|------|------|------|
-| C→S | `register` | `token, name, screen, attrs, sys, cols, rows` | 注册并携带系统信息 |
+| C→S | `register` | `protocolVersion: 2, token, name, screen, attrs.clientId, sys, cols, rows` | 注册并携带系统信息 |
 | C→S | `data` | `payload` | 终端输出（base64） |
 | C→S | `ping` | — | 心跳 |
 | S→C | `data` | `payload` | 键盘输入（base64） |
@@ -381,11 +381,11 @@ screen -S swt-client-mywork -X quit    # 停止某客户端
 | B→S | `connect_multi` | `agentIds, resume` | 连接多台 |
 | B→S | `data` | `payload, agentId` | 键盘输入 |
 | B→S | `resize` | `cols, rows, agentId` | 尺寸变更 |
-| B→S | `scrollback_more` | `agentId, fromIndex` | 懒加载更早历史 |
 | S→B | `auth_ok` | `agents, user` | 登录成功 + 机器列表 |
 | S→B | `agents` | `agents` | 机器上下线 / 定时刷新（10s） |
 | S→B | `data` | `payload, agentId` | 终端输出（含历史回放） |
-| S→B | `scrollback_info` / `scrollback_data` / `scrollback_end` | — | 历史缓冲元信息与分块 |
+| S→B | `terminal_snapshot` / `terminal_snapshot_error` | `payload, cols, rows, parserState, seq` | 终端快照恢复或错误 |
+| S→B | `terminal_ready` | `agentId, lastSeq` | 快照或连续增量恢复完成 |
 | S→B | `error` | `message` | 错误 |
 
 ### 文件传输（`file_*` 系列）
@@ -454,7 +454,7 @@ terminal-monitor/
 ├── server.js / server-http.js          # WS 中继 / 静态资源与 HTTP API
 ├── terminal-replay.js                  # 历史恢复、快照与尺寸接管
 ├── client.js / file-transfer.js        # PTY 连接 / 文件传输
-├── terminal-state.js / terminal-filter.js
+├── terminal-state.js / terminal-filter.js / terminal-protocol.js
 ├── managed-files.js / file-update.js   # 共享更新清单与文件安装
 ├── config-loader.js / pending-requests.js
 ├── service-runtime.sh / service-restart.js

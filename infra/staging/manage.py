@@ -49,7 +49,7 @@ def package(ref, archive):
             'public/vendor/xterm.css': (deps / 'node_modules/xterm/css/xterm.css').read_bytes(),
             'public/vendor/xterm.js': (deps / 'node_modules/xterm/lib/xterm.js').read_bytes(),
             'public/vendor/xterm-addon-fit.js': (deps / 'node_modules/xterm-addon-fit/lib/xterm-addon-fit.js').read_bytes(),
-            'public/staging.json': json.dumps({'environment':'staging','commit':commit,'deployedAt':datetime.now(timezone.utc).isoformat(),'client':'2080','nativeTui':True}).encode(),
+            'public/staging.json': json.dumps({'environment':'staging','commit':commit,'deployedAt':datetime.now(timezone.utc).isoformat(),'client':'2080','protocolVersion':2}).encode(),
         }
         for name, data in extras.items():
             entry = tarfile.TarInfo(name); entry.size = len(data); entry.mode = 0o644
@@ -109,7 +109,7 @@ def main():
         release = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + commit[:8]
         server_cfg = temp / 'server.json'; client_cfg = temp / 'client.json'; settings = temp / 'settings.json'
         write_private(server_cfg, {'mode':'server','server':{'host':'127.0.0.1','port':args.server_port,'password':access['password'],'tokens':{access['token']:{'name':'staging-2080','user':access['username']}},'maxAgents':10,'supervisor':{'enabled':False}}})
-        write_private(client_cfg, {'mode':'client','client':{'serverUrl':f'ws://{args.server_host}/','token':access['token'],'name':'2080 · Codex 原生 TUI 测试','screen':'swt-staging-codex','screenMode':'auto','clientId':'staging-2080','nativeTui':True,'fileRoot':args.client_root+'/runtime/sandbox','attrs':{'tags':['staging','2080','native-tui']}}})
+        write_private(client_cfg, {'mode':'client','client':{'serverUrl':f'ws://{args.server_host}/','token':access['token'],'name':'2080 · Codex 原生 TUI 测试','screen':'swt-staging-codex','screenMode':'auto','clientId':'staging-2080','fileRoot':args.client_root+'/runtime/sandbox','attrs':{'tags':['staging','2080','native-tui']}}})
         task_environment = {key:args.task_proxy for key in ['HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy']} if args.task_proxy else {}
         task_environment.update({'NO_PROXY':f'localhost,127.0.0.1,{args.server_host}', 'no_proxy':f'localhost,127.0.0.1,{args.server_host}'})
         write_private(settings, {'node':args.client_node,'release':release,'commit':commit,'taskEnvironment':task_environment})

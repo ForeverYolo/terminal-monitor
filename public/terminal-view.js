@@ -76,7 +76,7 @@ function openTerminal(agentId, agentName) {
   document.getElementById('float-upload').style.display = 'block';
   document.getElementById('float-download').style.display = 'block';
   const overlay = document.getElementById('term-overlay');
-  overlay.textContent = agentName + (isNativeTuiAgent(agentId) ? ' · 原生 TUI' : '');
+  overlay.textContent = agentName + ' · 原生 TUI';
   updateNativeTuiControls();
   overlay.style.display = 'block';
   // Fade out overlay after 3s
@@ -84,7 +84,6 @@ function openTerminal(agentId, agentName) {
 
   const container = document.getElementById('term-container');
   container.innerHTML = '';
-  termFilter = createAltScreenFilter({ nativeTui: isNativeTuiAgent(agentId) });
 
   // Reset structured-view state for this agent
   structBuf = '';
@@ -124,9 +123,6 @@ function openTerminal(agentId, agentName) {
     // a 0×0 box would produce a degenerate size and send a bogus resize to the PTY.
     if (termViewMode === 'structured') return;
     if (container.clientWidth === 0 || container.clientHeight === 0) return;
-    session.scope.debounce('fit', () => {
-      if (!isSnapshotAgent(currentAgentId)) fitAddon.fit();
-    }, mobile ? 60 : 200);
     session.scope.debounce('resize', () => {
       if (term) sendViewportResize(currentAgentId, proposedSize(fitAddon, term));
     }, mobile ? 200 : 500);
@@ -156,7 +152,6 @@ function openTerminal(agentId, agentName) {
       const size = proposedSize(fitAddon, term);
       rememberRequestedSize(agentId, size);
       ws.send(JSON.stringify({ type: 'connect', agentId, ...size }));
-      if (!isSnapshotAgent(agentId)) ws.send(JSON.stringify({ type: 'resize', agentId, ...size }));
     });
   });
 

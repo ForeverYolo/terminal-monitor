@@ -34,7 +34,7 @@ function collect(ws, trigger) { return new Promise((resolve, reject) => {
   const timer = setTimeout(() => { ws.off('message', receive); reject(new Error('timeout: ' + serverLog.slice(-500))); }, 6000);
   function receive(raw) {
     const msg = JSON.parse(raw); messages.push(msg);
-    if (msg.type === 'scrollback_end') { clearTimeout(timer); ws.off('message', receive); resolve(messages); }
+    if (msg.type === 'terminal_ready') { clearTimeout(timer); ws.off('message', receive); resolve(messages); }
   }
   ws.on('message', receive); trigger();
 }); }
@@ -44,7 +44,7 @@ function contents(term) { const b = term.buffer.active; return Array.from({lengt
 (async () => {
   await sleep(500);
   const agent = await connect();
-  const model = new TerminalState(40, 8, payload => send(agent, {type: 'data', payload, filtered: true}));
+  const model = new TerminalState(40, 8, payload => send(agent, {type: 'data', payload}));
   agent.on('message', raw => {
     const msg = JSON.parse(raw);
     if (msg.type === 'resize') model.resize(msg.cols, msg.rows);
@@ -60,7 +60,7 @@ function contents(term) { const b = term.buffer.active; return Array.from({lengt
     }
   });
   send(agent, {type: 'register', token: 'token', name: 'box', screen: 's', attrs: {clientId: 'c'},
-    sys: {}, files: {}, snapshotV1: true});
+    sys: {}, files: {}, protocolVersion: 2, cols: 40, rows: 8});
   for (let i = 0; i < 60; i++) model.write(`line-${i}\r\n`);
   model.write('\x1b[3A\x1b[2K\x1b[5CX');
   await sleep(300);
@@ -88,7 +88,7 @@ function contents(term) { const b = term.buffer.active; return Array.from({lengt
   const live = until(browser, m => m.type === 'data' && m.agentId === id);
   model.write('\x1b[2A\x1b[8Ctail');
   const frame = await live;
-  assert(frame.filtered);
+  assert(!Object.hasOwn(frame, 'filtered'), 'obsolete filtering flag leaked');
   await write(restored, Buffer.from(frame.payload, 'base64'));
   await new Promise(resolve => model.term.write('', resolve));
   assert.deepStrictEqual(contents(restored), contents(model.term));

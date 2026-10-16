@@ -6,9 +6,9 @@ const crypto = require('crypto');
 const WebSocket = require('ws');
 const pty = require('node-pty');
 const { createFileTransfer } = require('./file-transfer');
-let TerminalState = null;
-try { ({ TerminalState } = require('./terminal-state')); }
-catch (e) { console.warn('[snapshot] renderer unavailable, using legacy output:', e.message); }
+const { TerminalState } = require('./terminal-state');
+const { PROTOCOL_VERSION } = require('./terminal-protocol');
+const { encodeScreenInput } = require('./terminal-filter');
 const { detectClaudeState } = require('./claude-detector');
 const { validateSpawnRequest, SPAWN_MAX_NODES } = require('./spawn-validator');
 const { loadConfig } = require('./config-loader');
@@ -78,9 +78,6 @@ if (!serverUrl || !token || !name) {
 }
 
 const screenName = screenSession || 'main';
-const nativeTui = config.client.nativeTui === true;
-const encodeScreenInput = nativeTui ? require('./terminal-filter').encodeScreenInput : text => text;
-
 // --- Stable per-machine clientId ---
 // Groups this client with any nodes it spawns via spawn_node (server.js target.clientId
 // routing, supervisor.js per-machine node counting). Persisted back into the config file
@@ -492,57 +489,6 @@ function stopHeartbeat() {
 
 let ptyGeneration = 0;  // incremented on every spawn; stale respawn timers no-op
 
-// --- Offline output queue ---
-// Legacy mode keeps a bounded output queue while disconnected. Snapshot mode
-// keeps that output in TerminalState instead; reconnecting browsers restore it
-// from the model and do not need a second copy sent over the wire.
-// Byte-capped: if a long outage exceeds the cap, the OLDEST data is dropped
-// (shift-like batch trim) — the tail (current screen state) matters more than
-// the head, and the server-side trim behaves the same way.
-const OFFLINE_QUEUE_MAX = 8 * 1024 * 1024; // 8MB
-const OFFLINE_QUEUE_TRIM = 1024 * 1024;    // drop 1MB in one batch when over
-let offlineQueue = [];
-let offlineQueueBytes = 0;
-
-function enqueueOffline(base64Payload) {
-  offlineQueue.push(base64Payload);
-  offlineQueueBytes += base64Payload.length;
-  if (offlineQueueBytes > OFFLINE_QUEUE_MAX + OFFLINE_QUEUE_TRIM) {
-    let freed = 0, dropped = 0;
-    while (offlineQueueBytes - freed > OFFLINE_QUEUE_MAX && dropped < offlineQueue.length - 1) {
-      freed += offlineQueue[dropped].length;
-      dropped++;
-    }
-    if (dropped > 0) {
-      offlineQueue.splice(0, dropped);
-      offlineQueueBytes -= freed;
-    }
-  }
-}
-
-// Drain the offline queue over an OPEN socket. setInterval paces the sends so
-// a huge backlog doesn't saturate one ws frame buffer / starve the event loop;
-// live data keeps flowing after the queue is empty because the onData path
-// sends directly once `offlineQueue` is drained.
-function drainOfflineQueue() {
-  if (offlineQueue.length === 0) return;
-  console.log(`[reconnect] replaying offline queue: ${offlineQueue.length} chunks (~${Math.round(offlineQueueBytes / 1024)}KB)`);
-  const pump = setInterval(() => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) { clearInterval(pump); return; }
-    let sent = 0;
-    while (offlineQueue.length > 0 && sent < 200) {
-      const chunk = offlineQueue.shift();
-      offlineQueueBytes -= chunk.length;
-      ws.send(JSON.stringify({ type: 'data', payload: chunk, filtered: nativeTui }));
-      sent++;
-    }
-    if (offlineQueue.length === 0) {
-      clearInterval(pump);
-      console.log('[reconnect] offline queue drained');
-    }
-  }, 10);
-}
-
 // Register handshake is async (hashSelfFiles reads the managed files from disk). The
 // server closes any connection whose first message isn't register, and a
 // freshly attached screen's initial redraw fires through onData immediately —
@@ -592,7 +538,7 @@ function connect() {
     // Spawn PTY with screen — unless it survived the disconnect (see the
     // keep-PTY logic in ws.on('close')); a fresh `screen -r` attach would
     // repaint one viewport and mark the gap as if nothing happened. The
-    // the terminal model (or legacy offline queue) covers that gap instead.
+    // terminal model covers that gap instead.
     if (!ptyProcess) spawnPty();
 
     // Register with server
@@ -607,27 +553,21 @@ function connect() {
         attrs: { ...(attrs || {}), clientId },
         sys: sysInfo,
         files,
-        snapshotV1: !!TerminalState,
-        nativeTui,
+        protocolVersion: PROTOCOL_VERSION,
         cols,
         rows
       }));
       flushOutbound();
-      // Queue replay must come AFTER register (server only accepts data from
-      // registered agents) and before subsequent live output — the onData path
-      // sends directly once the queue is empty, so start draining right away.
-      drainOfflineQueue();
     });
   });
 
   function spawnPty() {
     if (terminalState) terminalState.dispose();
-    terminalState = TerminalState ? new TerminalState(cols, rows, payload => {
+    terminalState = new TerminalState(cols, rows, payload => {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        sendRawOrQueue(JSON.stringify({ type: 'data', payload, filtered: true }));
+        sendRawOrQueue(JSON.stringify({ type: 'data', payload }));
       }
-    }, { nativeTui, screenRelay: true }) : null;
-    const fallbackFilter = nativeTui ? require('./terminal-filter').createAltScreenFilter({ nativeTui, screenRelay: true }) : bytes => bytes;
+    });
     if (ptyProcess) {
       try { ptyProcess.kill(); } catch {}
       ptyProcess.removeAllListeners('data');
@@ -657,18 +597,7 @@ function connect() {
       if (DEBUG_DUMP) dumpStream('OUT', data);
       oscTail = trackOscCwd(oscTail, data);
       pushOutput(data);
-      if (terminalState) {
-        terminalState.write(data);
-      } else {
-        const bytes = fallbackFilter(Buffer.from(data));
-        if (!bytes.length) return;
-        const payload = Buffer.from(bytes).toString('base64');
-        if (ws && ws.readyState === WebSocket.OPEN && offlineQueue.length === 0) {
-          sendRawOrQueue(JSON.stringify({ type: 'data', payload, filtered: nativeTui }));
-        } else {
-          enqueueOffline(payload);
-        }
-      }
+      terminalState.write(data);
     });
 
     ptyProcess.onExit(({ exitCode }) => {
@@ -694,7 +623,7 @@ function connect() {
     if (msg.type === 'data' && ptyProcess) {
       const input = Buffer.from(msg.payload, 'base64').toString('utf8');
       if (DEBUG_DUMP) dumpStream('IN', input);
-      ptyProcess.write(encodeScreenInput(input, nativeTui));
+      ptyProcess.write(encodeScreenInput(input));
     }
 
     if (msg.type === 'resize' && ptyProcess) {
@@ -825,7 +754,7 @@ function connect() {
     // mean: reconnect → fresh `screen -r` attach → screen repaints one
     // viewport → everything between the disconnect and reconnect was gone
     // except that one redraw. The terminal model now keeps the gap for a
-    // browser snapshot; legacy mode replays its offline queue on reconnect.
+    // browser snapshot after reconnect.
     // A surviving PTY must keep its generation: its eventual exit handler
     // still owns recovery. Only spawnPty increments the generation, which
     // also invalidates old respawn timers if reconnect creates a replacement.

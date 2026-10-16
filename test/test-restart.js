@@ -16,14 +16,14 @@ const fixture=`const fs=require('fs');
 let arg=process.argv.find(a=>a.startsWith('--config='));
 const file=arg?arg.slice(9):'config.json';
 const cfg=JSON.parse(fs.readFileSync(file));
-fs.writeFileSync(file+'.pid',JSON.stringify({pid:process.pid,nativeTui:cfg.client?.nativeTui}));
+fs.writeFileSync(file+'.pid',JSON.stringify({pid:process.pid,name:cfg.client?.name}));
 setInterval(()=>{},1000);`;
 function prepare(dir){
  fs.mkdirSync(dir,{recursive:true});for(const f of ['restart.sh','service-runtime.sh'])fs.copyFileSync(path.join(project,f),path.join(dir,f));
  fs.writeFileSync(path.join(dir,'client.js'),fixture);fs.writeFileSync(path.join(dir,'server.js'),fixture);
  fs.writeFileSync(path.join(dir,'terminal-state.js'),'module.exports={};');
  for(const dep of ['node-pty','ws']){fs.mkdirSync(path.join(dir,'node_modules',dep),{recursive:true});fs.writeFileSync(path.join(dir,'node_modules',dep,'index.js'),'module.exports={};');}
- for(const name of [session,sibling])fs.writeFileSync(path.join(dir,`config.client-${name}.json`),JSON.stringify({client:{nativeTui:true}}));
+ for(const name of [session,sibling])fs.writeFileSync(path.join(dir,`config.client-${name}.json`),JSON.stringify({client:{name:'restart-fixture'}}));
  fs.writeFileSync(path.join(dir,'config.json'),'{}');
 }
 function start(dir,args){const child=spawn(process.execPath,args,{cwd:dir,stdio:'ignore'});children.push(child);return child;}
@@ -55,7 +55,7 @@ async function run(dir,args,env={}){
  await until(()=>info(local,`config.client-${sibling}.json`));
  let result=await run(local,['client',session],env);assert.equal(result.code,0,result.out);
  assert(!fs.existsSync(sshLog),'local mode called SSH');assert(!fs.existsSync(path.join(local,'deploy.targets.conf')));
- const first=info(local,`config.client-${session}.json`);assert(first?.nativeTui);assert(alive(first.pid));
+ const first=info(local,`config.client-${session}.json`);assert(first?.name);assert(alive(first.pid));
  assert.equal(screenPid(session),task);assert(alive(siblingChild.pid));
  console.log('PASS default local restart without deploy config or SSH, quoted path, task/sibling preserved');
  // Leave an unattached duplicate process, as can happen after Screen SIGHUP.
@@ -68,7 +68,7 @@ async function run(dir,args,env={}){
  const cfg=path.join(local,`config.client-${session}.json`);fs.writeFileSync(cfg+'.stop','');
  result=await run(local,['client',session],env);assert.equal(result.code,0,result.out);assert(alive(second.pid));fs.unlinkSync(cfg+'.stop');
  fs.writeFileSync(cfg,'{invalid');result=await run(local,['client',session],env);assert.notEqual(result.code,0);assert(alive(second.pid));
- fs.writeFileSync(cfg,JSON.stringify({client:{nativeTui:true}}));
+ fs.writeFileSync(cfg,JSON.stringify({client:{name:'restart-fixture'}}));
  result=await run(local,['client',session,'--local','invalid'],env);assert.notEqual(result.code,0);assert(alive(second.pid));
  console.log('PASS stopped-node marker and invalid config/scope cause no service interruption');
  // Close the local fixture service before exercising the remote transport.

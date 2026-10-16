@@ -86,7 +86,7 @@ node infra/staging/smoke.js --recovery --escape --shell
 
 专用 task 使用一个父进程运行 Codex；正常退出或异常退出后恢复终端设置并进入测试 shell，Screen 窗口继续存在。shell 会显示原测试会话的恢复命令。可用 `node test/test-staging-shell.js` 验证程序退出、Esc 和 shell 输入。
 
-client 在 WebSocket 重连时保留 PTY 的有效 generation；仅当实际创建替代 PTY 时才更新 generation。否则旧 PTY 在重连后退出会被误判为过期事件，client 虽然在线却不会重新 attach。`test/test-offline-queue.js` 包含该场景的回归验证。
+client 在 WebSocket 重连时保留 PTY 的有效 generation；仅当实际创建替代 PTY 时才更新 generation。否则旧 PTY 在重连后退出会被误判为过期事件，client 虽然在线却不会重新 attach。`test/test-reconnect.js` 包含该场景的回归验证。
 
 公网验证已覆盖键盘 Esc 与工具栏 Esc：前端发送字节 `1b`，Codex 和 Screen 均继续运行。另在 broker 重连后主动结束显示端 PTY，验证重新 attach 并保持原窗口尺寸。此次修复前的日志记录了 Codex shutdown，但没有记录当时的输入字节，因此无法确定用户那次退出的具体按键路径。
 
@@ -97,3 +97,7 @@ client 在 WebSocket 重连时保留 PTY 的有效 generation；仅当实际创�
 `--shell` 用 Ctrl-C 退出空输入状态的专用 Codex，打印 240 行 shell 测试输出，验证滚轮、上翻按钮、“最新”、刷新快照，再进入/退出 Codex 验证历史保留。完成后重新进入原合成会话，供手动验收；不提交模型提示。
 
 2026-10-14：`9001e52a` 已部署；`--recovery --escape --shell` 公网验收共 16 项通过，测试结束保留原合成 Codex 会话。生产站点 HTTP 200，原 broker 进程继续运行。
+
+## 统一 TUI 版本
+
+测试 client 无需 `nativeTui` 配置。部署同时更新服务端和 client，协议版本固定为 2；`/api/agents` 和 `/staging.json` 可查看 `protocolVersion`。旧协议节点不能注册到该测试服。

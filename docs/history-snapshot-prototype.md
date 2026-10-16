@@ -12,7 +12,7 @@ agent 将经过共享过滤器的 PTY 输出同时送到 headless xterm 和 serv
 
 - `node test/test-terminal-snapshot.js`：比较持续渲染和“快照恢复 + 后续相对移动”的屏幕、历史行和光标。
 - `node test/test-snapshot-protocol.js`：验证首次快照、锚点前的竞争输出、实时续接、连续增量和缺口恢复。
-- `node test/test-offline-queue.js`：用真实 client/server、假 screen 验证 server 重启后快照包含断线期间输出。
+- `node test/test-reconnect.js`：用真实 client/server、假 screen 验证 server 重启后快照包含断线期间输出。
 - `test/test-real-screen-browser.js`：用专门创建的 GNU Screen 会话、真实 client/server 和 Chromium 验证历史、密集输出时连续 resize、浏览器断线重连、两个不同尺寸浏览器的打开/输入/窗口变化/关闭控制权切换，以及多终端页面接管；测试只绑定 `127.0.0.1`，结束时清理临时会话和进程。此项是可选测试，需要临时安装 Playwright 和 `xterm-addon-fit` 并设置 `PLAYWRIGHT_MODULE`、`XTERM_FIT_JS`、`PLAYWRIGHT_BROWSERS_PATH`。
 - 其余现有测试通过。另用终端模型对照测试发现并修复了 resize 越过待解析输出的顺序错误。
 

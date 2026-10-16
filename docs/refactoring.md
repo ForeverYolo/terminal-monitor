@@ -1,94 +1,68 @@
-# Project structure and upgrade notes
+# 项目结构与升级说明
 
-The refactor is developed on `refactor/project-structure`. The preceding TUI
-selection fix is a separate commit. No production rollout is implied by the
-staging deployment.
+本次重构在 `refactor/project-structure` 分支开发，已包含此前单独提交的 TUI 文本选择与复制修复。测试平台部署的是独立测试版本，生产环境的升级另行安排。
 
-## Responsibilities
+## 模块职责
 
-| Module | Responsibility |
+| 模块 | 职责 |
 | --- | --- |
-| `server.js` | WebSocket roles, registration, message routing and server startup |
-| `server-http.js` | Explicit static asset routes and HTTP APIs |
-| `terminal-replay.js` | Delta/snapshot replay, canonical size ownership and snapshot cancellation |
-| `pending-requests.js` | Update/pull request timeout and disconnected-owner cleanup |
-| `client.js` | Agent identity, Screen/PTY lifetime, registration and reconnect |
-| `file-transfer.js` | Per-connection upload/download streams and backpressure |
-| `file-update.js` | Shared hashing, full-batch validation and unique temporary file installation |
-| `managed-files.js` | One inventory for broker, agent, version badges and scp deployment |
-| `service-runtime.sh` | Exact Screen names, Node runtime probing and quoted service launch |
-| `service-restart.js` | Detached client/server restart and server rollback orchestration |
-| `config-loader.js` | Shared CLI configuration parsing for all three entry points |
-| `claude-detector.js` | Shared pure state detector for agent and phone structured view |
-| `public/connection.js` | Connection, terminal identity and protocol dispatch |
-| `public/terminal-session.js` | Shared terminal creation, input and disposable view work |
-| `public/terminal-view.js`, `multi-terminal.js` | Single/multi view layout, size handling and selection |
-| `public/file-browser.js`, `management.js`, `notifications.js`, `mobile.js` | Independent UI features |
-| `public/dashboard.js`, `bootstrap.js`, `app.css` | Dashboard, final startup and styles |
+| `server.js` | WebSocket 角色管理、节点注册、消息路由和服务启动 |
+| `server-http.js` | 按白名单提供静态资源及 HTTP API |
+| `terminal-protocol.js` | 协议版本、终端尺寸和快照解析器状态校验 |
+| `terminal-replay.js` | 增量回放、快照恢复、终端统一尺寸的控制权管理，以及快照请求取消 |
+| `pending-requests.js` | 更新、拉取请求的超时处理，以及浏览器断线后的请求清理 |
+| `client.js` | 节点身份、Screen/PTY 生命周期、注册和重连 |
+| `file-transfer.js` | 每条连接的上传、下载流及背压控制 |
+| `file-update.js` | 公共文件哈希计算、整批内容校验，以及使用独立临时文件安装更新 |
+| `managed-files.js` | 服务端、客户端、版本徽章和 SCP 部署共用的文件清单 |
+| `service-runtime.sh` | Screen 会话名精确匹配、Node 运行时探测，以及正确处理路径引用的服务启动 |
+| `service-restart.js` | 脱离当前进程执行客户端、服务端重启，以及服务端失败回滚 |
+| `config-loader.js` | 服务端、客户端和 AI 督工三个入口共用的命令行配置解析 |
+| `claude-detector.js` | 客户端与手机结构化视图共用的纯函数状态检测器 |
+| `public/connection.js` | 浏览器连接、终端身份管理和协议消息分发 |
+| `public/terminal-session.js` | 公共终端创建、输入处理，以及随视图销毁的资源管理 |
+| `public/terminal-view.js`、`public/multi-terminal.js` | 单终端、多终端布局、尺寸处理和文本选择 |
+| `public/file-browser.js`、`public/management.js`、`public/notifications.js`、`public/mobile.js` | 文件浏览、管理面板、通知和手机交互 |
+| `public/dashboard.js`、`public/bootstrap.js`、`public/app.css` | 仪表盘、页面初始化入口和样式 |
 
-The browser still needs no build. Explicit ordered classic `defer` scripts
-share the existing page state; this is a gradual separation by responsibility,
-not a rewrite into a framework. Bootstrap starts saved-login reconnect only
-after all feature scripts have loaded. Static serving is an explicit allowlist;
-it does not expose arbitrary project/config files.
+前端仍然无需构建。普通脚本使用 `defer` 按明确顺序执行，共享现有页面状态；代码按职责逐步拆分。所有功能脚本加载完毕后，初始化入口才会使用保存的登录信息发起重连。静态资源按明确的白名单提供，项目中的任意文件和配置文件不会因此被公开。
 
-## First upgrade across the old update allowlist
+## 从旧版首次升级
 
-Old agents only accept the original fixed filenames. They cannot install the
-new modules through the old web updater: validation rejects the batch before
-writing it. Upgrade the complete checkout on each server/agent using Git or
-`deploy.sh`, install dependencies, and restart the monitor services. The
-updated `deploy.sh` includes every runtime module and the service scripts.
-After this initial upgrade, web pull/push includes all split runtime assets.
+旧客户端的更新白名单只接受原有的固定文件名，无法通过旧版网页更新器安装新增模块。收到这类更新时，旧客户端会在写入文件前拒绝整批更新。
 
-Configuration, credentials and task Screen sessions are not part of the update
-inventory. Scripts/package files are scp/Git deployment files, not arbitrary
-web-updater targets. Merely extracting a browser script must include that file
-in `managed-files.js`, or the contract test fails.
+因此，首次升级需要在服务端和各客户端通过 Git 或 `deploy.sh` 完整同步代码、安装依赖，再重启监控服务。新版 `deploy.sh` 已包含全部运行模块和服务脚本。完成这次完整升级后，网页拉取、推送即可覆盖拆分后的全部运行资源。
 
-## Behavior fixes accompanying the refactor
+新版仅接受协议 2 的 client，服务端和所有 client 必须一起升级；不再支持旧版原始字节历史回放。原生 TUI 始终启用，`client.nativeTui` 已删除，旧配置中的残留字段不再读取。解析器依赖缺失时直接报错。
 
-- Supervisor startup is idempotent; shutdown cancels the delayed initial check
-  as well as recurring timers. The broker starts the supervisor once.
-- Closed terminal views cancel resize timers, delayed redraw and animation
-  callbacks. Mobile listeners belong to the view that installed them. The
-  pinned xterm 5.3 Viewport also needs its queued refresh callbacks neutralized
-  before its renderer is disposed; rapid-close browser tests cover this.
-- Update/pull requests expire at the broker and release disconnected browsers.
-  Snapshot requests cancel their timers when either endpoint disconnects.
-- Downloads poll WebSocket buffered bytes instead of waiting for a `drain`
-  event that WebSocket does not emit. Polling and streams stop on disconnect.
-  Upload acknowledgments wait for stream drain when necessary.
-- Self-restart passes paths/configuration as positional arguments and uses the
-  shared Screen primitives. Explicit external config paths are preserved.
-- `/api/action` now requires `Authorization: Bearer <agent-token>` and targets
-  only that token's user. Unauthenticated requests return 401. Public status
-  endpoints retain their existing behavior.
-- Unreferenced `doPaste`, duplicated browser detector rules, copied file lists,
-  hashing implementations and obsolete restart variables were removed. Private
-  configuration patterns are ignored for every session name; Git backup also
-  recognizes linked worktrees.
+配置、凭据和任务 Screen 会话不在更新清单中。运维脚本和依赖清单通过 SCP 或 Git 更新，网页更新器只接受指定的运行文件。以后拆出新的前端脚本时，也需要将它加入 `managed-files.js`，否则文件清单契约测试会失败。
 
-## Preserved boundaries
+## 随重构修复的行为问题
 
-Legacy replay, Screen compatibility and phone structured view remain supported.
-Supervisor recommendations and autonomous AI Overseer execution remain separate.
-No model request is made by the regression suite's Codex fixtures. Real Claude,
-physical mobile touch/IME and whole-machine reboot still require separate
-validation. Multi-file updates validate and stage all contents before rename;
-individual file replacement is atomic, the whole batch is not a filesystem
-transaction. Uploads continue writing their destination as before.
+- 监督器启动具备幂等性，重复调用不会创建多组定时器。停止时会取消首次延迟检查和所有周期任务；服务端也只启动监督器一次。
+- 关闭终端视图时，会取消尺寸调整定时器、延迟重绘和动画帧回调。手机端事件监听器由安装它的视图负责清理。固定使用的 xterm 5.3 中，Viewport 的排队刷新回调还需要在渲染器销毁前停止访问渲染器；快速关闭视图的浏览器测试覆盖了这一情况。
+- 服务端会让等待中的更新、拉取请求超时，并清理已经断开的浏览器引用。快照请求任意一端断线时，也会取消对应定时器。
+- 下载通过轮询 WebSocket 待发送字节数控制背压，避免等待 WebSocket 不会触发的 `drain` 事件。断线时停止轮询并关闭文件流；上传在必要时等待文件写入流的 `drain` 事件后再确认分块。
+- 自重启使用位置参数传递路径和配置，并共用 Screen 管理函数，保留显式指定的外部配置文件路径。
+- `/api/action` 现在要求请求头 `Authorization: Bearer <agent-token>`，仅允许向该令牌所属用户的节点发送输入。未鉴权请求返回 401；公开状态查询接口维持原有行为。
+- 删除了无调用的 `doPaste`、重复的浏览器状态检测规则、多处复制的文件清单与哈希实现，以及过时的重启变量。私有配置忽略规则覆盖所有会话名，Git 备份脚本也支持独立工作目录（worktree）。
 
-The known terminal snapshot gaps in `../KNOWN_TERMINAL_STATE_GAPS.md` are not
-filled by this refactor. xterm remains pinned to 5.3.0; selection and parser-state
-restoration rely on its private APIs and must be rechecked before an upgrade.
+## 保留的能力与限制
 
-## Verification of this change
+已删除旧客户端注册兼容、原始字节整段/尾部回放、历史分页、离线输出队列、前端重复过滤和尺寸抖动重绘。新会话使用快照，连续重连使用增量，缺口使用快照；agent 重连时丢弃可能不连续的服务端增量缓存，离线历史从 agent 的终端模型恢复。
 
-All 23 local test files passed in their groups: 9 unit/contract, 7 protocol,
-3 Screen/process, 3 browser, and 1 real Codex test. The browser scenarios cover
-single/multi selection and right-click copying, rapid view teardown, synthetic
-phone IME commit, canonical size handoff, reconnect, mode switching, shell
-history, and 7000 redraw updates with a concurrent snapshot. Restart tests use
-isolated Screen sockets for server rollback and quoted external config paths.
-This records the tested revision, not a promise that future changes pass.
+继续支持 Screen 鼠标协议转换、备用屏幕虚拟化，以及手机结构化视图。建议型监督器与自主执行的 AI 督工保持各自的职责。
+
+回归测试中的 Codex 测试夹具不会发起模型请求。真实 Claude、实体手机触摸和输入法，以及整机重启仍需单独验证。
+
+多文件更新会先校验并暂存整批内容，再执行重命名。单个文件替换是原子的，整批更新并不是文件系统事务。上传仍沿用直接写入目标文件的方式。
+
+本次重构没有补齐 [终端快照已知状态缺口](../KNOWN_TERMINAL_STATE_GAPS.md)。xterm 仍固定为 5.3.0；文本选择和解析器状态恢复依赖其私有接口，升级前需要重新核对。
+
+## 本轮验证结果
+
+全部 24 个本地测试文件已按组通过：10 个单元及契约测试、7 个协议测试、3 个 Screen 及进程测试、3 个浏览器测试，以及 1 个真实 Codex 测试。
+
+浏览器场景覆盖单终端、多终端选择和右键复制、快速关闭视图、模拟手机输入法提交、终端尺寸控制权切换、重连、无需配置的 TUI、shell 历史，以及同时获取快照时的 7000 次重绘更新。重启测试使用隔离的 Screen socket，验证服务端回滚，以及带引号的外部配置文件路径。
+
+这里记录的是本轮已验证版本的结果。后续改动仍需重新运行对应测试。

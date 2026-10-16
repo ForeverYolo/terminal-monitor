@@ -59,7 +59,7 @@ function openMultiTerminal() {
     container.appendChild(wrap);
 
     const entry = createTerminalSession(wrap.querySelector('.multi-term-container'), {
-      agentId, fontSize: 12, scrollback: 50000, legacyResize: true
+      agentId, fontSize: 12, scrollback: 50000
     });
     entry.scope.add(() => wrap.remove());
     entry.terminalKey = agent ? terminalKeyOf(agent) : null;
@@ -82,9 +82,7 @@ function openMultiTerminal() {
   scope.listen(window, 'resize', () => {
     scope.debounce('resize', () => {
       Object.values(multiTerms).forEach(t => {
-        if (isSnapshotAgent(t.agentId)) {
-          sendViewportResize(t.agentId, proposedSize(t.fitAddon, t.term));
-        } else t.fitAddon.fit();
+        sendViewportResize(t.agentId, proposedSize(t.fitAddon, t.term));
       });
     }, 200);
   });

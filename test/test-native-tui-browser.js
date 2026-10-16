@@ -18,11 +18,11 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  execFileSync('screen',['-dmS',session,'python3',path.join(project,'test/fixtures/native-tui.py'),events]);
  const scfg=path.join(dir,'server.json'),ccfg=path.join(dir,'client.json');
  fs.writeFileSync(scfg,JSON.stringify({mode:'server',server:{host:'127.0.0.1',port,password:'pw',tokens:{token:{user:'test'}},supervisor:{enabled:false}}}));
- fs.writeFileSync(ccfg,JSON.stringify({mode:'client',client:{serverUrl:`ws://127.0.0.1:${port}`,token:'token',name:'native-test',screen:session,clientId:'native-test',nativeTui:true}}));
+ fs.writeFileSync(ccfg,JSON.stringify({mode:'client',client:{serverUrl:`ws://127.0.0.1:${port}`,token:'token',name:'native-test',screen:session,clientId:'native-test'}}));
  server=spawn(process.execPath,[path.join(project,'server.js'),`--config=${scfg}`],{cwd:project});server.stdout.on('data',x=>serverLog+=x);server.stderr.on('data',x=>serverLog+=x);
  await until(async()=> (await fetch(`http://127.0.0.1:${port}/api/agents`)).ok);
  client=spawn(process.execPath,[path.join(project,'client.js'),`--config=${ccfg}`],{cwd:project});client.stdout.on('data',x=>clientLog+=x);client.stderr.on('data',x=>clientLog+=x);
- await until(async()=>{const a=(await(await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents;return a.some(x=>x.nativeTui===true);});
+ await until(async()=>{const a=(await(await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents;return a.some(x=>x.protocolVersion===2);});
  browser=await launchBrowser();
  const errors=[];
  async function openPage(viewport={width:1200,height:800}){
@@ -106,7 +106,8 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  await until(async()=>fs.existsSync(events)&&fs.readFileSync(events,'utf8').includes('wheel-'));
  const firstWheel=fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel'));
  assert(firstWheel.length);console.log('PASS browser wheel reaches app',firstWheel.map(x=>x.kind));
- const text=await page.evaluate(screenText);const oldPage=text.match(/page=(\d+)/)[1];
+ const oldPage=String(firstWheel.at(-1).page).padStart(4,'0');
+ await until(async()=>(await page.evaluate(screenText)).includes('page='+oldPage));
  await page.evaluate(()=>ws.close());await until(async()=>await page.evaluate(()=>ws.readyState===WebSocket.OPEN));
  await until(async()=>(await page.evaluate(screenText)).includes('page='+oldPage));
  assert.equal(await page.evaluate(()=>term.buffer.active.type),'normal');
@@ -141,23 +142,20 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  console.log('PASS wide terminal wheel with mouse coordinates above 127');
 
 
- async function restartClient(nativeTui){
+ async function restartClient(){
   const old=client;const exited=new Promise(r=>old.once('exit',r));old.kill();await exited;
-  const cfg=JSON.parse(fs.readFileSync(ccfg));cfg.client.nativeTui=nativeTui;fs.writeFileSync(ccfg,JSON.stringify(cfg));
   client=spawn(process.execPath,[path.join(project,'client.js'),`--config=${ccfg}`],{cwd:project});
   client.stdout.on('data',x=>clientLog+=x);client.stderr.on('data',x=>clientLog+=x);
-  await until(async()=>await page.evaluate(enabled=>isNativeTuiAgent(currentAgentId)===enabled,nativeTui));
  }
- await restartClient(false);
- await until(async()=>await page.evaluate(()=>term.buffer.active.type==='normal' && term.modes.mouseTrackingMode==='none'));
- assert(!(await page.locator('#btn-scroll-latest').isDisabled()));
- await restartClient(true);
+ const previousAgentId=await page.evaluate(()=>currentAgentId);
+ await restartClient();
+ await until(async()=>await page.evaluate(id=>currentAgentId!==id,previousAgentId));
  await until(async()=>await page.evaluate(()=>term.buffer.active.type==='normal' && term.modes.mouseTrackingMode!=='none'));
  assert(await page.locator('#btn-scroll-latest').isDisabled());
  const beforeToggleWheel=fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel')).length;
  const toggleBox=await page.locator('#term-container .xterm-screen').boundingBox();await page.mouse.move(toggleBox.x+80,toggleBox.y+80);await page.mouse.wheel(0,-100);
  await until(async()=>fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel')).length>beforeToggleWheel);
- console.log('PASS native/legacy/native configuration switching with browser still open');
+ console.log('PASS TUI enabled without configuration after client restart with browser still open');
 
  // Rapid close/reopen must cancel the old view's frame and resize work.
  await page.evaluate(()=>{

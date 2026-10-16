@@ -70,12 +70,12 @@ class MockAgent {
       this.ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
       this.ws.on('open', () => {
         this.ws.send(JSON.stringify({
-          type: 'register',
+          type: 'register', protocolVersion: 2,
           token: TOKEN,
           name: this.name,
           screen: this.screen,
           attrs: { clientId: this.clientId },
-          sys: { hostname: 'test' }
+          cols: 80, rows: 24, sys: { hostname: 'test' }
         }));
         resolve();
       });

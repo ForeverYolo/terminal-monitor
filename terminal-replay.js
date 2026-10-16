@@ -1,107 +1,60 @@
 'use strict';
 const crypto = require('crypto');
+const { validSize } = require('./terminal-protocol');
 
-function createTerminalReplay({ agents, terminals, browsers, terminalKey, limits }) {
-  const { SCROLLBACK_INIT, SCROLLBACK_INIT_BYTES, SCROLLBACK_SEND_BATCH } = limits;
-  function sendScrollbackReplay(ws, ainfo, done, sinceSeq) {
-    const term = terminals.get(terminalKey(ainfo.attrs, ainfo.screen)) || { scrollback: [] };
+function createTerminalReplay({ agents, browsers, batchSize = 200 }) {
+  const replayTokens = new WeakMap();
+  const pendingSnapshots = new Map();
+  function beginReplay(ws, ainfo) {
     const binfo = browsers.get(ws);
-    if (binfo) {
-      if (!binfo.replaying) binfo.replaying = new Set();
-      binfo.replaying.add(ainfo.id);
+    if (!binfo) return;
+    let tokens = replayTokens.get(ws);
+    if (!tokens) replayTokens.set(ws, tokens = new Map());
+    const token = {};
+    tokens.set(ainfo.id, token);
+    if (!binfo.replaying) binfo.replaying = new Set();
+    binfo.replaying.add(ainfo.id);
+    if (!binfo.activeSnapshots) binfo.activeSnapshots = new Map();
+    const previous = binfo.activeSnapshots.get(ainfo.id);
+    const pending = pendingSnapshots.get(previous);
+    if (pending) {
+      clearTimeout(pending.timer); clearTimeout(pending.requestTimer);
+      pendingSnapshots.delete(previous);
     }
-    const finish = () => {
-      if (!binfo) return;
-      binfo.replaying.delete(ainfo.id);
-      const queued = binfo.pendingLive && binfo.pendingLive.get(ainfo.id);
-      if (binfo.pendingLive) binfo.pendingLive.delete(ainfo.id);
-      if (queued && ws.readyState === ws.OPEN) {
-        for (const p of queued) ws.send(p);
-      }
-    };
-
-    // Resolve the replay window. Delta mode needs the FIRST buffered chunk's seq
-    // to prove contiguity: if sinceSeq sits before it, trimmed history is missing
-    // and xterm cannot prepend — fall back to 'tail': append whatever the buffer
-    // still has onto the browser's existing content. Clearing (the old full
-    // fallback) destroyed the browser's local history whenever the SERVER had
-    // less than the browser remembered (server restart empties the buffer) —
-    // that erased history instead of restoring it. A full clear is only correct
-    // on a fresh (non-resume) connect.
-    let start = 0, mode = 'full';
-    if (Number.isFinite(sinceSeq) && sinceSeq > 0) {
-      if (term.scrollback.length === 0) {
-        // Buffer empty (server restarted / nothing buffered yet): the browser's
-        // own history is the only copy left — keep it, send nothing.
-        mode = 'tail';
-      } else {
-        const first = term.scrollback[0];
-        if (first.seq <= sinceSeq) {
-          // Buffer covers the gap: replay only chunks after sinceSeq.
-          start = term.scrollback.length;
-          while (start > 0 && term.scrollback[start - 1].seq > sinceSeq) start--;
-          mode = 'delta';
-        } else {
-          // Gap not coverable: keep browser content, append our tail.
-          mode = 'tail';
-        }
-      }
-    }
-
-    const total = term.scrollback.length;
-    if (total === 0 || (mode === 'delta' && start >= total)) {
-      // Empty buffer (or nothing after sinceSeq) still reports info+end:
-      // browsers treat scrollback_end as "replay finished" to trigger their
-      // post-connect repaint; with no end message a fresh session's terminal
-      // would never get one.
-      ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total: 0, loadedFrom: 0, hasMore: false, mode }));
-      ws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id, lastSeq: sinceSeq || null }));
-      finish();
-      done();
-      return;
-    }
-    // Walk back from the most recent chunk, stopping at whichever limit —
-    // chunk count or total bytes — is hit first. Bounded to at most
-    // SCROLLBACK_INIT iterations, so this is a cheap, one-time scan. Delta mode
-    // already fixed `start`; tail/full modes narrow the window by size.
-    if (mode !== 'delta') {
-      let bytes = 0, count = 0;
-      let s = total;
-      while (s > 0 && count < SCROLLBACK_INIT && bytes < SCROLLBACK_INIT_BYTES) {
-        s--;
-        bytes += term.scrollback[s].payload.length;
-        count++;
-      }
-      start = s;
-    }
-    ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total, loadedFrom: start, hasMore: start > 0, mode }));
-    let i = start;
+    binfo.activeSnapshots.delete(ainfo.id);
+    binfo.pendingLive?.delete(ainfo.id);
+    return { binfo, current: () => replayTokens.get(ws)?.get(ainfo.id) === token };
+  }
+  // Capture a contiguous delta before yielding: cache trimming during a batch
+  // must not move its indices. New live frames wait until this replay ends.
+  function sendDeltaReplay(ws, ainfo, sinceSeq) {
+    const chunks = ainfo.term.scrollback.filter(chunk => chunk.seq > sinceSeq);
+    const replay = beginReplay(ws, ainfo);
+    if (!replay) return;
+    const { binfo, current } = replay;
+    let i = 0;
     function sendBatch() {
-      if (ws.readyState !== ws.OPEN) { finish(); done(); return; } // browser gone mid-replay
-      const end = Math.min(i + SCROLLBACK_SEND_BATCH, total);
-      for (; i < end; i++) {
-        const chunk = term.scrollback[i];
-        ws.send(JSON.stringify({ type: 'data', payload: chunk.payload, agentId: ainfo.id, seq: chunk.seq, filtered: chunk.filtered }));
-      }
-      if (i < total) {
-        setImmediate(sendBatch);
-        return;
-      }
-      // Final info: NO `mode` field. The browser clears on info.mode==='full'
-      // — sending the mode again here wiped everything the replay had just
-      // drawn (intermittent blank terminal until a lucky repaint restored it).
-      // The first info already told the browser what to do; this one only
-      // carries the final window position.
-      ws.send(JSON.stringify({ type: 'scrollback_info', agentId: ainfo.id, total, loadedFrom: start, hasMore: start > 0 }));
-      const lastSeq = total > 0 ? term.scrollback[total - 1].seq : (sinceSeq || null);
-      ws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id, lastSeq }));
+      if (!current()) return;
+      if (ws.readyState !== ws.OPEN || !binfo.agentIds.has(ainfo.id)) return finish();
+      const end = Math.min(i + batchSize, chunks.length);
+      for (; i < end; i++) ws.send(JSON.stringify({ type: 'data', ...chunks[i], agentId: ainfo.id }));
+      if (i < chunks.length) return setImmediate(sendBatch);
+      ws.send(JSON.stringify({ type: 'terminal_ready', agentId: ainfo.id,
+        lastSeq: chunks.at(-1)?.seq || sinceSeq }));
       finish();
-      done();
+    }
+    function finish() {
+      if (!current()) return;
+      binfo.replaying.delete(ainfo.id);
+      const queued = binfo.pendingLive?.get(ainfo.id);
+      binfo.pendingLive?.delete(ainfo.id);
+      if (queued && ws.readyState === ws.OPEN && binfo.agentIds.has(ainfo.id)) {
+        for (const frame of queued) ws.send(frame);
+      }
     }
     sendBatch();
   }
 
-  const pendingSnapshots = new Map();
   function canReplayDelta(ainfo, sinceSeq) {
     const sb = ainfo.term.scrollback;
     return Number.isFinite(sinceSeq) && sinceSeq > 0 && sb.length > 0 &&
@@ -109,17 +62,10 @@ function createTerminalReplay({ agents, terminals, browsers, terminalKey, limits
   }
 
   function sendSnapshotReplay(ws, ainfo, delayMs = 0) {
-    const binfo = browsers.get(ws);
-    if (!binfo || ainfo.ws.readyState !== ainfo.ws.OPEN) return;
-    if (!binfo.replaying) binfo.replaying = new Set();
-    binfo.replaying.add(ainfo.id);
-    if (!binfo.activeSnapshots) binfo.activeSnapshots = new Map();
-    const previous = binfo.activeSnapshots.get(ainfo.id);
-    if (previous && pendingSnapshots.has(previous)) {
-      clearTimeout(pendingSnapshots.get(previous).timer);
-      clearTimeout(pendingSnapshots.get(previous).requestTimer);
-      pendingSnapshots.delete(previous);
-    }
+    if (ainfo.ws.readyState !== ainfo.ws.OPEN) return;
+    const replay = beginReplay(ws, ainfo);
+    if (!replay) return;
+    const { binfo } = replay;
     const reqId = crypto.randomUUID();
     binfo.activeSnapshots.set(ainfo.id, reqId);
     const fail = () => {
@@ -145,20 +91,15 @@ function createTerminalReplay({ agents, terminals, browsers, terminalKey, limits
     else request();
   }
 
-  function validTerminalSize(cols, rows) {
-    return Number.isInteger(cols) && Number.isInteger(rows) &&
-      cols >= 1 && cols <= 400 && rows >= 1 && rows <= 200;
-  }
-
   // The last browser that opens, resizes, or sends input owns this screen's PTY
   // size. A size change is followed by fresh snapshots for every watcher, so
   // nobody continues parsing old-size output at the new dimensions.
   function claimTerminalSize(ws, ainfo, cols, rows) {
     const binfo = browsers.get(ws);
-    if (!binfo || !ainfo.snapshotV1) return false;
+    if (!binfo) return false;
     if (!binfo.preferredSizes) binfo.preferredSizes = new Map();
     if (!binfo.lastSizeClaim) binfo.lastSizeClaim = new Map();
-    if (validTerminalSize(cols, rows)) binfo.preferredSizes.set(ainfo.id, { cols, rows });
+    if (validSize(cols, rows)) binfo.preferredSizes.set(ainfo.id, { cols, rows });
     const preferred = binfo.preferredSizes.get(ainfo.id);
     if (!preferred) return false;
     const term = ainfo.term;
@@ -185,6 +126,12 @@ function createTerminalReplay({ agents, terminals, browsers, terminalKey, limits
     return changed;
   }
 
+  function subscribe(ws, ainfo, { cols, rows, resume, sinceSeq }) {
+    if (claimTerminalSize(ws, ainfo, cols, rows)) return;
+    if (resume && canReplayDelta(ainfo, sinceSeq)) sendDeltaReplay(ws, ainfo, sinceSeq);
+    else sendSnapshotReplay(ws, ainfo);
+  }
+
   function releaseTerminalOwner(ws, agentIds) {
     for (const agentId of agentIds) {
       const ainfo = [...agents.values()].find(a => a.id === agentId);
@@ -205,6 +152,7 @@ function createTerminalReplay({ agents, terminals, browsers, terminalKey, limits
 
 
   function cancelSocket(socket) {
+    replayTokens.delete(socket);
     for (const [id, pending] of pendingSnapshots) {
       if (pending.ws !== socket && pending.ainfo.ws !== socket) continue;
       clearTimeout(pending.timer); clearTimeout(pending.requestTimer);
@@ -214,6 +162,6 @@ function createTerminalReplay({ agents, terminals, browsers, terminalKey, limits
       pendingSnapshots.delete(id);
     }
   }
-  return { sendScrollbackReplay, pendingSnapshots, canReplayDelta, sendSnapshotReplay, claimTerminalSize, releaseTerminalOwner, cancelSocket };
+  return { subscribe, pendingSnapshots, claimTerminalSize, releaseTerminalOwner, cancelSocket };
 }
 module.exports = { createTerminalReplay };

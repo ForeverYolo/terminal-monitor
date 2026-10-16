@@ -40,17 +40,17 @@ function sendTerminalInput(session, data) {
   if (!session || session.scope.disposed || !ws || ws.readyState !== WebSocket.OPEN) return;
   const agentId = session.getAgentId();
   if (!agentId) return;
-  data = stripTerminalColorReplies(data, isNativeTuiAgent(agentId));
+  data = stripTerminalColorReplies(data);
   if (!data) return;
   const bytes = new TextEncoder().encode(data);
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  const size = isSnapshotAgent(agentId) ? proposedSize(session.fitAddon, session.term) : null;
-  if (size) rememberRequestedSize(agentId, size);
-  ws.send(JSON.stringify({ type: 'data', payload: btoa(binary), agentId, ...(size || {}) }));
+  const size = proposedSize(session.fitAddon, session.term);
+  rememberRequestedSize(agentId, size);
+  ws.send(JSON.stringify({ type: 'data', payload: btoa(binary), agentId, ...size }));
 }
 
-function createTerminalSession(container, { agentId, getAgentId, fontSize, scrollback, legacyResize = false }) {
+function createTerminalSession(container, { agentId, getAgentId, fontSize, scrollback }) {
   const scope = createViewScope();
   const target = new Terminal({
     theme: { background: '#0f0f23', cursor: '#e0e0e0', cursorAccent: '#0f0f23' },
@@ -65,7 +65,6 @@ function createTerminalSession(container, { agentId, getAgentId, fontSize, scrol
   const session = {
     agentId, container, term: target, fitAddon: addon, scope,
     getAgentId: getAgentId || (() => session.agentId),
-    filter: createAltScreenFilter({ nativeTui: isNativeTuiAgent(agentId) }),
     dispose() { scope.dispose(); }
   };
   scope.add(() => {
@@ -80,9 +79,5 @@ function createTerminalSession(container, { agentId, getAgentId, fontSize, scrol
     target.dispose();
   });
   target.onData(data => sendTerminalInput(session, data));
-  if (legacyResize) target.onResize(({ cols, rows }) => {
-    const id = session.getAgentId();
-    if (ws && ws.readyState === WebSocket.OPEN && !isSnapshotAgent(id)) ws.send(JSON.stringify({ type: 'resize', agentId: id, cols, rows }));
-  });
   return session;
 }

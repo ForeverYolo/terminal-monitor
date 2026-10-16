@@ -12,8 +12,7 @@ let lastServerFiles = null;
 let currentMode = 'card'; // 'card', 'multi'
 let currentSort = localStorage.getItem('swt-sort') || 'name'; // 'name', 'id', 'recent'
 let selectedAgents = new Set(); // for multi-select mode
-let multiTerms = {}; // agentId -> { term, fitAddon, container, filter }
-let termFilter = createAltScreenFilter(); // alt-screen filter for the single terminal
+let multiTerms = {}; // agentId -> { term, fitAddon, container }
 
 // --- Seq tracking + stable terminal identity ---
 // Server stamps every data chunk with a per-terminal monotonic seq. We remember
@@ -27,19 +26,14 @@ function forgetTerminalState(agentId) {
   pendingSizeSnapshot.delete(agentId);
   requestedSizeByAgent.delete(agentId);
 }
-function isSnapshotAgent(id) {
-  return (lastAgents || []).some(a => a.id === id && a.snapshotV1);
-}
 function rememberRequestedSize(id, size) {
-  if (isSnapshotAgent(id)) requestedSizeByAgent.set(id, size);
+  requestedSizeByAgent.set(id, size);
 }
 function sendViewportResize(id, size) {
   if (!ws || ws.readyState !== WebSocket.OPEN || !id) return;
-  if (isSnapshotAgent(id)) {
-    const previous = requestedSizeByAgent.get(id);
-    if (previous && previous.cols === size.cols && previous.rows === size.rows) return;
-    requestedSizeByAgent.set(id, size);
-  }
+  const previous = requestedSizeByAgent.get(id);
+  if (previous && previous.cols === size.cols && previous.rows === size.rows) return;
+  rememberRequestedSize(id, size);
   ws.send(JSON.stringify({ type: 'resize', agentId: id, ...size }));
 }
 function proposedSize(addon, terminal) {
@@ -59,7 +53,7 @@ function multiSizes() {
 const agentIdByKey = new Map();     // terminalKey -> agentId (live agents only)
 let currentTerminalKey = null;      // stable key of the single-terminal view's agent
 function terminalKeyOf(a) {
-  const cid = (a.attrs && a.attrs.clientId) || a.clientId || 'nokey';
+  const cid = a.attrs.clientId;
   return `${cid}|${a.screen || ''}`;
 }
 // Resolve the CURRENT agentId for a previously-known terminal key. Returns null
@@ -85,7 +79,6 @@ function remapMultiTerms() {
     delete multiTerms[oldId];
     forgetTerminalState(oldId);
     entry.agentId = fresh;
-    entry.filter = createAltScreenFilter({ nativeTui: isNativeTuiAgent(fresh) });
     multiTerms[fresh] = entry;
     lastSeqByAgent.delete(fresh);
     selectedAgents.delete(oldId);
@@ -95,32 +88,23 @@ function remapMultiTerms() {
   return changed;
 }
 
-// Legacy agents still send raw PTY output; modern agents filter before snapshotting.
 // xterm answers OSC 10/11/12 colour queries itself.  onData also receives
 // those protocol replies, but forwarding a replayed reply into screen makes
 // the shell echo strings such as "11;rgb:0f0f/0f0f/2323".  These are never
 // user keystrokes, so remove only complete OSC colour-report replies.
-function isNativeTuiAgent(id) {
-  return (lastAgents || []).some(a => a.id === id && a.nativeTui === true);
-}
-
 function updateNativeTuiControls() {
   const button = document.getElementById('btn-scroll-latest');
-  const nativeTui = isNativeTuiAgent(currentAgentId) && applicationOwnsScrolling(term);
-  button.disabled = nativeTui;
-  button.title = nativeTui ? '原生 TUI 请用下翻、滚轮或应用快捷键回到末尾' : '回到最新输出';
+  const appScrolling = applicationOwnsScrolling(term);
+  button.disabled = appScrolling;
+  button.title = appScrolling ? '原生 TUI 请用下翻、滚轮或应用快捷键回到末尾' : '回到最新输出';
 }
 
 function applicationOwnsScrolling(target) {
   return !!target && (target.buffer.active.type === 'alternate' || target.modes.mouseTrackingMode !== 'none');
 }
 
-function stripTerminalColorReplies(data, nativeTui = false) {
+function stripTerminalColorReplies(data) {
   data = data.replace(/\x1b]1[012];rgb:[0-9a-f]{1,4}\/[0-9a-f]{1,4}\/[0-9a-f]{1,4}(?:\x07|\x1b\\)/gi, '');
-  // Belt-and-braces: drop SGR / urxvt mouse-event reports in case tracking
-  // ever gets enabled despite the output-side suppression.  A user cannot
-  // type these sequences, so removing them never loses real keystrokes.
-  if (!nativeTui) data = data.replace(/\x1b\[<?[0-9;]+[Mm]/g, '');
   return data;
 }
 
@@ -196,8 +180,7 @@ function connect(username, password) {
         if (fresh !== currentAgentId) {
           forgetTerminalState(currentAgentId);
           currentAgentId = fresh;
-          termFilter = createAltScreenFilter({ nativeTui: isNativeTuiAgent(fresh) });
-          lastSeqByAgent.delete(fresh);   // new id: start from a full replay
+          lastSeqByAgent.delete(fresh);   // new id: restore a snapshot
           if (term) term.clear();
         }
         const size = proposedSize(fitAddon, term);
@@ -205,7 +188,6 @@ function connect(username, password) {
         rememberRequestedSize(currentAgentId, size);
         ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, ...size,
           resume: true, sinceSeq: lastSeqByAgent.get(currentAgentId) || 0 }));
-        if (!isSnapshotAgent(currentAgentId)) ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, ...size }));
       } else if (wasReconnecting && inMulti) {
         // Resume multi terminal: re-subscribe previously opened agents.
         // Remap stale ids through the stable key the same way.
@@ -252,7 +234,6 @@ function connect(username, password) {
         if (fresh && fresh !== currentAgentId && ws.readyState === WebSocket.OPEN) {
           forgetTerminalState(currentAgentId);
           currentAgentId = fresh;
-          termFilter = createAltScreenFilter({ nativeTui: isNativeTuiAgent(fresh) });
           lastSeqByAgent.delete(fresh);
           term.clear();
           const size = proposedSize(fitAddon, term);
@@ -275,12 +256,12 @@ function connect(username, password) {
       // Single terminal mode
       if (term && msg.agentId === currentAgentId) {
         const bytes = Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0));
-        term.write(msg.filtered ? bytes : termFilter(bytes));
+        term.write(bytes);
       }
       // Multi terminal mode
       if (multiTerms[msg.agentId]) {
         const bytes = Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0));
-        multiTerms[msg.agentId].term.write(msg.filtered ? bytes : multiTerms[msg.agentId].filter(bytes));
+        multiTerms[msg.agentId].term.write(bytes);
       }
       // Mobile structured view (also feeds when in structured mode)
       if (msg.agentId === currentAgentId) {
@@ -300,7 +281,6 @@ function connect(username, password) {
         target.write(bytes, () => {
           if (entry.scope.disposed) return;
           const state = msg.parserState;
-          if (!state) return; // Snapshots from older clients remain supported.
           const { scrollTop, scrollBottom, cursorX, cursorY } = state;
           if (![scrollTop, scrollBottom, cursorX, cursorY].every(Number.isInteger) ||
               scrollTop < 0 || scrollTop > scrollBottom || scrollBottom >= target.rows ||
@@ -320,41 +300,8 @@ function connect(username, password) {
       pendingSizeSnapshot.delete(msg.agentId);
       console.error('Terminal snapshot failed:', msg.message);
       showFloatingNotice('终端历史恢复失败，请重新打开：' + (msg.message || '未知错误'));
-    } else if (msg.type === 'scrollback_info') {
-      // hasMore=true just notes that older history exists beyond the initial
-      // replay window. We deliberately do NOT auto-load it: xterm.js writes
-      // sequentially and cannot prepend, so older pages would land BELOW the
-      // newer content — the chained pages end with the OLDEST chunk as the
-      // visible screen, burying the live output ("replay shows days-old
-      // content / latest output missing"). Loading arbitrary older history
-      // into a live xterm buffer correctly needs a different architecture
-      // (server-side rendered-text buffer), not this byte-stream replay.
-      // mode:'full' means the server could NOT serve an incremental delta
-      // (history trimmed past our position, or we asked for a fresh window) —
-      // it is about to replay a full recent window, so clear our buffer first
-      // or the replayed history would stack below/behind stale local content.
-      if (msg.mode === 'full' && msg.agentId === currentAgentId && term) {
-        term.clear();
-      }
-      if (msg.mode === 'full' && multiTerms[msg.agentId]) {
-        multiTerms[msg.agentId].term.clear();
-      }
-    } else if (msg.type === 'scrollback_end') {
-      if (msg.snapshot) return;
-      // All history written. Replay draws with whatever PTY size the agent had;
-      // make sure the app inside repaints at OUR size: send one resize
-      // round-trip (shrink a row, restore after 250ms). The gap matters —
-      // back-to-back resizes (50ms) arrive faster than screen/codex can
-      // repaint, and the two overlapping redraws pile frames on the screen.
-      if (msg.agentId === currentAgentId && term && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', agentId: msg.agentId, cols: term.cols, rows: Math.max(1, term.rows - 1) }));
-        const session = singleSession;
-        session.scope.debounce('legacy-redraw', () => {
-          if (ws && ws.readyState === WebSocket.OPEN && term) {
-            ws.send(JSON.stringify({ type: 'resize', agentId: currentAgentId, cols: term.cols, rows: term.rows }));
-          }
-        }, 250);
-      }
+    } else if (msg.type === 'terminal_ready') {
+      if (typeof msg.lastSeq === 'number') lastSeqByAgent.set(msg.agentId, msg.lastSeq);
     } else if (typeof msg.type === 'string' && msg.type.startsWith('file_')) {
       handleFileMsg(msg);
     } else if (msg.type === 'claude_state') {

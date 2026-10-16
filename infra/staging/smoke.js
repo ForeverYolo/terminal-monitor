@@ -21,7 +21,7 @@ function rejectBadPassword(){return new Promise((resolve,reject)=>{const ws=new 
 let browser;
 (async()=>{
  const meta=await(await fetch(new URL('staging.json',access.url))).json();assert.equal(meta.environment,'staging');
- await until(async()=>{const agents=await(await fetch(new URL('api/agents',access.url))).json();return agents.agents.length===1 && agents.agents[0].nativeTui && agents.agents[0].screen==='swt-staging-codex';});
+ await until(async()=>{const agents=await(await fetch(new URL('api/agents',access.url))).json();return agents.agents.length===1 && agents.agents[0].protocolVersion===2 && agents.agents[0].screen==='swt-staging-codex';});
  for(const asset of ['xterm.css','xterm.js','xterm-addon-fit.js']){const r=await fetch(new URL('vendor/'+asset,access.url));assert.equal(r.status,200);assert((await r.arrayBuffer()).byteLength>1000);}
  pass('public staging identity, local assets, and 2080 client registration');
  await rejectBadPassword();pass('wrong login password rejected');

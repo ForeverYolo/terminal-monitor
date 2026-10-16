@@ -26,10 +26,10 @@ function expected(){const t=model.term;return Array.from({length:t.rows},(_,i)=>
  server=spawn(process.execPath,[path.join(project,'server.js'),'--config='+cfg],{cwd:project});server.stdout.on('data',x=>log+=x);server.stderr.on('data',x=>log+=x);
  await until(async()=>{try{return (await fetch(`http://127.0.0.1:${port}/api/agents`)).ok;}catch{return false;}});
  agent=new WebSocket(`ws://127.0.0.1:${port}`);
- model=new TerminalState(cols,rows,payload=>{if(agent.readyState===WebSocket.OPEN)agent.send(JSON.stringify({type:'data',payload,filtered:true}));},{nativeTui:true,screenRelay:true});
+ model=new TerminalState(cols,rows,payload=>{if(agent.readyState===WebSocket.OPEN)agent.send(JSON.stringify({type:'data',payload}));});
  agent.on('message',raw=>{const msg=JSON.parse(raw);if(msg.type==='resize'){cols=msg.cols;rows=msg.rows;model.resize(cols,rows);layout();}if(msg.type==='terminal_snapshot_request')model.snapshot(s=>agent.send(JSON.stringify({type:'terminal_snapshot_result',reqId:msg.reqId,...s})));});
  await new Promise(r=>agent.on('open',r));
- agent.send(JSON.stringify({type:'register',token:'token',name:'scroll-region-fixture',screen:'test',attrs:{clientId:'scroll-region-fixture'},snapshotV1:true,nativeTui:true,cols,rows}));layout();
+ agent.send(JSON.stringify({type:'register',token:'token',name:'scroll-region-fixture',screen:'test',attrs:{clientId:'scroll-region-fixture'},protocolVersion:2,cols,rows}));layout();
  await until(async()=>(await(await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents.length===1);
  browser=await launchBrowser();
  let batch=0;
