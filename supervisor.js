@@ -33,6 +33,7 @@ const https = require('https');
 const { stripAnsi } = require('./claude-detector');
 
 function createSupervisor(cfg, deps) {
+  const { setInterval, clearInterval, setTimeout, clearTimeout } = deps.timers || globalThis;
   const {
     getAgents,               // () => agentInfo[]  (includes claudeState, lastLines)
     getAgentRawOutput,       // (agentId) => raw lastOutput string (for SUMMARY extraction)
@@ -60,6 +61,8 @@ function createSupervisor(cfg, deps) {
   let idleTimer = null;
   let screenQueryTimer = null;
   let analyzerTimer = null;
+  let analyzerGraceTimer = null;
+  let started = false;
 
   // ============ Aggregation ============
 
@@ -337,6 +340,8 @@ function createSupervisor(cfg, deps) {
   // ============ Lifecycle ============
 
   function start() {
+    if (started) return;
+    started = true;
     console.log(`[SUPERVISOR] Started (summary ${summaryInterval / 1000}s, idle ${idleTimeout / 1000}s${webhook ? ', webhook' : ''}${analyzerName ? ', analyzer=' + analyzerName + ' every ' + (analyzerInterval / 1000) + 's' : ''})`);
     summaryTimer = setInterval(() => notify('summary', buildSummary()), summaryInterval);
     idleTimer = setInterval(checkIdle, 60000);
@@ -344,11 +349,14 @@ function createSupervisor(cfg, deps) {
     if (analyzerName) {
       analyzerTimer = setInterval(runAnalyzerCycle, analyzerInterval);
       // First cycle after a short grace period so agents register their claude_state
-      setTimeout(runAnalyzerCycle, 15000);
+      analyzerGraceTimer = setTimeout(runAnalyzerCycle, 15000);
     }
   }
 
   function stop() {
+    started = false;
+    if (analyzerGraceTimer) clearTimeout(analyzerGraceTimer);
+    analyzerGraceTimer = null;
     if (summaryTimer) clearInterval(summaryTimer);
     if (idleTimer) clearInterval(idleTimer);
     if (screenQueryTimer) clearInterval(screenQueryTimer);
