@@ -278,6 +278,8 @@ config.client-download.json  # 监控 download 会话
 
 原生模式下，应用启用鼠标跟踪时，上翻/下翻按钮发送翻页键，“最新”按钮禁用；退出到 shell 后，滚轮和这些按钮恢复操作浏览器历史。当前 Screen 4.09 的鼠标输入由 client 做兼容转换，超出 223 的点击坐标不支持。实现、实测结果及复现步骤见 [原生 TUI 模式说明](docs/native-tui-mode.md)。
 
+原生 TUI 中复制文字：Linux/Windows 按住 `Shift`，Mac 按住 `Option`，再用左键拖动选择。松开后选区保留，可以右键选择浏览器菜单中的“复制”；也可使用快捷键：Linux/Windows 使用 `Ctrl+Shift+C` 复制，Mac 使用 `⌘C`。复制快捷键只在存在选区时生效，普通点击和滚轮继续交给应用。
+
 ### 6.2 移动端
 
 屏幕宽度 < 600px 自动显示虚拟键盘工具栏：方向键 ↑↓←→、Tab、Esc、Home/End、退格、Ctrl 组合键（点 Ctrl 激活再按字母）、粘贴。

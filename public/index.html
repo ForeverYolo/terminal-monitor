@@ -804,6 +804,61 @@ function remapMultiTerms() {
   return changed;
 }
 
+// xterm 5.3 suppresses forced-selection mousedown reports, but its mouseup
+// handler still reports to the app and clears the selection as user input.
+// Guard before report generation; filtering onData would already be too late.
+function installTerminalSelectionGuard(target) {
+  // Private API, pinned to xterm 5.3.0 just like snapshot parser-state restore.
+  const core = target._core;
+  const mouse = core.coreMouseService;
+  const original = mouse.triggerMouseEvent;
+  const element = target.element;
+  const doc = element.ownerDocument;
+  let selecting = false;
+  let gesture = 0;
+  const down = event => {
+    if (event.button !== 0) return;
+    gesture++;
+    selecting = core._selectionService.shouldForceSelection(event);
+  };
+  const up = event => {
+    if (event.button !== 0 || !selecting) return;
+    const finished = gesture;
+    // Keep protection through both element and document mouseup handlers.
+    // Do not swallow the DOM event: xterm needs it to finish the selection.
+    setTimeout(() => { if (gesture === finished) selecting = false; }, 0);
+  };
+  mouse.triggerMouseEvent = function(event) {
+    // CoreMouseButton.NONE=3, CoreMouseAction.MOVE=32 in pinned xterm 5.3.
+    // Preserve selection for the browser context menu and for hover in
+    // any-motion tracking mode. Right-button reports are still sent when
+    // there is no selection; xterm handles the native context-menu setup.
+    if (selecting || (target.hasSelection() &&
+        (event.button === 2 || (event.button === 3 && event.action === 32)))) return false;
+    return original.call(this, event);
+  };
+  // Use the terminal's existing copy-event handler. execCommand also works
+  // on the HTTP staging site, where navigator.clipboard is unavailable.
+  target.attachCustomKeyEventHandler(event => {
+    if (event.type === 'keydown' && event.ctrlKey && event.shiftKey &&
+        !event.altKey && !event.metaKey && event.code === 'KeyC' && target.hasSelection()) {
+      event.preventDefault();
+      doc.execCommand('copy');
+      return false;
+    }
+    return true;
+  });
+  element.addEventListener('mousedown', down, true);
+  doc.addEventListener('mouseup', up, true);
+  core.register({ dispose() {
+    element.removeEventListener('mousedown', down, true);
+    doc.removeEventListener('mouseup', up, true);
+    mouse.triggerMouseEvent = original;
+    selecting = false;
+    gesture++;
+  }});
+}
+
 // Legacy agents still send raw PTY output; modern agents filter before snapshotting.
 // xterm answers OSC 10/11/12 colour queries itself.  onData also receives
 // those protocol replies, but forwarding a replayed reply into screen makes
@@ -1459,6 +1514,7 @@ function openTerminal(agentId, agentName) {
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(container);
+  installTerminalSelectionGuard(term);
   term.onWriteParsed(updateNativeTuiControls);
 
   // Force application cursor keys (DECCKM) ON in the browser terminal.  Apps
@@ -2494,6 +2550,7 @@ function openMultiTerminal() {
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(wrap.querySelector('.multi-term-container'));
+    installTerminalSelectionGuard(term);
     // Same DECCKM rationale as openTerminal: keep arrows SS3 for screen apps.
     term.write('\x1b[?1h');
 

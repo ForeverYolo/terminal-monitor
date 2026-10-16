@@ -37,7 +37,71 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
   await p.goto(`http://127.0.0.1:${port}/`);await p.locator('#username-input').fill('test');await p.locator('#password-input').fill('pw');await p.locator('.login-box button').click();await p.locator('.agent-card').first().click();
   await until(async()=> (await p.evaluate(screenText)).includes('NATIVE-PAGER'));return p;
  }
+ // Exercise the actual frontend/xterm handlers, including mouseup bubbling.
+ async function checkSelection(p,multi=false){
+  await p.context().grantPermissions(['clipboard-read','clipboard-write']);
+  await p.evaluate(m=>{
+   window.selectionTarget=m?Object.values(multiTerms)[0].term:term;
+   window.selectionReports=[];window.selectionMenus=[];
+   window.selectionMenuListener=e=>selectionMenus.push(e.defaultPrevented);
+   document.addEventListener('contextmenu',selectionMenuListener);
+   window.selectionSubscriptions=[selectionTarget.onData(d=>selectionReports.push(d)),selectionTarget.onBinary(d=>selectionReports.push(d))];
+  },multi);
+  const selector=multi?'.multi-term-container .xterm-screen':'#term-container .xterm-screen';
+  for(const mode of [1000,1002,1003]){
+   await p.evaluate(mode=>new Promise(r=>selectionTarget.write(`\x1b[?${mode}h`,r)),mode);
+   for(const earlyRelease of [false,true]){
+    const b=await p.locator(selector).boundingBox();
+    const size=await p.evaluate(()=>({cols:selectionTarget.cols,rows:selectionTarget.rows}));
+    const cw=b.width/size.cols,ch=b.height/size.rows;
+    await p.mouse.move(b.x+cw*0.2,b.y+ch*1.5);
+    await p.keyboard.down('Shift');await p.mouse.down();
+    await p.mouse.move(b.x+cw*22.2,b.y+ch*1.5,{steps:8});
+    const selected=await p.evaluate(()=>selectionTarget.getSelection());
+    assert(selected.includes('ROW-'),'drag should select fixture text');
+    await p.evaluate(()=>selectionReports.length=0);
+    if(earlyRelease)await p.keyboard.up('Shift');
+    await p.mouse.up();
+    if(!earlyRelease)await p.keyboard.up('Shift');
+    assert.equal(await p.evaluate(()=>selectionTarget.getSelection()),selected,`mode ${mode}: mouseup cleared selection`);
+    // Any-motion tracking must not erase selection just by hovering afterward.
+    await p.mouse.move(b.x+cw*24,b.y+ch*1.5);
+    assert.equal(await p.evaluate(()=>selectionTarget.getSelection()),selected,'hover cleared selection');
+    assert.deepStrictEqual(await p.evaluate(()=>selectionReports),[],'selection leaked mouse input');
+    await p.keyboard.press('Control+Shift+c');
+    assert.equal(await p.evaluate(()=>navigator.clipboard.readText()),selected,'clipboard differs from selection');
+    assert.deepStrictEqual(await p.evaluate(()=>selectionReports),[],'copy sent input to app');
+    // A browser context menu needs the helper textarea's native selection,
+    // and neither button press nor release may reach the TUI while selecting.
+    await p.mouse.click(b.x+cw*35,b.y+ch*4.5,{button:'right'});
+    assert.equal(await p.evaluate(()=>selectionTarget.getSelection()),selected,'right click cleared selection');
+    assert.deepStrictEqual(await p.evaluate(()=>selectionReports),[],'right click leaked app input');
+    assert.equal(await p.evaluate(()=>selectionMenus[selectionMenus.length-1]),false,'browser context menu was prevented');
+    const nativeSelection=await p.evaluate(()=>{
+     const t=selectionTarget.textarea;return {value:t.value,start:t.selectionStart,end:t.selectionEnd,active:document.activeElement.className,text:t.value.slice(t.selectionStart,t.selectionEnd)};
+    });
+    assert.equal(nativeSelection.text,selected,'context menu has no native text selection to copy: '+JSON.stringify(nativeSelection));
+    await p.evaluate(()=>document.execCommand('copy'));
+    assert.equal(await p.evaluate(()=>navigator.clipboard.readText()),selected,'context-menu copy differs from selection');
+    // Ordinary clicking still reports to the app and clears the old selection.
+    await p.mouse.click(b.x+cw*25,b.y+ch*1.5);
+    assert((await p.evaluate(()=>selectionReports.length))>0,'ordinary click did not reach app');
+    assert.equal(await p.evaluate(()=>selectionTarget.hasSelection()),false);
+    await p.evaluate(()=>selectionReports.length=0);
+    await p.mouse.click(b.x+cw*35,b.y+ch*4.5,{button:'right'});
+    assert((await p.evaluate(()=>selectionReports.length))>0,'right click without selection did not reach app');
+   }
+  }
+  // A drag ending outside the terminal must finish cleanly, too.
+  const b=await p.locator(selector).boundingBox();
+  await p.mouse.move(b.x+5,b.y+25);await p.keyboard.down('Shift');await p.mouse.down();
+  await p.mouse.move(b.x+b.width+5,b.y+50,{steps:5});await p.mouse.up();await p.keyboard.up('Shift');
+  assert(await p.evaluate(()=>selectionTarget.hasSelection()),'outside release lost selection');
+  await p.evaluate(()=>{selectionTarget.clearSelection();selectionSubscriptions.forEach(s=>s.dispose());document.removeEventListener('contextmenu',selectionMenuListener);});
+  console.log('PASS '+(multi?'multi':'single')+' terminal selection, early modifier release, outside release, clipboard, context menu and ordinary clicks');
+ }
  const page=await openPage();
+ await checkSelection(page);
  console.log('initial state',await page.evaluate(()=>({type:term.buffer.active.type,modes:term.modes})));
  assert.equal(await page.evaluate(()=>term.buffer.active.type),'normal','Screen relay should keep browser scrollback in the normal buffer');
  await page.locator('.xterm-helper-textarea').focus();await page.keyboard.press('PageUp');
@@ -67,6 +131,7 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  const multi=await openPage();
  await multi.evaluate(()=>{const id=currentAgentId;closeTerminal();selectedAgents.add(id);openMultiTerminal();});
  await until(async()=>await multi.evaluate(()=>Object.values(multiTerms).some(e=>e.term.buffer.active.type==='normal' && e.term.modes.mouseTrackingMode!=='none')));
+ await checkSelection(multi,true);
  const multiWheelCount=fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel')).length;
  const multiBox=await multi.locator('.multi-term-container .xterm-screen').boundingBox();await multi.mouse.move(multiBox.x+80,multiBox.y+80);await multi.mouse.wheel(0,-100);
  await until(async()=>fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel')).length>multiWheelCount);
