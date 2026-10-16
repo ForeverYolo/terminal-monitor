@@ -9,6 +9,7 @@ const { createFileTransfer } = require('./file-transfer');
 const { TerminalState } = require('./terminal-state');
 const { PROTOCOL_VERSION } = require('./terminal-protocol');
 const { encodeScreenInput } = require('./terminal-filter');
+const { prepareScreenTerminal } = require('./screen-terminal');
 const { detectClaudeState } = require('./claude-detector');
 const { validateSpawnRequest, SPAWN_MAX_NODES } = require('./spawn-validator');
 const { loadConfig } = require('./config-loader');
@@ -78,6 +79,7 @@ if (!serverUrl || !token || !name) {
 }
 
 const screenName = screenSession || 'main';
+const screenTerm = prepareScreenTerminal();
 // --- Stable per-machine clientId ---
 // Groups this client with any nodes it spawns via spawn_node (server.js target.clientId
 // routing, supervisor.js per-machine node counting). Persisted back into the config file
@@ -576,10 +578,10 @@ function connect() {
     const generation = ++ptyGeneration;
 
     ptyProcess = pty.spawn('screen', screenArgs, {
-      name: 'xterm-256color',
+      name: screenTerm,
       cols,
       rows,
-      env: { ...process.env, TERM: 'xterm-256color' }
+      env: { ...process.env, TERM: screenTerm }
     });
 
     console.log(`Attached to screen session: ${screenName} (PID: ${ptyProcess.pid})`);

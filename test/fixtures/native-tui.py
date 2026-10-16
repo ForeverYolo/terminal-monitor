@@ -11,6 +11,7 @@ def draw():
     emit('\x1b[H\x1b[2J' + f'NATIVE-PAGER page={page:04d} wheel={wheels} keys={keys}')
     for n in range(min(rows-3, 20)):
         emit(f'\x1b[{n+2};1HROW-{page+n:04d} ' + ('content ' * 3))
+    emit('\x1b[3;1H\x1b[0mSTYLE \x1b[3mItalic\x1b[23m \x1b[7mInverse\x1b[27m \x1b[3;7mBoth\x1b[0m Plain\x1b[K')
     emit(f'\x1b[{rows};1HPageUp/PageDown, wheel, q exits\x1b[?25l')
 def record(kind, raw):
     with open(log, 'a') as f: f.write(json.dumps({'kind':kind,'hex':raw.hex(),'page':page})+'\n')

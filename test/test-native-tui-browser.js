@@ -31,6 +31,22 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
   await login(p,`http://127.0.0.1:${port}/`);await p.locator('.agent-card').first().click();
   await until(async()=> (await p.evaluate(screenText)).includes('NATIVE-PAGER'));return p;
  }
+ async function checkStyles(p,multi=false){
+  await until(async()=>await p.evaluate(m=>{
+   const target=m?Object.values(multiTerms)[0]?.term:term;
+   if(!target)return false;
+   const b=target.buffer.active;
+   for(let i=b.baseY;i<b.length;i++){
+    const line=b.getLine(i),text=line.translateToString(true);
+    if(!text.includes('STYLE ')||!text.includes('Plain'))continue;
+    return [['Italic',true,false],['Inverse',false,true],['Both',true,true],['Plain',false,false]].every(([word,italic,inverse])=>{
+     const cell=line.getCell(text.indexOf(word));
+     return !!cell.isItalic()===italic && !!cell.isInverse()===inverse;
+    });
+   }
+   return false;
+  },multi));
+ }
  // Exercise the actual frontend/xterm handlers, including mouseup bubbling.
  async function checkSelection(p,multi=false){
   await p.context().grantPermissions(['clipboard-read','clipboard-write']);
@@ -95,6 +111,7 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
   console.log('PASS '+(multi?'multi':'single')+' terminal selection, early modifier release, outside release, clipboard, context menu and ordinary clicks');
  }
  const page=await openPage();
+ await checkStyles(page);console.log('PASS actual client preserves italic, inverse, combined and reset styles');
  await checkSelection(page);
  console.log('initial state',await page.evaluate(()=>({type:term.buffer.active.type,modes:term.modes})));
  assert.equal(await page.evaluate(()=>term.buffer.active.type),'normal','Screen relay should keep browser scrollback in the normal buffer');
@@ -112,8 +129,9 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  await until(async()=>(await page.evaluate(screenText)).includes('page='+oldPage));
  assert.equal(await page.evaluate(()=>term.buffer.active.type),'normal');
  await page.mouse.wheel(0,-100);await until(async()=>fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel')).length>firstWheel.length);
- console.log('PASS reconnect preserves application screen and wheel');
- const second=await openPage();assert.equal(await second.evaluate(()=>term.buffer.active.type),'normal');
+ await checkStyles(page);
+ console.log('PASS reconnect preserves application screen, wheel and text styles');
+ const second=await openPage();await checkStyles(second);assert.equal(await second.evaluate(()=>term.buffer.active.type),'normal');
  await second.locator('.xterm-helper-textarea').focus();await second.keyboard.press('PageUp');
  await until(async()=> (await page.evaluate(screenText))===(await second.evaluate(screenText)));
  console.log('PASS second browser snapshot and synchronized updates');
@@ -126,6 +144,7 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  const multi=await openPage();
  await multi.evaluate(()=>{const id=currentAgentId;closeTerminal();selectedAgents.add(id);openMultiTerminal();});
  await until(async()=>await multi.evaluate(()=>Object.values(multiTerms).some(e=>e.term.buffer.active.type==='normal' && e.term.modes.mouseTrackingMode!=='none')));
+ await checkStyles(multi,true);
  await checkSelection(multi,true);
  const multiWheelCount=fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel')).length;
  const multiBox=await multi.locator('.multi-term-container .xterm-screen').boundingBox();await multi.mouse.move(multiBox.x+80,multiBox.y+80);await multi.mouse.wheel(0,-100);
@@ -155,7 +174,8 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  const beforeToggleWheel=fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel')).length;
  const toggleBox=await page.locator('#term-container .xterm-screen').boundingBox();await page.mouse.move(toggleBox.x+80,toggleBox.y+80);await page.mouse.wheel(0,-100);
  await until(async()=>fs.readFileSync(events,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.kind.startsWith('wheel')).length>beforeToggleWheel);
- console.log('PASS TUI enabled without configuration after client restart with browser still open');
+ await checkStyles(page);
+ console.log('PASS TUI and text styles survive client restart with browser still open');
 
  // Rapid close/reopen must cancel the old view's frame and resize work.
  await page.evaluate(()=>{

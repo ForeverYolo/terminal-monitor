@@ -70,7 +70,7 @@
 
 ## 三、30 秒快速上手
 
-> 前提：公网服务器 + 各内网机器都已安装 **Node.js ≥ 18**（推荐 20）和 `screen`。
+> 前提：公网服务器 + 各内网机器都已安装 **Node.js ≥ 18**（推荐 20）和 `screen`；client 还需要 `tic`（Debian/Ubuntu：`sudo apt-get install ncurses-bin`）。
 
 **1. 公网服务器：**
 
@@ -275,6 +275,8 @@ config.client-download.json  # 监控 download 会话
 ### 原生 TUI 翻页（可选）
 
 新版 Codex 的会话历史可能保存在应用内部，屏幕重绘不会产生可滚动的终端历史。终端统一保留鼠标协议，让应用自己处理滚轮和 PageUp/PageDown；虚拟化 Screen 显示端的备用屏幕，保留 shell 输出历史。单终端和多终端均支持，无需配置开关。旧过滤模式已移除，服务端与所有 client 需要一起升级并安装依赖；旧协议 client 会被拒绝注册。
+
+client 启动时会用 `tic` 在运行账户的 `~/.terminfo` 安装专用的 `tm-web-256color` 条目，网页连接使用该终端类型，避免 Screen 4.x 把斜体显示为反色。无需修改 `.screenrc` 或重建任务 Screen；其他普通终端连接仍使用其原有终端类型。
 
 原生模式下，应用启用鼠标跟踪时，上翻/下翻按钮发送翻页键，“最新”按钮禁用；退出到 shell 后，滚轮和这些按钮恢复操作浏览器历史。当前 Screen 4.09 的鼠标输入由 client 做兼容转换，超出 223 的点击坐标不支持。实现、实测结果及复现步骤见 [原生 TUI 模式说明](docs/native-tui-mode.md)。
 

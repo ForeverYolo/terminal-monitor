@@ -26,13 +26,30 @@ module.exports=async function roundtrip(page,argv,pass){
   await page.evaluate(()=>document.getElementById('btn-scroll-latest').click());
   assert.equal(await page.evaluate(()=>term.buffer.active.viewportY),await page.evaluate(()=>term.buffer.active.baseY));
  }
+ async function stylesMatch(){
+  return page.evaluate(()=>{
+   const b=term.buffer.active;
+   for(let i=0;i<b.length;i++){
+    const line=b.getLine(i),text=line.translateToString(true);
+    if(!text.startsWith('STYLE-ITALIC')||!text.includes('STYLE-PLAIN'))continue;
+    return [['STYLE-ITALIC',true,false],['STYLE-INVERSE',false,true],['STYLE-BOTH',true,true],['STYLE-PLAIN',false,false]].every(([word,italic,inverse])=>{
+     const cell=line.getCell(text.indexOf(word));
+     return !!cell.isItalic()===italic && !!cell.isInverse()===inverse;
+    });
+   }
+   return false;
+  });
+ }
  await exitCodex();
  await run("printf 'SHELL-HISTORY-%03d\\n' {0..239}");
  await until(async()=>(await page.evaluate(allLines)).includes('SHELL-HISTORY-239'));
+ await run("printf '\\033[3mSTYLE-ITALIC\\033[23m \\033[7mSTYLE-INVERSE\\033[27m \\033[3;7mSTYLE-BOTH\\033[0m STYLE-PLAIN\\n'");
+ await until(stylesMatch);pass('shell preserves italic, inverse, combined and reset styles through the actual client');
  await scrollShell();pass('Codex exits to shell: wheel, page controls and Latest scroll browser history');
  const oldBase=await page.evaluate(()=>term.buffer.active.baseY);
  await page.reload();await page.locator('.agent-card').first().click();
  await until(async()=>(await page.evaluate(allLines)).includes('SHELL-HISTORY-020'));
+ await until(stylesMatch);pass('fresh snapshot preserves shell italic and inverse styles');
  assert.equal(await page.evaluate(()=>term.modes.mouseTrackingMode),'none');await scrollShell();
  pass('shell history and scrolling survive a fresh browser snapshot');
  // Quote every argument as POSIX shell text; no prompt/model request is made.

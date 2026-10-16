@@ -9,6 +9,7 @@
   "terminal-state.js",
   "terminal-protocol.js",
   "terminal-filter.js",
+  "screen-terminal.js",
   "managed-files.js",
   "file-update.js",
   "file-transfer.js",

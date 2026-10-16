@@ -22,10 +22,14 @@ client 屏蔽 Screen 显示端的 47/1047/1049 备用缓冲切换和清空历史
 
 测试使用 Codex 的 `tui.alternate_screen="always"`，没有同时开启 `/raw` 或 `--no-alt-screen`。实际应用仍需主动开启鼠标报告，滚轮才会被交给应用；因此未主动启用鼠标跟踪的 TUI 不保证支持应用内部滚轮翻页。
 
-## 两处必要的兼容修复
+## Screen 显示能力与状态恢复
 
 1. GNU Screen 4.09 会向显示端请求 SGR 鼠标协议，但在本机的输入链路里把 SGR 报告的尾部（例如 `10;6M`）当作普通字符传给程序。client 写入 PTY 前，将 SGR/urxvt 鼠标报告转换成经典六字节报告，并保留二进制字节，避免坐标大于 95 后被 UTF-8 编码破坏。经典报告也按原始字节恢复。
 2. 当前 SerializeAddon 能保存备用屏幕和鼠标跟踪类型，却不保存鼠标编码、备用屏幕滚轮模式或隐藏光标。从已解析的 DEC 模式中记录这些状态，追加到快照中；支持跨 chunk 和组合模式，RIS 会清理记录。鼠标跟踪类型继续由库按最终有效状态序列化，避免互斥模式的顺序冲突。
+
+3. Screen 4.x 把 `SGR 3` 记作 standout，默认借用 `xterm-256color` 的反色指令。client 用 `screen-terminal.js` 调用系统 `tic`，原子安装运行账户主目录下的专用 `tm-web-256color` 条目：继承 `xterm-256color`，只把 `smso/rmso` 改为 `ESC[3m/ESC[23m`。client 附着 Screen 的 PTY 使用这个 TERM，任务内部 TERM 不变。真正的反色仍使用 `SGR 7`，两者叠加及重置均可正常保存和恢复。
+
+这项修复不依赖 Screen 启动时读取新的 `.screenrc`。给 `screen -c ... -x` 加配置文件无法改变已运行服务的能力覆盖，因此采用已有 Screen 服务能按连接查询的用户级 terminfo 条目。普通 xterm 连接不使用该条目，测试验证其显示不受影响。client 需要 `tic`（Debian/Ubuntu 的 `ncurses-bin`），账户主目录的 `.terminfo` 必须可写；优先使用 `/usr/bin/tic`，避免 Conda 工具与系统 ncurses 混用。
 
 经典鼠标坐标上限为 223。超界点击/拖动会被丢弃，避免协议碎片成为输入；滚轮坐标会夹到范围内。该兼容转换针对当前项目的单窗口 Screen 转发链路；更换终端复用器或升级 Screen 后应重新验证。
 
@@ -38,7 +42,8 @@ Screen 自己通常在整个 attach 期间使用备用屏幕，这正是仅透�
 | 测试 | 覆盖 |
 | --- | --- |
 | `test-native-tui.js` | 字节保真、拆分/组合模式、Screen 备用屏幕虚拟化、快照与接续、鼠标编码/隐藏光标恢复、RIS、中文与键盘混合鼠标输入、高坐标二进制编码、超界报告 |
-| `test-native-tui-browser.js` | 真实 Screen + client/server + Chromium；键盘翻页、滚轮抵达应用、重连、新浏览器快照、窗口大小变化、移动端按钮、多终端、高坐标滚轮、无配置开关下的 client 重启、应用退出释放鼠标 |
+| `test-screen-terminal.js` | 已运行 Screen 的双连接隔离、斜体/反色/叠加/重置、重连及重复安装 |
+| `test-native-tui-browser.js` | 真实 Screen + client/server + Chromium；斜体和反色、快照与重连恢复、键盘翻页、滚轮抵达应用、重连、新浏览器快照、窗口大小变化、移动端按钮、多终端、高坐标滚轮、无配置开关下的 client 重启、应用退出释放鼠标 |
 | `test-native-codex-browser.js` | 真实 Codex 0.159.3 + 全链路；50 轮合成历史、翻页、重连、多浏览器同步、resize；退出到 shell、240 行 shell 历史、滚轮与按钮、刷新快照、再次进入/退出 Codex后历史保留 |
 | `test-screen-relay-scroll.js` | 外层备用屏幕虚拟化、拆分与组合模式、鼠标保留、TUI 前后 shell 历史、两种状态的快照恢复 |
 | `test-real-screen-browser.js` | shell 历史、多浏览器尺寸接管、多终端、密集 resize、重连 |

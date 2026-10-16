@@ -4,7 +4,7 @@ const path = require('path');
 const groups = {
   unit: ['deploy', 'supervisor-lifecycle', 'file-transfer', 'refactor-contracts', 'detector', 'terminal-snapshot', 'terminal-replay', 'native-tui', 'screen-relay-scroll', 'analyzer'],
   protocol: ['local', 'stable-resume', 'snapshot-protocol', 'reconnect', 'register-query', 'multiproc-update', 'running-hash'],
-  screen: ['service-restart', 'restart', 'staging-shell'],
+  screen: ['screen-terminal', 'service-restart', 'restart', 'staging-shell'],
   browser: ['real-screen-browser', 'native-tui-browser', 'scroll-region-browser'],
   codex: ['native-codex-browser'],
 };
