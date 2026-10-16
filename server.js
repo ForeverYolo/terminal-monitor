@@ -857,7 +857,7 @@ wss.on('connection', (ws) => {
       if (bws.readyState === bws.OPEN && binfo.agentIds.has(ainfo.id) &&
           typeof msg.payload === 'string' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) {
         bws.send(JSON.stringify({ type: 'terminal_snapshot', agentId: ainfo.id, payload: msg.payload,
-          cols: msg.cols, rows: msg.rows, seq: anchor }));
+          cols: msg.cols, rows: msg.rows, parserState: msg.parserState, seq: anchor }));
         bws.send(JSON.stringify({ type: 'scrollback_end', agentId: ainfo.id, lastSeq: anchor, snapshot: true }));
         const queued = binfo.pendingLive && binfo.pendingLive.get(ainfo.id);
         if (queued) for (const frame of queued) {

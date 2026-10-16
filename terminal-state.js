@@ -73,6 +73,14 @@ class TerminalState {
   }
 
   takeSnapshot(done) {
+    // SerializeAddon 0.11 omits DECSTBM margins. A fresh browser otherwise
+    // scrolls the input/footer along with the TUI body after the next LF/SU.
+    // xterm 5.3 has no public margin API; both runtimes are pinned to 5.3.0.
+    const buffer = this.term._core._bufferService.buffer;
+    const parserState = {
+      scrollTop: buffer.scrollTop, scrollBottom: buffer.scrollBottom,
+      cursorX: buffer.x, cursorY: buffer.y
+    };
     const modes = [...this.privateModes].map(([mode, enabled]) => `\x1b[?${mode}${enabled ? 'h' : 'l'}`).join('');
     let serialized = this.serializer.serialize() + modes;
     // Leave space for JSON/base64 within the server's 4 MB WS frame limit.
@@ -80,7 +88,7 @@ class TerminalState {
       serialized = this.serializer.serialize({ scrollback: rows }) + modes;
     }
     done(Buffer.byteLength(serialized) <= 2_000_000
-      ? { payload: Buffer.from(serialized).toString('base64'), cols: this.term.cols, rows: this.term.rows }
+      ? { payload: Buffer.from(serialized).toString('base64'), cols: this.term.cols, rows: this.term.rows, parserState }
       : { error: 'Viewport exceeds snapshot size limit' });
   }
 

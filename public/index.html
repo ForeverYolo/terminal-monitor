@@ -1006,7 +1006,23 @@ function connect(username, password) {
         target.write('\x1bc');
         target.resize(msg.cols, msg.rows);
         const bytes = Uint8Array.from(atob(msg.payload), c => c.charCodeAt(0));
-        target.write(bytes);
+        target.write(bytes, () => {
+          const state = msg.parserState;
+          if (!state) return; // Snapshots from older clients remain supported.
+          const { scrollTop, scrollBottom, cursorX, cursorY } = state;
+          if (![scrollTop, scrollBottom, cursorX, cursorY].every(Number.isInteger) ||
+              scrollTop < 0 || scrollTop > scrollBottom || scrollBottom >= target.rows ||
+              cursorX < 0 || cursorX > target.cols || cursorY < 0 || cursorY >= target.rows) return;
+          // Restore margins without sending DECSTBM here: that command also
+          // moves the cursor and discards a pending wrap at the right edge.
+          // The snapshot callback runs before subsequent live writes parse.
+          const buffer = target._core._bufferService.buffer;
+          buffer.scrollTop = scrollTop;
+          buffer.scrollBottom = scrollBottom;
+          buffer.x = cursorX;
+          buffer.y = cursorY;
+          target.refresh(0, target.rows - 1);
+        });
       }
     } else if (msg.type === 'terminal_snapshot_error') {
       pendingSizeSnapshot.delete(msg.agentId);
