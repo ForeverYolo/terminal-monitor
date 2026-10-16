@@ -1,218 +1,209 @@
 #!/bin/bash
-# Restart Terminal Monitor server/client screen sessions on remote targets.
-#
-# Usage:
-#   bash restart.sh server <target-label>
-#   bash restart.sh client <screen-session> <target-label> [scope]
-#
-# scope (client mode only, default: service):
-#   service  restart only the swt-client-<session> screen running node client.js
-#   real     restart only the real screen session <session> (recreated EMPTY —
-#            everything running inside it is killed)
-#   all      restart both: service screen is killed first, real screen is
-#            recreated, then the service is started so it attaches fresh
-#
-# Targets use the same format as deploy.sh:
-#   label|user|host|port|path
-
-set -u
+# Restart the local installation, or a remote target from deploy.targets.conf.
+#   bash restart.sh --help
+#   bash restart.sh server [target-label|--local]
+#   bash restart.sh client <screen-session> [target-label|--local] [scope]
+# Omitting the target means local. Client scope defaults to service; real/all
+# recreate the task Screen and terminate everything running inside it.
+set -uo pipefail
 
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF="$PROJ_DIR/deploy.targets.conf"
 MODE="${1:-}"
-# server mode:  bash restart.sh server <target-label>            → label is $2
-# client mode:  bash restart.sh client <screen-session> <label> [scope] → label is $3
-if [ "$MODE" = "server" ]; then
-  TARGET_LABEL="${2:-}"
-else
-  SCREEN_SESSION="${2:-}"
-  TARGET_LABEL="${3:-}"
-  SCOPE="${4:-service}"
-fi
+SCREEN_SESSION=""
+SCOPE="service"
+usage() {
+  echo '用法: bash restart.sh server [目标标签|--local]'
+  echo '      bash restart.sh client <会话名> [目标标签|--local] [service|real|all]'
+  echo '不指定目标时直接重启本机，无需 deploy.targets.conf。'
+  echo '指定目标标签时，从 deploy.targets.conf 读取目标并通过 SSH 重启。'
+  echo 'service(默认): 只重启监控；real/all: 重建任务 Screen，终止其中的任务。'
+  echo '示例: bash restart.sh client monitor-1                    # 本机监控'
+  echo '      bash restart.sh server                              # 本机服务端'
+  echo '      bash restart.sh client monitor-1 gpu-box             # 远程监控'
+  echo '      bash restart.sh client monitor-1 --local service     # 显式本机'
+  echo '帮助: bash restart.sh --help（也支持 -h 和 help）'
+}
+for argument in "$@"; do
+  case "$argument" in -h|--help) usage; exit 0 ;; esac
+done
+if [ "$MODE" = help ]; then usage; exit 0; fi
+case "$MODE" in
+  server)
+    [ "$#" -le 2 ] || { usage; exit 1; }
+    TARGET_LABEL="${2:-}"
+    ;;
+  client)
+    SCREEN_SESSION="${2:-}"
+    TARGET_LABEL="${3:-}"
+    SCOPE="${4:-service}"
+    [ "$#" -le 4 ] || { usage; exit 1; }
+    [[ "$SCREEN_SESSION" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] || {
+      echo '[!] 请指定有效的 Screen 会话名（字母、数字、下划线、点或连字符）'; exit 1;
+    }
+    case "$SCOPE" in
+      service|real|all) ;;
+      *) echo "[!] 无效 scope: $SCOPE（可选 service、real、all）"; exit 1 ;;
+    esac
+    ;;
+  *) usage; exit 1 ;;
+esac
 
-if [ "$MODE" != "server" ] && [ "$MODE" != "client" ]; then
-  echo "用法: bash restart.sh server <target-label>"
-  echo "      bash restart.sh client <screen-session> <target-label> [scope]"
-  echo "scope: service(默认, 只重启 swt-client-<session> 服务进程) |"
-  echo "       real(只重启真实 <session> screen, 内容会被清空) |"
-  echo "       all(两者都重启, 服务进程重新 attach)"
-  exit 1
-fi
-
-if [ "$MODE" = "client" ] && [ -z "$SCREEN_SESSION" ]; then
-  echo "[!] client 模式必须指定 screen session，例如: bash restart.sh client mywork"
-  exit 1
-fi
-
-if [ "$MODE" = "server" ] && [ -z "$TARGET_LABEL" ]; then
-  echo "[!] server 模式必须指定目标标签，例如: bash restart.sh server server"
-  exit 1
-fi
-
-if [ "$MODE" = "client" ] && [ -z "$TARGET_LABEL" ]; then
-  echo "[!] client 模式必须指定目标标签，例如: bash restart.sh client mywork gpu-box"
-  exit 1
-fi
-
-if [ "$MODE" = "client" ]; then
-  case "$SCOPE" in
-    service|real|all) ;;
-    *)
-      echo "[!] 无效 scope: $SCOPE (可选: service | real | all，默认 service)"
-      exit 1
-      ;;
-  esac
-fi
-
-if [ ! -f "$CONF" ]; then
-  echo "[!] Target config not found: $CONF"
-  echo "    Copy deploy.targets.example.conf -> deploy.targets.conf and fill in your hosts."
-  exit 1
-fi
-
+LOCAL=0
 TARGETS=()
-while IFS= read -r line || [ -n "$line" ]; do
-  line="${line%%#*}"
-  line="$(echo "$line" | xargs)"
-  [ -n "$line" ] && TARGETS+=("$line")
-done < "$CONF"
-
-if [ ${#TARGETS[@]} -eq 0 ]; then
-  echo "[!] No targets defined in $CONF"
-  exit 1
+if [ -z "$TARGET_LABEL" ] || [ "$TARGET_LABEL" = '--local' ]; then
+  LOCAL=1
+  TARGETS=("local|$(id -un)|localhost|0|$PROJ_DIR")
+else
+  [ -f "$CONF" ] || { echo "[!] Target config not found: $CONF"; exit 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    TARGETS+=("$line")
+  done < "$CONF"
 fi
 
-# Remote install layout is the one created by install.sh:
-#   server  → swt-server, server.js
-#   client  → swt-client-<session>, client.js --config=config.client-<session>.json
-if [ "$MODE" = "server" ]; then
-  screen_name="swt-server"
-  log_file="server.log"
-  node_args="server.js"
-  scope="service"
-else
+# One worker is executed directly by local bash, or sent to remote bash over
+# SSH. Quote only the parameter declarations; keep the worker body literal.
+worker=$(cat <<'WORKER'
+set -euo pipefail
+cd "$RESTART_DIR"
+ROOT="$PWD"
+entry="$MODE.js"
+if [ "$MODE" = client ]; then
   screen_name="swt-client-$SCREEN_SESSION"
   log_file="client-$SCREEN_SESSION.log"
-  node_args="client.js --config=config.client-$SCREEN_SESSION.json"
-  scope="$SCOPE"
+  config="config.client-$SCREEN_SESSION.json"
+  node_args=("--config=$config")
+else
+  screen_name='swt-server'
+  log_file='server.log'
+  config='config.json'
+  node_args=()
 fi
+screen_exists() {
+  local name tail output
+  output=$(screen -ls 2>/dev/null || true)
+  while read -r name tail; do
+    if [[ "$name" = *.* && "${name#*.}" = "$1" ]]; then return 0; fi
+  done <<< "$output"
+  return 1
+}
+stop_screen() {
+  if screen_exists "$1"; then
+    screen -S "$1" -X quit
+    for ((i=0; i<30; i++)); do
+      screen_exists "$1" || return 0
+      sleep 0.1
+    done
+    echo "[restart] Screen did not stop: $1" >&2
+    return 1
+  fi
+}
+if [ "$SCOPE" != real ]; then
+  if [ "$MODE" = client ] && [ -f "$config.stop" ]; then
+    echo '[restart] .stop marker present — node was terminated, skipping relaunch'
+    exit 0
+  fi
+  [ -f "$config" ] || { echo "[restart] config not found: $ROOT/$config" >&2; exit 1; }
+  if [ "$MODE" = client ]; then
+    check_require='require("./terminal-state"); require("node-pty")'
+  else
+    check_require='require("ws")'
+  fi
+  # Probe the runtime before stopping anything. Nvm is not loaded by SSH;
+  # parsing the entry alone also misses incompatible terminal dependencies.
+  NODE_BIN=''
+  for candidate in "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node /usr/bin/node node; do
+    if [ "$candidate" = node ]; then candidate=$(command -v node || true); fi
+    if [ -n "$candidate" ] && [ -x "$candidate" ] &&
+       "$candidate" --check "$entry" 2>/dev/null &&
+       "$candidate" -e "$check_require" 2>/dev/null; then
+      NODE_BIN="$candidate"
+      break
+    fi
+  done
+  [ -n "$NODE_BIN" ] || { echo '[restart] no working node found' >&2; exit 1; }
+  "$NODE_BIN" -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$config"
+  stop_screen "$screen_name"
+  # A node-pty client can survive Screen's SIGHUP. Match the exact project,
+  # entry and configuration, rather than pkill patterns that hit siblings.
+  pids=$("$NODE_BIN" - "$ROOT" "$entry" "$config" <<'NODE'
+const fs = require('fs'), path = require('path');
+const [root, entry, config] = process.argv.slice(2);
+for (const pid of fs.readdirSync('/proc').filter(x => /^\d+$/.test(x))) {
+  try {
+    const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+    if (!['node', 'nodejs'].includes(path.basename(args[0])) || !args[1]) continue;
+    const cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+    if (path.resolve(cwd, args[1]) !== path.resolve(root, entry)) continue;
+    let configured = args.find(x => x.startsWith('--config='))?.slice(9);
+    const index = args.indexOf('--config');
+    if (!configured && index >= 0) configured = args[index + 1];
+    if (path.resolve(cwd, configured || path.join(root, 'config.json')) !== path.join(root, config)) continue;
+    process.kill(Number(pid), 'SIGTERM');
+    console.log(pid);
+  } catch (error) {
+    if (!['ENOENT', 'ESRCH', 'EACCES'].includes(error.code)) throw error;
+  }
+}
+NODE
+)
+  for pid in $pids; do
+    for ((i=0; i<30; i++)); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "[restart] process $pid did not stop; refusing to start a duplicate" >&2
+      exit 1
+    fi
+  done
+fi
+if [ "$SCOPE" = real ] || [ "$SCOPE" = all ]; then
+  stop_screen "$SCREEN_SESSION"
+  screen -dmS "$SCREEN_SESSION" bash
+  screen_exists "$SCREEN_SESSION" || { echo '[restart] task Screen did not come up' >&2; exit 1; }
+fi
+if [ "$SCOPE" != real ]; then
+  screen -dmS "$screen_name" bash -c \
+    'cd "$1" && exec "$2" "$3" "${@:5}" 2>&1 | tee -a "$4"' \
+    _ "$ROOT" "$NODE_BIN" "$entry" "$log_file" "${node_args[@]}"
+  sleep 1
+  screen_exists "$screen_name" || { echo "[restart] Screen did not come up, check $log_file" >&2; exit 1; }
+fi
+WORKER
+)
 
 failed=0
 matched=0
 for target in "${TARGETS[@]}"; do
-  IFS='|' read -r label user host port path <<< "$target"
-  if [ -z "${label:-}" ] || [ -z "${user:-}" ] || [ -z "${host:-}" ] || [ -z "${port:-}" ] || [ -z "${path:-}" ]; then
-    echo "[!] Invalid target (expected label|user|host|port|path): $target"
-    failed=$((failed + 1))
-    continue
-  fi
-  if [ "$label" != "$TARGET_LABEL" ]; then
-    continue
-  fi
+  IFS='|' read -r label user host port directory <<< "$target"
+  if [ "$LOCAL" = 0 ] && [ "$label" != "$TARGET_LABEL" ]; then continue; fi
   matched=$((matched + 1))
-
-  printf -v qpath '%q' "$path"
-  printf -v qscreen '%q' "$screen_name"
-  printf -v qreal '%q' "${SCREEN_SESSION:-}"
-  printf -v qlog '%q' "$log_file"
-
-  # The remote script is piped to `bash -s` via stdin instead of spliced into
-  # one giant `ssh host "..."` string. The node probe below is full of quotes;
-  # nesting those inside bash -c "..." inside ssh "..." produces quoting bugs
-  # ('client.js: command not found'). Via stdin there is no nesting.
-  #
-  # Node resolution: some hosts (2080-server) have an ancient system node (v12)
-  # that can't parse the app's optional-chaining syntax, with the real runtime
-  # in nvm. Non-interactive SSH doesn't load nvm (see NODE_RESOLVE comment), so
-  # bare `node` there means v12 → instant SyntaxError crash loop. The probe
-  # picks the first candidate that can parse the entry file and load its
-  # runtime dependencies. Node 24 parses client.js but xterm-headless 5.3
-  # fails there with "window is not defined"; Node 20 works. Probe BEFORE
-  # stopping the current service so a missing runtime does not cause downtime.
-  # NODE_RESOLVE is single-quoted: it must expand on the REMOTE side.
-  NODE_RESOLVE='NODE_BIN=""
-for P in "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node /usr/bin/node node; do
-  if [ "$P" = "node" ]; then P="$(command -v node 2>/dev/null)"; fi
-  if [ -n "$P" ] && [ -x "$P" ] && "$P" --check "$CHECK_FILE" 2>/dev/null &&
-     "$P" -e "$CHECK_REQUIRE" 2>/dev/null; then
-    NODE_BIN="$P"
-    break
+  if [ -z "$label" ] || [ -z "$user" ] || [ -z "$host" ] || [ -z "$directory" ] || ! [[ "$port" =~ ^[0-9]+$ ]]; then
+    echo '[!] Invalid target (expected label|user|host|port|path)'
+    failed=$((failed + 1))
+    continue
   fi
-done
-[ -n "$NODE_BIN" ] || { echo "[restart] no working node found" >&2; exit 1; }
-# Must EXPORT: plain shell variables are not inherited by the bash -c child
-# that screen spawns, and an empty $NODE_BIN there fails as `exec: : not found`.
-export NODE_BIN'
-
-  if [ "$MODE" = "client" ]; then
-    check_file='client.js'
-    check_require='require("./terminal-state"); require("node-pty")'
+  printf -v declarations 'RESTART_DIR=%q\nMODE=%q\nSCREEN_SESSION=%q\nSCOPE=%q\n' "$directory" "$MODE" "$SCREEN_SESSION" "$SCOPE"
+  script="$declarations$worker"
+  if [ "$LOCAL" = 1 ]; then
+    echo "=== Restarting $MODE locally [scope: $SCOPE] ==="
+    if bash -s <<< "$script"; then result=0; else result=$?; fi
   else
-    check_file='server.js'
-    check_require='require("ws")'
+    echo "=== Restarting $MODE on $label ($user@$host:$port) [scope: $SCOPE] ==="
+    if ssh -p "$port" "$user@$host" 'bash -s' <<< "$script"; then result=0; else result=$?; fi
   fi
-  printf -v qcheck_file '%q' "$check_file"
-  printf -v qcheck_require '%q' "$check_require"
-  remote_script="cd $qpath || exit 1
-CHECK_FILE=$qcheck_file
-CHECK_REQUIRE=$qcheck_require
-$NODE_RESOLVE"
-  do_service=1; do_real=0
-  [ "$scope" = "real" ] && do_service=0
-  [ "$scope" = "all" ] && do_real=1
-  [ "$scope" = "real" ] && do_real=1
-
-  # --- service part: quit swt screen, resolve node, relaunch via screen ---
-  if [ "$do_service" = 1 ]; then
-    # Honor a termination: a .stop marker (written by web "终止节点") means
-    # this node must NOT be resurrected by a restart — skip it entirely.
-    # Client mode only: server mode has no SCREEN_SESSION variable.
-    if [ "$MODE" = "client" ]; then
-      remote_script+="
-if [ -f '$qpath/config.client-$SCREEN_SESSION.json.stop' ]; then
-  echo '[restart] .stop marker present — node was terminated, skipping relaunch'
-  exit 0
-fi"
-    fi
-    remote_script+="
-(screen -S $qscreen -X quit 2>/dev/null || true) && sleep 1"
-    remote_script+="
-# screen quit can leave the node client alive as an orphan (it survives the
-# SIGHUP race because it holds its own node-pty) — it would then reconnect and
-# show up as a duplicate agent. Sweep the exact process before relaunching.
-pkill -f 'node.*client.js --config=$node_args' 2>/dev/null || true
-sleep 1"
-    remote_script+="
-screen -dmS $qscreen bash -c 'cd $qpath && exec \"\$NODE_BIN\" $qpath/$node_args 2>&1 | tee -a $qpath/$qlog'
-sleep 3
-screen -ls | grep -q \"[.]$qscreen\" || { echo '[restart] screen did not come up, check $qlog' >&2; exit 1; }"
-  fi
-
-  # --- real part: quit the real screen, recreate it EMPTY with a shell ---
-  if [ "$do_real" = 1 ]; then
-    remote_script+="
-(screen -S $qreal -X quit 2>/dev/null || true) && sleep 1
-screen -dmS $qreal bash
-sleep 1
-screen -ls | grep -q \"[.]$qreal\" || { echo '[restart] real screen did not come up' >&2; exit 1; }"
-  fi
-
-  echo "=== Restarting $MODE on $label ($user@$host:$port) [scope: $scope] ==="
-  if ssh -p "$port" "$user@$host" "bash -s" <<< "$remote_script"; then
-    echo "  [OK] restarted (scope: $scope, screen session verified)"
+  if [ "$result" = 0 ]; then
+    echo '  [OK] restart completed'
   else
-    echo "  [FAIL] could not restart (scope: $scope, see $log_file on target)"
+    echo '  [FAIL] could not restart'
     failed=$((failed + 1))
   fi
 done
-
-if [ "$matched" -eq 0 ]; then
-  echo "[!] Target label not found: $TARGET_LABEL"
-  exit 1
-fi
-
-if [ "$failed" -gt 0 ]; then
-  echo "Done with $failed target(s) failed."
-  exit 1
-fi
-echo "All targets restarted successfully."
+[ "$matched" -gt 0 ] || { echo "[!] Target label not found: $TARGET_LABEL"; exit 1; }
+[ "$failed" -eq 0 ] || { echo "Done with $failed target(s) failed."; exit 1; }
+echo 'All targets restarted successfully.'

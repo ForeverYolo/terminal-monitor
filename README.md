@@ -149,12 +149,20 @@ cp deploy.targets.example.conf deploy.targets.conf
 ./deploy.sh                                  # 推送默认文件集
 ./deploy.sh server.js public/index.html      # 推送指定文件
 
+bash restart.sh --help                       # 查看本机/远程重启用法
+
+# 本机重启：不读取 deploy.targets.conf
+bash restart.sh client monitor-1              # 只重启监控，保留任务 Screen
+bash restart.sh server                        # 重启本机 server
+
 # 重启指定目标上的远程服务（使用 install.sh 创建的 screen 会话）
 bash restart.sh server server                # label 为 server 的目标
 bash restart.sh client mywork gpu-box        # gpu-box 上的 swt-client-mywork
 ```
 
-`restart.sh` 必须指定 `deploy.targets.conf` 中的目标 label，只负责通过 SSH 重启进程，不会重新推送代码；客户端还必须指定对应的 Screen 会话名。
+`restart.sh` 不指定目标时直接在脚本所在项目目录重启本机，无需部署配置或 SSH。指定 `deploy.targets.conf` 中的目标 label 时通过 SSH 重启远程服务；客户端必须指定对应的 Screen 会话名。脚本自动选择能加载项目依赖的 Node，重启前检查配置文件，并清理同一项目、同一配置的残留进程。
+
+客户端默认 `service` 只重启监控进程；`real` 和 `all` 会重建任务 Screen 并终止里面的任务。显式指定本机和 scope 的写法为 `bash restart.sh client monitor-1 --local service`。重启只应用磁盘上已有的代码和配置；启用原生 TUI 时，在对应 `config.client-<会话名>.json` 的 `client` 对象中设置 `"nativeTui": true` 后重启即可。
 
 ### 4.5 后台常驻
 
