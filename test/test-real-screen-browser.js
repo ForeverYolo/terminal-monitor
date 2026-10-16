@@ -32,7 +32,7 @@ function lines() { return Array.from({length: term.buffer.active.length}, (_, i)
   client.stdout.on('data', x => clientLog += x); client.stderr.on('data', x => clientLog += x);
   await until(async () => (await (await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents.some(a => a.screen === session));
   await delay(5000);
-  browser = await chromium.launch({headless:true, args:['--no-sandbox']});
+  browser = await chromium.launch({headless:true, executablePath:process.env.CHROMIUM_EXECUTABLE, args:['--no-sandbox']});
   const page = await browser.newPage({viewport:{width:1200,height:800}});
   const pageErrors = []; page.on('pageerror', e => pageErrors.push(e.message));
   async function routeAssets(target) { await target.route('https://cdn.jsdelivr.net/**', route => {

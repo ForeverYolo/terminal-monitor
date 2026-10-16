@@ -1,0 +1,45 @@
+'use strict';
+const assert = require('assert');
+const { Terminal } = require('xterm-headless');
+const { TerminalState } = require('../terminal-state');
+const { createAltScreenFilter, encodeScreenInput } = require('../terminal-filter');
+const write = (term, data) => new Promise(r => term.write(data, r));
+const snapshot = source => new Promise(r => source.snapshot(r));
+function state(term) {
+  const b = term.buffer.active;
+  return { type: b.type, lines: Array.from({length:b.length},(_,i)=>b.getLine(i).translateToString(true)), x:b.cursorX,y:b.cursorY,modes:term.modes };
+}
+(async () => {
+  const emitted=[];
+  const source=new TerminalState(40,8,p=>emitted.push(Buffer.from(p,'base64')),{nativeTui:true});
+  const restored=new Terminal({allowProposedApi:true,cols:40,rows:8,scrollback:5000});
+  const pieces=['shell history\r\n', '\x1b[?104', '9h\x1b[H\x1b[?1000;1006h\x1b[?25l', '\x1b[41;7mNATIVE\x1b[0m\x1b[4;3Hpage 20'];
+  pieces.forEach(s=>source.write(s));
+  const s=await snapshot(source);
+  assert(Buffer.concat(emitted).equals(Buffer.from(pieces.join(''))),'native output changed');
+  await write(restored,Buffer.from(s.payload,'base64'));
+  assert.deepStrictEqual(state(restored),state(source.term),'alternate snapshot differs');
+  const bytes=Buffer.from(s.payload,'base64').toString();
+  assert(bytes.includes('\x1b[?1006h'),'snapshot omitted SGR mouse encoding');
+  assert(bytes.includes('\x1b[?25l'),'snapshot omitted hidden cursor');
+  source.write('\x1b[2A\x1b[6CUPDATE');await snapshot(source);
+  await write(restored,emitted.at(-1));
+  assert.deepStrictEqual(state(restored),state(source.term),'alternate continuation differs');
+  source.write('\x1b[?1000;1006l\x1b[?1049l');await snapshot(source);await write(restored,emitted.at(-1));
+  assert.deepStrictEqual(state(restored),state(source.term),'alternate exit lost normal buffer');
+  assert(state(restored).lines.some(l=>l.includes('shell history')),'shell history lost');
+  source.write('\x1bc');const reset=Buffer.from((await snapshot(source)).payload,'base64').toString();
+  assert(!reset.includes('\x1b[?1006h'),'RIS retained stale mouse mode');
+  const legacy=createAltScreenFilter();assert(!Buffer.from(legacy(Buffer.from('\x1b[?1049h\x1b[?1006h'))).length,'legacy behavior changed');
+  const sgr='\x1b[<64;160;6M';
+  assert.equal(encodeScreenInput(sgr),sgr,'legacy input changed');
+  assert(encodeScreenInput(sgr,true).equals(Buffer.from([27,91,77,96,192,38])),'mouse coordinates were UTF-8 encoded');
+  assert(encodeScreenInput('中文'+sgr+'\x1b[5~',true).equals(Buffer.concat([Buffer.from('中文'),Buffer.from([27,91,77,96,192,38]),Buffer.from('\x1b[5~')])),'mixed text/key/mouse input corrupted');
+  assert(encodeScreenInput('\x1b[<0;10;6m',true).equals(Buffer.from([27,91,77,35,42,38])),'mouse release conversion wrong');
+  assert(encodeScreenInput('\x1b[<64;260;6M',true).equals(Buffer.from([27,91,77,96,255,38])),'wide wheel conversion wrong');
+  assert(encodeScreenInput('\x1b[<0;260;6M',true).length===0,'unsupported click leaked protocol text');
+  const x10=String.fromCharCode(27,91,77,96,192,38);
+  assert(encodeScreenInput(x10,true).equals(Buffer.from([27,91,77,96,192,38])),'classic mouse bytes were UTF-8 encoded');
+  assert(encodeScreenInput('\x1b[96;160;6M',true).equals(Buffer.from([27,91,77,96,192,38])),'urxvt mouse conversion wrong');
+  source.dispose();restored.dispose();console.log('PASS native bytes, split/combined modes, alternate snapshot/continuation/exit, mouse encoding, RIS and legacy filtering');
+})().catch(e=>{console.error(e);process.exitCode=1;});

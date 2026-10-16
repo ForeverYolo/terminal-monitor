@@ -31,6 +31,8 @@ const tickFile = path.join(tmpDir, 'last-tick');
 // the PTY was NOT respawned across the reconnect.
 fs.writeFileSync(fakeScreen, `#!/bin/bash
 echo $$ > ${pidFile}
+echo "PTY-PID $$"
+echo "PTY-SIZE $(stty size)"
 while true; do
   SEQ=$((SEQ+1))
   echo "TICK $SEQ at $(date +%s.%N)"
@@ -139,6 +141,23 @@ async function main() {
 
   // live data still flows
   await sleep(1000);
+  // A surviving PTY retains its exit handler across the WebSocket reconnect.
+  // If it later exits, the client must create another attachment rather than
+  // remain online forever with no PTY and a stale terminal snapshot.
+  ws.send(JSON.stringify({type:'resize',agentId,cols:72,rows:20}));
+  await sleep(500);
+  process.kill(Number(pidAfter), 'SIGTERM');
+  let replacementPid = pidAfter;
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    replacementPid = fs.readFileSync(pidFile, 'utf8').trim();
+    if (replacementPid !== pidAfter && datas.some(s => s.includes(`PTY-PID ${replacementPid}`))) break;
+    await sleep(100);
+  }
+  check('PTY respawns after exiting following a WebSocket reconnect', replacementPid !== pidAfter,
+    clientLog.slice(-400));
+  check('live output resumes from the replacement PTY', datas.some(s => s.includes(`PTY-PID ${replacementPid}`)));
+  check('replacement PTY retains the browser size', datas.some(s => s.includes('PTY-SIZE 20 72')));
   ws.close();
 
   console.log(`\n${passed} passed, ${failed} failed`);

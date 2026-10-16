@@ -260,6 +260,10 @@ config.client-download.json  # 监控 download 会话
    - 历史滚动缓冲（服务端缓存 ~2MB，可点"加载更多历史"向前翻）
    - 重启 screen 会话（按钮：杀掉 PTY 触发 respawn，重新 `-x` 挂载）
 
+### 独立公网测试平台
+
+腾讯 IP 测试入口、2080 专用 client、自动恢复、部署/启停和公网浏览器验收见 [测试平台运行说明](docs/staging-platform.md)。测试环境独立运行，用于后续改动的发布前验收。
+
 ### 原生 TUI 翻页（可选）
 
 新版 Codex 的会话历史可能保存在应用内部，屏幕重绘不会产生可滚动的终端历史。可在对应 client 配置中设置 `"nativeTui": true`，重启 monitor client，保留鼠标协议，让应用自己处理滚轮和 PageUp/PageDown；虚拟化 Screen 显示端的备用屏幕，保留 shell 输出历史。默认关闭，沿用现有过滤方式；单终端和多终端均支持。
