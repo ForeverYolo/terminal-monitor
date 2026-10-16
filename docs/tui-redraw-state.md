@@ -40,3 +40,7 @@ node test/test-scroll-region-browser.js
 ```
 
 另通过现有快照协议、原生鼠标/翻页、真实 Screen、真实 Codex 和 shell 往返测试。
+
+## 后续排查记录
+
+完整终端状态的补齐暂缓实施。当前快照覆盖范围、已知缺失项和恢复顺序风险见 [终端快照已知状态缺口与排查记录](../KNOWN_TERMINAL_STATE_GAPS.md)。后续遇到刷新暂时恢复、继续绘制又错乱时，可按该清单排查。
