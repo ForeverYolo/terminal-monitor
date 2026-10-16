@@ -10,6 +10,7 @@
     "name": "my-machine",
     "screen": "main",
     "screenMode": "auto",
+    "nativeTui": false,
     "attrs": {
       "tags": []
     }

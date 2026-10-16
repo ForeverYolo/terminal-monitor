@@ -21,7 +21,11 @@
 // the browser (selection, wheel scroll) and no event bytes are ever produced.
 const MOUSE_REPORT_MODE = /^(100[0-7]|101[56])$/;
 
-function createAltScreenFilter() {
+function createAltScreenFilter(options = {}) {
+  // Direct native terminals are byte-preserving. Screen relays virtualize the
+  // outer alternate buffer while retaining the application mouse/cursor modes.
+  const nativeTui = options.nativeTui === true;
+  if (nativeTui && !options.screenRelay) return bytes => bytes;
   let pending = null;  // head of an escape sequence split across chunks
   let orphanTail = false;  // dropping a BEL-split title garbage tail across chunks
   let orphanCount = 0;
@@ -99,19 +103,36 @@ function createAltScreenFilter() {
         // which is the safest steady state on this relayed link.
         if (data[i + 2] === 0x3f && (data[end] === 0x68 || data[end] === 0x6c)) {
           const mode = String.fromCharCode(...data.slice(i + 3, end));
+          if (nativeTui) {
+            // Screen owns the outer alternate buffer for the whole attachment,
+            // including shell time. Virtualize only those switches, retaining
+            // the application's mouse, focus and cursor modes in the main
+            // buffer so wheel ownership follows the actual mouse protocol.
+            const modes = mode.split(';');
+            const kept = modes.filter(value => !['47', '1047', '1049'].includes(value));
+            if (kept.length !== modes.length) {
+              if (kept.length) {
+                const replacement = `\x1b[?${kept.join(';')}${String.fromCharCode(data[end])}`;
+                result.set(Uint8Array.from(replacement, c => c.charCodeAt(0)), out);
+                out += replacement.length;
+              }
+              i = end + 1;
+              continue;
+            }
+          }
           // Claude draws its text cursor as a one-cell reverse-video block and
           // also hides xterm's native cursor while the TUI is active.  Reverse
           // video is filtered below because it turns the virtual scrollback
           // into large background-colour blocks, so keep the native cursor
           // visible as a reliable replacement.  Convert every hide request to
           // show; the application still controls the cursor position.
-          if (mode === '25' && data[end] === 0x6c) {
+          if (!nativeTui && mode === '25' && data[end] === 0x6c) {
             result.set([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x68], out);
             out += 6;
             i = end + 1;
             continue;
           }
-          if (MOUSE_REPORT_MODE.test(mode)) {
+          if (!nativeTui && MOUSE_REPORT_MODE.test(mode)) {
             i = end + 1;
             continue;
           }
@@ -142,7 +163,7 @@ function createAltScreenFilter() {
         // transient badges/status bars.  In the virtual main buffer these become
         // persistent white/red blocks in scrollback.  Keep text, foreground
         // colours and other attributes, but remove background-related SGR flags.
-        if (data[end] === 0x6d) { // CSI ... m
+        if (!nativeTui && data[end] === 0x6d) { // CSI ... m
           const params = String.fromCharCode(...data.slice(i + 2, end)).split(';');
         const kept = [];
         let changed = false;
@@ -262,4 +283,36 @@ function createAltScreenFilter() {
 }
 
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { createAltScreenFilter };
+// GNU Screen 4.09 can request SGR reports on its display yet consume only the
+// classic six-byte mouse reports on input. Convert at the PTY boundary, where
+// bytes can stay binary instead of being UTF-8 encoded by the browser.
+function encodeScreenInput(text, nativeTui = false) {
+  if (!nativeTui) return text;
+  const chunks = [];
+  const pattern = /\x1b\[<(\d+);(\d+);(\d+)([Mm])|\x1b\[M([\s\S]{3})|\x1b\[(\d+);(\d+);(\d+)M/g;
+  let offset = 0;
+  for (const match of text.matchAll(pattern)) {
+    chunks.push(Buffer.from(text.slice(offset, match.index)));
+    if (match[5]) {
+      const bytes = Array.from(match[5], c => c.charCodeAt(0));
+      if (bytes.every(b => b <= 255)) chunks.push(Buffer.from([27, 91, 77, ...bytes]));
+      offset = match.index + match[0].length;
+      continue;
+    }
+    const urxvt = match[6] !== undefined;
+    let button = Number(match[1] ?? match[6]) - (urxvt ? 32 : 0);
+    let x = Number(match[2] ?? match[7]), y = Number(match[3] ?? match[8]);
+    // The classic protocol cannot address beyond 223 cells. Wheel scrolling
+    // does not need a precise point in this single-window Screen relay.
+    if (button & 64) { x = Math.min(x, 223); y = Math.min(y, 223); }
+    if (button >= 0 && button <= 223 && x >= 1 && x <= 223 && y >= 1 && y <= 223) {
+      if (match[4] === 'm') button = (button & ~3) | 3;
+      chunks.push(Buffer.from([27, 91, 77, button + 32, x + 32, y + 32]));
+    }
+    offset = match.index + match[0].length;
+  }
+  chunks.push(Buffer.from(text.slice(offset)));
+  return Buffer.concat(chunks);
+}
+
+if (typeof module !== 'undefined' && module.exports) module.exports = { createAltScreenFilter, encodeScreenInput };

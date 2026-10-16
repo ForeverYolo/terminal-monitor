@@ -260,6 +260,12 @@ config.client-download.json  # 监控 download 会话
    - 历史滚动缓冲（服务端缓存 ~2MB，可点"加载更多历史"向前翻）
    - 重启 screen 会话（按钮：杀掉 PTY 触发 respawn，重新 `-x` 挂载）
 
+### 原生 TUI 翻页（可选）
+
+新版 Codex 的会话历史可能保存在应用内部，屏幕重绘不会产生可滚动的终端历史。可在对应 client 配置中设置 `"nativeTui": true`，重启 monitor client，保留鼠标协议，让应用自己处理滚轮和 PageUp/PageDown；虚拟化 Screen 显示端的备用屏幕，保留 shell 输出历史。默认关闭，沿用现有过滤方式；单终端和多终端均支持。
+
+原生模式下，应用启用鼠标跟踪时，上翻/下翻按钮发送翻页键，“最新”按钮禁用；退出到 shell 后，滚轮和这些按钮恢复操作浏览器历史。当前 Screen 4.09 的鼠标输入由 client 做兼容转换，超出 223 的点击坐标不支持。实现、实测结果及复现步骤见 [原生 TUI 模式说明](docs/native-tui-mode.md)。
+
 ### 6.2 移动端
 
 屏幕宽度 < 600px 自动显示虚拟键盘工具栏：方向键 ↑↓←→、Tab、Esc、Home/End、退格、Ctrl 组合键（点 Ctrl 激活再按字母）、粘贴。

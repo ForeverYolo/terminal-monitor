@@ -700,7 +700,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
     <div class="tb-row">
       <button onclick="scrollTermPages(-1)" title="向上翻一页看历史">⇞ 上翻</button>
       <button onclick="scrollTermPages(1)" title="向下翻一页">⇟ 下翻</button>
-      <button onclick="scrollTermToBottom()" title="回到最新输出">⤓ 最新</button>
+      <button id="btn-scroll-latest" onclick="scrollTermToBottom()" title="回到最新输出">⤓ 最新</button>
     </div>
   </div>
 
@@ -794,6 +794,7 @@ function remapMultiTerms() {
     if (!fresh || fresh === oldId) continue;
     delete multiTerms[oldId];
     entry.agentId = fresh;
+    entry.filter = createAltScreenFilter({ nativeTui: isNativeTuiAgent(fresh) });
     multiTerms[fresh] = entry;
     lastSeqByAgent.delete(fresh);
     selectedAgents.delete(oldId);
@@ -808,12 +809,27 @@ function remapMultiTerms() {
 // those protocol replies, but forwarding a replayed reply into screen makes
 // the shell echo strings such as "11;rgb:0f0f/0f0f/2323".  These are never
 // user keystrokes, so remove only complete OSC colour-report replies.
-function stripTerminalColorReplies(data) {
+function isNativeTuiAgent(id) {
+  return (lastAgents || []).some(a => a.id === id && a.nativeTui === true);
+}
+
+function updateNativeTuiControls() {
+  const button = document.getElementById('btn-scroll-latest');
+  const nativeTui = isNativeTuiAgent(currentAgentId) && applicationOwnsScrolling(term);
+  button.disabled = nativeTui;
+  button.title = nativeTui ? '原生 TUI 请用下翻、滚轮或应用快捷键回到末尾' : '回到最新输出';
+}
+
+function applicationOwnsScrolling(target) {
+  return !!target && (target.buffer.active.type === 'alternate' || target.modes.mouseTrackingMode !== 'none');
+}
+
+function stripTerminalColorReplies(data, nativeTui = false) {
   data = data.replace(/\x1b]1[012];rgb:[0-9a-f]{1,4}\/[0-9a-f]{1,4}\/[0-9a-f]{1,4}(?:\x07|\x1b\\)/gi, '');
   // Belt-and-braces: drop SGR / urxvt mouse-event reports in case tracking
   // ever gets enabled despite the output-side suppression.  A user cannot
   // type these sequences, so removing them never loses real keystrokes.
-  data = data.replace(/\x1b\[<?[0-9;]+[Mm]/g, '');
+  if (!nativeTui) data = data.replace(/\x1b\[<?[0-9;]+[Mm]/g, '');
   return data;
 }
 
@@ -881,10 +897,12 @@ function connect(username, password) {
         const fresh = resolveAgentId(currentTerminalKey) || currentAgentId;
         if (fresh !== currentAgentId) {
           currentAgentId = fresh;
+          termFilter = createAltScreenFilter({ nativeTui: isNativeTuiAgent(fresh) });
           lastSeqByAgent.delete(fresh);   // new id: start from a full replay
           if (term) term.clear();
         }
         const size = proposedSize(fitAddon, term);
+        updateNativeTuiControls();
         rememberRequestedSize(currentAgentId, size);
         ws.send(JSON.stringify({ type: 'connect', agentId: currentAgentId, ...size,
           resume: true, sinceSeq: lastSeqByAgent.get(currentAgentId) || 0 }));
@@ -939,12 +957,14 @@ function connect(username, password) {
         const fresh = resolveAgentId(currentTerminalKey);
         if (fresh && fresh !== currentAgentId && ws.readyState === WebSocket.OPEN) {
           currentAgentId = fresh;
+          termFilter = createAltScreenFilter({ nativeTui: isNativeTuiAgent(fresh) });
           lastSeqByAgent.delete(fresh);
           term.clear();
           const size = proposedSize(fitAddon, term);
           rememberRequestedSize(fresh, size);
           ws.send(JSON.stringify({ type: 'connect', agentId: fresh, ...size, sinceSeq: 0 }));
         }
+        updateNativeTuiControls();
       }
       if (views.multi.style.display !== 'none' && remapMultiTerms() && ws.readyState === WebSocket.OPEN) {
         const ids = Object.keys(multiTerms);
@@ -1380,14 +1400,15 @@ function openTerminal(agentId, agentName) {
   document.getElementById('float-upload').style.display = 'block';
   document.getElementById('float-download').style.display = 'block';
   const overlay = document.getElementById('term-overlay');
-  overlay.textContent = agentName;
+  overlay.textContent = agentName + (isNativeTuiAgent(agentId) ? ' · 原生 TUI' : '');
+  updateNativeTuiControls();
   overlay.style.display = 'block';
   // Fade out overlay after 3s
   setTimeout(() => { overlay.style.opacity = '0'; }, 3000);
 
   const container = document.getElementById('term-container');
   container.innerHTML = '';
-  termFilter = createAltScreenFilter();
+  termFilter = createAltScreenFilter({ nativeTui: isNativeTuiAgent(agentId) });
 
   // Reset structured-view state for this agent
   structBuf = '';
@@ -1422,6 +1443,7 @@ function openTerminal(agentId, agentName) {
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(container);
+  term.onWriteParsed(updateNativeTuiControls);
 
   // Force application cursor keys (DECCKM) ON in the browser terminal.  Apps
   // inside GNU screen (vim etc.) only recognise SS3 arrow keys (ESC O A, per
@@ -1488,7 +1510,7 @@ function openTerminal(agentId, agentName) {
 
   term.onData(data => {
     if (!ws || ws.readyState !== WebSocket.OPEN || !currentAgentId) return;
-    data = stripTerminalColorReplies(data);
+    data = stripTerminalColorReplies(data, isNativeTuiAgent(currentAgentId));
     if (!data) return;
     const bytes = new TextEncoder().encode(data);
     let bin = '';
@@ -2459,7 +2481,7 @@ function openMultiTerminal() {
     // Same DECCKM rationale as openTerminal: keep arrows SS3 for screen apps.
     term.write('\x1b[?1h');
 
-    const entry = { agentId, term, fitAddon, container: wrap.querySelector('.multi-term-container'), filter: createAltScreenFilter(), terminalKey: agent ? terminalKeyOf(agent) : null };
+    const entry = { agentId, term, fitAddon, container: wrap.querySelector('.multi-term-container'), filter: createAltScreenFilter({ nativeTui: isNativeTuiAgent(agentId) }), terminalKey: agent ? terminalKeyOf(agent) : null };
     multiTerms[agentId] = entry;
     const buttons = wrap.querySelectorAll('.term-actions button');
     buttons[0].onclick = () => onUploadClickFor(entry.agentId);
@@ -2471,7 +2493,7 @@ function openMultiTerminal() {
     // Handle input
     term.onData(data => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      data = stripTerminalColorReplies(data);
+      data = stripTerminalColorReplies(data, isNativeTuiAgent(entry.agentId));
       if (!data) return;
       const bytes = new TextEncoder().encode(data);
       let bin = '';
@@ -2785,7 +2807,10 @@ function focusMobileInput() {
 // -webkit-overflow-scrolling: touch, so these drive the same scroll API a
 // mouse wheel would, with no dependency on touch gesture handling at all.
 function scrollTermPages(n) {
-  if (term) term.scrollPages(n);
+  if (!term) return;
+  if (isNativeTuiAgent(currentAgentId) && applicationOwnsScrolling(term)) {
+    send(n < 0 ? '\x1b[5~' : '\x1b[6~');
+  } else term.scrollPages(n);
 }
 function scrollTermToBottom() {
   if (term) term.scrollToBottom();

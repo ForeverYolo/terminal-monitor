@@ -77,6 +77,8 @@ if (!serverUrl || !token || !name) {
 }
 
 const screenName = screenSession || 'main';
+const nativeTui = config.client.nativeTui === true;
+const encodeScreenInput = nativeTui ? require('./terminal-filter').encodeScreenInput : text => text;
 
 // --- Stable per-machine clientId ---
 // Groups this client with any nodes it spawns via spawn_node (server.js target.clientId
@@ -533,8 +535,8 @@ function stopClaudeStateReporter() {
 // -x: multi-display (for attached sessions), -r: reattach (for detached)
 // Use large default PTY size so TUI apps (claude, vim, etc.) have room.
 // Browser will send actual resize shortly after connecting.
-const cols = parseInt(config.client.cols) || 200;
-const rows = parseInt(config.client.rows) || 50;
+let cols = parseInt(config.client.cols) || 200;
+let rows = parseInt(config.client.rows) || 50;
 const screenArgs = (screenMode || 'auto') === 'auto'
   ? ['-x', screenName]   // default: -x works for attached sessions
   : screenMode === 'reattach'
@@ -619,7 +621,7 @@ function drainOfflineQueue() {
     while (offlineQueue.length > 0 && sent < 200) {
       const chunk = offlineQueue.shift();
       offlineQueueBytes -= chunk.length;
-      ws.send(JSON.stringify({ type: 'data', payload: chunk }));
+      ws.send(JSON.stringify({ type: 'data', payload: chunk, filtered: nativeTui }));
       sent++;
     }
     if (offlineQueue.length === 0) {
@@ -685,6 +687,7 @@ function connect() {
         sys: sysInfo,
         files,
         snapshotV1: !!TerminalState,
+        nativeTui,
         cols,
         rows
       }));
@@ -702,7 +705,8 @@ function connect() {
       if (ws && ws.readyState === WebSocket.OPEN) {
         sendRawOrQueue(JSON.stringify({ type: 'data', payload, filtered: true }));
       }
-    }) : null;
+    }, { nativeTui, screenRelay: true }) : null;
+    const fallbackFilter = nativeTui ? require('./terminal-filter').createAltScreenFilter({ nativeTui, screenRelay: true }) : bytes => bytes;
     if (ptyProcess) {
       try { ptyProcess.kill(); } catch {}
       ptyProcess.removeAllListeners('data');
@@ -735,9 +739,11 @@ function connect() {
       if (terminalState) {
         terminalState.write(data);
       } else {
-        const payload = Buffer.from(data).toString('base64');
+        const bytes = fallbackFilter(Buffer.from(data));
+        if (!bytes.length) return;
+        const payload = Buffer.from(bytes).toString('base64');
         if (ws && ws.readyState === WebSocket.OPEN && offlineQueue.length === 0) {
-          sendRawOrQueue(JSON.stringify({ type: 'data', payload }));
+          sendRawOrQueue(JSON.stringify({ type: 'data', payload, filtered: nativeTui }));
         } else {
           enqueueOffline(payload);
         }
@@ -767,11 +773,13 @@ function connect() {
     if (msg.type === 'data' && ptyProcess) {
       const input = Buffer.from(msg.payload, 'base64').toString('utf8');
       if (DEBUG_DUMP) dumpStream('IN', input);
-      ptyProcess.write(input);
+      ptyProcess.write(encodeScreenInput(input, nativeTui));
     }
 
     if (msg.type === 'resize' && ptyProcess) {
       const nextCols = msg.cols || cols, nextRows = msg.rows || rows;
+      cols = nextCols;
+      rows = nextRows;
       if (terminalState) terminalState.resize(nextCols, nextRows);
       ptyProcess.resize(nextCols, nextRows);
     }
@@ -1075,10 +1083,9 @@ function connect() {
     // viewport → everything between the disconnect and reconnect was gone
     // except that one redraw. The terminal model now keeps the gap for a
     // browser snapshot; legacy mode replays its offline queue on reconnect.
-    // (PTY died for real — screen exited — so there is nothing to keep.)
-    // Invalidate any pending respawn timer from this connection's pty —
-    // the reconnect's spawnPty owns the next generation.
-    if (ptyProcess) ptyGeneration++;
+    // A surviving PTY must keep its generation: its eventual exit handler
+    // still owns recovery. Only spawnPty increments the generation, which
+    // also invalidates old respawn timers if reconnect creates a replacement.
     // Abort any in-flight file transfers — streams won't survive a reconnect.
     for (const [, up] of activeUploads) { try { up.stream.destroy(); } catch {} }
     activeUploads.clear();

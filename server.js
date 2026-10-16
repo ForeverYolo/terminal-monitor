@@ -334,6 +334,7 @@ function getAgentsList(user) {
         name: a.name,
         screen: a.screen || '',
         snapshotV1: a.snapshotV1,
+        nativeTui: a.nativeTui,
         attrs: a.attrs || {},
         sys: a.sys || {},
         connectedAt: a.connectedAt,
@@ -579,6 +580,7 @@ const httpServer = http.createServer((req, res) => {
         lastLines,
         needsInput: hasPrompt(a.lastOutput),
         scrollbackSize: a.term ? a.term.scrollback.length : 0,
+        nativeTui: a.nativeTui,
         claudeState: a.claudeState || null,
         clientId: a.attrs && a.attrs.clientId ? a.attrs.clientId : null
       };
@@ -705,6 +707,7 @@ wss.on('connection', (ws) => {
         attrs: msg.attrs || {},
         sys: msg.sys || {},
         snapshotV1: msg.snapshotV1 === true,
+        nativeTui: msg.nativeTui === true,
         // sha256 of the agent's file copies (push-update versioning); at
         // register this equals the running version; query_files refreshes
         // update it to fresh DISK state afterwards. runningHashes stays the
