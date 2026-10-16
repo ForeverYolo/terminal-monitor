@@ -2,7 +2,7 @@
 const assert=require('assert');
 const fs=require('fs'),os=require('os'),path=require('path'),net=require('net');
 const {spawn,execFileSync}=require('child_process');
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { launchBrowser, routeTerminalAssets, login } = require('./helpers/browser');
 const project=path.resolve(__dirname,'..');
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'swt-native-browser-'));
 const session=`swt-native-${process.pid}`;
@@ -23,18 +23,12 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
  await until(async()=> (await fetch(`http://127.0.0.1:${port}/api/agents`)).ok);
  client=spawn(process.execPath,[path.join(project,'client.js'),`--config=${ccfg}`],{cwd:project});client.stdout.on('data',x=>clientLog+=x);client.stderr.on('data',x=>clientLog+=x);
  await until(async()=>{const a=(await(await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents;return a.some(x=>x.nativeTui===true);});
- browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE,args:['--no-sandbox']});
+ browser=await launchBrowser();
  const errors=[];
  async function openPage(){
   const p=await browser.newPage({viewport:{width:1200,height:800}});p.on('pageerror',e=>errors.push(e.message));
-  await p.route('https://cdn.jsdelivr.net/**',route=>{
-   const u=route.request().url();let file;
-   if(u.includes('xterm-addon-fit'))file=process.env.XTERM_FIT_JS||require.resolve('xterm-addon-fit/lib/xterm-addon-fit.js');
-   else if(u.endsWith('/xterm.js'))file=path.join(project,'node_modules/xterm/lib/xterm.js');
-   else if(u.endsWith('/xterm.css'))file=path.join(project,'node_modules/xterm/css/xterm.css');
-   else return route.abort();return route.fulfill({path:file,contentType:u.endsWith('.css')?'text/css':'application/javascript'});
-  });
-  await p.goto(`http://127.0.0.1:${port}/`);await p.locator('#username-input').fill('test');await p.locator('#password-input').fill('pw');await p.locator('.login-box button').click();await p.locator('.agent-card').first().click();
+  await routeTerminalAssets(p);
+  await login(p,`http://127.0.0.1:${port}/`);await p.locator('.agent-card').first().click();
   await until(async()=> (await p.evaluate(screenText)).includes('NATIVE-PAGER'));return p;
  }
  // Exercise the actual frontend/xterm handlers, including mouseup bubbling.

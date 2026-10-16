@@ -6,12 +6,26 @@
   "scripts": {
     "server": "node server.js",
     "client": "node client.js",
-    "overseer": "node ai-overseer.js"
+    "overseer": "node ai-overseer.js",
+    "test": "node test/run.js",
+    "test:unit": "node test/run.js unit",
+    "test:protocol": "node test/run.js protocol",
+    "test:screen": "node test/run.js screen",
+    "test:browser": "node test/run.js browser",
+    "test:codex": "node test/run.js codex",
+    "test:all": "node test/run.js all",
+    "test:setup": "playwright install chromium",
+    "test:staging": "node infra/staging/smoke.js"
   },
   "dependencies": {
     "node-pty": "^1.0.0",
     "ws": "^8.21.3",
     "xterm-addon-serialize": "0.11.0",
     "xterm-headless": "5.3.0"
+  },
+  "devDependencies": {
+    "playwright": "1.64.1",
+    "xterm": "5.3.0",
+    "xterm-addon-fit": "0.8.0"
   }
 }

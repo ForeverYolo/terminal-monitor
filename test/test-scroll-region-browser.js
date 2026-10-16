@@ -5,7 +5,7 @@ const assert=require('assert'),fs=require('fs'),os=require('os'),path=require('p
 const {spawn}=require('child_process');
 const WebSocket=require('ws');
 const {TerminalState}=require('../terminal-state');
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const { launchBrowser, routeTerminalAssets, login } = require('./helpers/browser');
 const project=path.resolve(__dirname,'..'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'swt-scroll-region-'));
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,timeout=20000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await delay(50);}throw Error('condition timed out');}
@@ -31,11 +31,11 @@ function expected(){const t=model.term;return Array.from({length:t.rows},(_,i)=>
  await new Promise(r=>agent.on('open',r));
  agent.send(JSON.stringify({type:'register',token:'token',name:'scroll-region-fixture',screen:'test',attrs:{clientId:'scroll-region-fixture'},snapshotV1:true,nativeTui:true,cols,rows}));layout();
  await until(async()=>(await(await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents.length===1);
- browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE,args:['--no-sandbox']});
+ browser=await launchBrowser();
  let batch=0;
  const page=await browser.newPage({viewport:{width:1100,height:720}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.route('https://cdn.jsdelivr.net/**',route=>{const u=route.request().url();let file;if(u.includes('xterm-addon-fit'))file=process.env.XTERM_FIT_JS;else if(u.endsWith('/xterm.js'))file=path.join(project,'node_modules/xterm/lib/xterm.js');else if(u.endsWith('/xterm.css'))file=path.join(project,'node_modules/xterm/css/xterm.css');return file?route.fulfill({path:file,contentType:u.endsWith('.css')?'text/css':'application/javascript'}):route.abort();});
- await page.goto(`http://127.0.0.1:${port}/`);await page.locator('#username-input').fill('test');await page.locator('#password-input').fill('pw');await page.locator('.login-box button').click();
+ await routeTerminalAssets(page);
+ await login(page,`http://127.0.0.1:${port}/`);
  async function enter(){await page.locator('.agent-card').first().click();await until(async()=>(await page.evaluate(screen)).some(s=>s.includes('INPUT BOX: keep typing here')));await delay(350);}
  async function checkUpdates(label){
   const id=++batch;

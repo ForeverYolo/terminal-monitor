@@ -6,7 +6,7 @@ const net = require('net');
 const { spawn, execFileSync } = require('child_process');
 // Optional browser smoke test: set PLAYWRIGHT_MODULE and XTERM_FIT_JS to
 // temporary installs so production dependencies remain unchanged.
-const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { launchBrowser, routeTerminalAssets, login } = require('./helpers/browser');
 const project = path.resolve(__dirname, '..');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swt-real-screen-'));
 const session = `swt-isolated-${process.pid}`;
@@ -32,23 +32,12 @@ function lines() { return Array.from({length: term.buffer.active.length}, (_, i)
   client.stdout.on('data', x => clientLog += x); client.stderr.on('data', x => clientLog += x);
   await until(async () => (await (await fetch(`http://127.0.0.1:${port}/api/agents`)).json()).agents.some(a => a.screen === session));
   await delay(5000);
-  browser = await chromium.launch({headless:true, executablePath:process.env.CHROMIUM_EXECUTABLE, args:['--no-sandbox']});
+  browser = await launchBrowser();
   const page = await browser.newPage({viewport:{width:1200,height:800}});
   const pageErrors = []; page.on('pageerror', e => pageErrors.push(e.message));
-  async function routeAssets(target) { await target.route('https://cdn.jsdelivr.net/**', route => {
-    const url = route.request().url();
-    let file, contentType;
-    if (url.includes('xterm-addon-fit')) {file=process.env.XTERM_FIT_JS || require.resolve('xterm-addon-fit/lib/xterm-addon-fit.js');contentType='application/javascript';}
-    else if (url.endsWith('/xterm.js')) {file=path.join(project,'node_modules/xterm/lib/xterm.js');contentType='application/javascript';}
-    else if (url.endsWith('/xterm.css')) {file=path.join(project,'node_modules/xterm/css/xterm.css');contentType='text/css';}
-    else return route.abort();
-    return route.fulfill({path:file,contentType});
-  }); }
-  await routeAssets(page);
-  await page.goto(`http://127.0.0.1:${port}/`);
-  await page.locator('#username-input').fill('test');
-  await page.locator('#password-input').fill('isolated-pw');
-  await page.locator('.login-box button').click();
+
+  await routeTerminalAssets(page);
+  await login(page,`http://127.0.0.1:${port}/`,{password:'isolated-pw'});
   await page.locator('.agent-card').first().waitFor();
   await page.locator('.agent-card').first().click();
   await page.waitForFunction(() => { if (typeof term === 'undefined' || !term) return false; return Array.from({length:term.buffer.active.length},(_,i)=>term.buffer.active.getLine(i).translateToString(true)).some(s=>s.includes('HIST-0020')); }, {timeout:15000});
@@ -57,11 +46,8 @@ function lines() { return Array.from({length: term.buffer.active.length}, (_, i)
   console.log(`browser initial: ${first.length} buffer lines; early and late history visible`);
   const follower = await browser.newPage({viewport:{width:760,height:560}});
   follower.on('pageerror', e => pageErrors.push(e.message));
-  await routeAssets(follower);
-  await follower.goto(`http://127.0.0.1:${port}/`);
-  await follower.locator('#username-input').fill('test');
-  await follower.locator('#password-input').fill('isolated-pw');
-  await follower.locator('.login-box button').click();
+  await routeTerminalAssets(follower);
+  await login(follower,`http://127.0.0.1:${port}/`,{password:'isolated-pw'});
   await follower.locator('.agent-card').first().waitFor();
   await follower.locator('.agent-card').first().click();
   const secondSize = await follower.evaluate(() => fitAddon.proposeDimensions());
@@ -89,7 +75,7 @@ function lines() { return Array.from({length: term.buffer.active.length}, (_, i)
   console.log('closing size owner restored remaining browser size');
   const multiPage = await browser.newPage({viewport:{width:680,height:500}});
   multiPage.on('pageerror', e => pageErrors.push(e.message));
-  await routeAssets(multiPage);
+  await routeTerminalAssets(multiPage);
   await multiPage.goto(`http://127.0.0.1:${port}/`);
   await multiPage.locator('#username-input').fill('test');
   await multiPage.locator('#password-input').fill('isolated-pw');
