@@ -9,7 +9,7 @@ const { createFileTransfer } = require('./file-transfer');
 const { TerminalState } = require('./terminal-state');
 const { PROTOCOL_VERSION } = require('./terminal-protocol');
 const { encodeScreenInput } = require('./terminal-filter');
-const { prepareScreenTerminal } = require('./screen-terminal');
+const { prepareScreenTerminal, startScreenSession } = require('./screen-terminal');
 const { detectClaudeState } = require('./claude-detector');
 const { validateSpawnRequest, SPAWN_MAX_NODES } = require('./spawn-validator');
 const { loadConfig } = require('./config-loader');
@@ -316,17 +316,17 @@ async function handleSpawnNode(msg) {
   // be non-interactive and trip the classic `case $- in *i*` guard.)
   // claude already runs via `bash -lc` deliberately (non-interactive, no
   // prompt needed); sh never reads .bashrc, so it's left as-is.
-  const screenSpawnArgs = ['screen', '-dmS', newScreenName];
+  const screenCommand = [];
   if (cmd === 'claude') {
-    screenSpawnArgs.push('bash', '-lc', 'claude');
+    screenCommand.push('bash', '-lc', 'claude');
   } else if (cmd === 'bash') {
-    screenSpawnArgs.push('bash', '-l');
+    screenCommand.push('bash', '-l');
   } else {
-    screenSpawnArgs.push(cmd);
+    screenCommand.push(cmd);
   }
-  console.log(`[spawn_node] creating screen: ${screenSpawnArgs.join(' ')}`);
+  console.log(`[spawn_node] creating screen ${newScreenName}: ${screenCommand.join(' ')}`);
   try {
-    execSync(screenSpawnArgs.join(' '), { encoding: 'utf8' });
+    startScreenSession(newScreenName, screenCommand);
   } catch (e) {
     sendMsg({ type: 'spawn_node_result', reqId, ok: false, error: `screen create failed: ${e.message}` });
     return;

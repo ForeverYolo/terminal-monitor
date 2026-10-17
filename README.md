@@ -278,6 +278,8 @@ config.client-download.json  # 监控 download 会话
 
 client 启动时会用 `tic` 在运行账户的 `~/.terminfo` 安装专用的 `tm-web-256color` 条目，网页连接使用该终端类型，避免 Screen 4.x 把斜体显示为反色。无需修改 `.screenrc` 或重建任务 Screen；其他普通终端连接仍使用其原有终端类型。
 
+项目创建的 Screen 统一通过 `service-runtime.sh` 的 `start_managed_screen` 启动：包括网页新建节点、`restart.sh` 的 `real/all` 重建、安装/重启的后台服务，以及 staging 自动恢复。启动 Screen 前移除继承的 `COLORTERM`，并在启动 shell / Claude 前对该会话设置 `cjkwidth off`，避免 Screen 4.x 误解析真彩色及中文 locale 下的符号列宽错位。保留正常的 Screen 配置加载，不修改全局环境或用户 `.screenrc`；专用显示端 TERM 不变。`restart.sh` 默认的 `service` 只重启监控，不会改动已有任务会话；接管已有会话也不自动调整这两项设置。`cjkwidth` 作用于整个 Screen 会话，因此从其他终端连接同一会话也会使用该列宽规则；shell 配置若显式重新设置 `COLORTERM`，会覆盖启动时的环境清理。
+
 原生模式下，应用启用鼠标跟踪时，上翻/下翻按钮发送翻页键，“最新”按钮禁用；退出到 shell 后，滚轮和这些按钮恢复操作浏览器历史。当前 Screen 4.09 的鼠标输入由 client 做兼容转换，超出 223 的点击坐标不支持。实现、实测结果及复现步骤见 [原生 TUI 模式说明](docs/native-tui-mode.md)。
 
 原生 TUI 中复制文字：Linux/Windows 按住 `Shift`，Mac 按住 `Option`，再用左键拖动选择。松开后选区保留，可以右键选择浏览器菜单中的“复制”；也可使用快捷键：Linux/Windows 使用 `Ctrl+Shift+C` 复制，Mac 使用 `⌘C`。复制快捷键只在存在选区时生效，普通点击和滚轮继续交给应用。

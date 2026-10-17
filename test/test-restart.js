@@ -16,7 +16,7 @@ const fixture=`const fs=require('fs');
 let arg=process.argv.find(a=>a.startsWith('--config='));
 const file=arg?arg.slice(9):'config.json';
 const cfg=JSON.parse(fs.readFileSync(file));
-fs.writeFileSync(file+'.pid',JSON.stringify({pid:process.pid,name:cfg.client?.name}));
+fs.writeFileSync(file+'.pid',JSON.stringify({pid:process.pid,name:cfg.client?.name,colorterm:process.env.COLORTERM??null}));
 setInterval(()=>{},1000);`;
 function prepare(dir){
  fs.mkdirSync(dir,{recursive:true});for(const f of ['restart.sh','service-runtime.sh'])fs.copyFileSync(path.join(project,f),path.join(dir,f));
@@ -41,7 +41,7 @@ async function run(dir,args,env={}){
  prepare(local);prepare(remote);
  const bin=path.join(root,'bin'),sshLog=path.join(root,'ssh.json');fs.mkdirSync(bin);
  fs.writeFileSync(path.join(bin,'ssh'),'#!/bin/bash\nprintf "%s\\n" "$@" > "$SSH_FIXTURE_LOG"\nexec bash -s\n',{mode:0o755});
- const env={PATH:bin+':'+process.env.PATH,SSH_FIXTURE_LOG:sshLog};
+ const env={PATH:bin+':'+process.env.PATH,SSH_FIXTURE_LOG:sshLog,COLORTERM:'truecolor',LANG:'zh_CN.UTF-8',LC_ALL:'zh_CN.UTF-8'};
  for(const args of [['--help'],['-h'],['help'],['client','--help'],['client',session,'--help']]){
   const help=await run(local,args,env);assert.equal(help.code,0,help.out);
   assert(help.out.includes('deploy.targets.conf')&&help.out.includes('service'));
@@ -56,6 +56,7 @@ async function run(dir,args,env={}){
  let result=await run(local,['client',session],env);assert.equal(result.code,0,result.out);
  assert(!fs.existsSync(sshLog),'local mode called SSH');assert(!fs.existsSync(path.join(local,'deploy.targets.conf')));
  const first=info(local,`config.client-${session}.json`);assert(first?.name);assert(alive(first.pid));
+ assert.equal(first.colorterm,null,'restarted service inherited COLORTERM');
  assert.equal(screenPid(session),task);assert(alive(siblingChild.pid));
  console.log('PASS default local restart without deploy config or SSH, quoted path, task/sibling preserved');
  // Leave an unattached duplicate process, as can happen after Screen SIGHUP.
@@ -79,6 +80,12 @@ async function run(dir,args,env={}){
  assert.deepStrictEqual(fs.readFileSync(sshLog,'utf8').trim().split('\n'),['-p','2222','fixture@example.invalid','bash -s']);
  assert(alive(info(remote,`config.client-${session}.json`).pid));assert.equal(screenPid(session),task);
  console.log('PASS remote label still uses deploy configuration and SSH with the same restart worker');
+ result=await run(local,['client',session,'--local','real'],env);assert.equal(result.code,0,result.out);
+ const recreated=screenPid(session);assert(recreated&&recreated!==task);
+ const taskEnv=fs.readFileSync(`/proc/${recreated.split('.')[0]}/environ`,'utf8').split('\0');
+ assert(!taskEnv.some(value=>value.startsWith('COLORTERM=')),'recreated task inherited COLORTERM');
+ assert(alive(info(remote,`config.client-${session}.json`).pid),'real scope restarted monitoring');
+ console.log('PASS real scope recreates task with cleaned environment and preserves monitoring');
  // Server Screen has a fixed name: isolate it in a separate Screen socket dir.
  const socket=path.join(root,'screen-sockets');fs.mkdirSync(socket,{mode:0o700});
  try{

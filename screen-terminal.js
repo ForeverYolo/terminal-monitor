@@ -39,4 +39,14 @@ function prepareScreenTerminal(home = os.userInfo().homedir) {
   }
 }
 
-module.exports = { prepareScreenTerminal, SCREEN_TERM };
+// Only sessions created by this project get these defaults. Attaching to an
+// existing session must not change its environment or character-width rules.
+function startScreenSession(name, command, environment = process.env) {
+  // Share the exact startup path used by local/remote restart scripts.
+  execFileSync('bash', ['-c',
+    'source "$1" || exit; shift; start_managed_screen "$@"',
+    'tm-screen-start', path.join(__dirname, 'service-runtime.sh'), name, '--', ...command],
+  { env: { ...environment }, encoding: 'utf8' });
+}
+
+module.exports = { prepareScreenTerminal, startScreenSession, SCREEN_TERM };

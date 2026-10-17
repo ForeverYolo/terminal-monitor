@@ -134,7 +134,7 @@ NODE
 fi
 if [ "$SCOPE" = real ] || [ "$SCOPE" = all ]; then
   stop_screen "$SCREEN_SESSION"
-  screen -dmS "$SCREEN_SESSION" bash
+  start_managed_screen "$SCREEN_SESSION" -- bash
   screen_exists "$SCREEN_SESSION" || { echo '[restart] task Screen did not come up' >&2; exit 1; }
 fi
 if [ "$SCOPE" != real ]; then

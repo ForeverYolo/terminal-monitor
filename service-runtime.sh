@@ -33,10 +33,29 @@ resolve_service_node() {
   echo '[restart] no working node found' >&2
   return 1
 }
+# start_managed_screen NAME [Screen options...] -- COMMAND [args...]
+# Keep environment/width defaults in one place for web, restart and staging.
+start_managed_screen() {
+  local name="$1"
+  shift
+  local options=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    options+=("$1")
+    shift
+  done
+  [ "$#" -gt 1 ] || { echo '[screen] expected -- COMMAND' >&2; return 1; }
+  shift
+  (
+    unset COLORTERM
+    screen "${options[@]}" -dmS "$name" sh -c \
+      'screen -S "$STY" -X cjkwidth off || exit; exec "$@"' \
+      tm-screen "$@"
+  )
+}
 start_service_screen() {
   local name="$1" root="$2" node_bin="$3" entry="$4" config="$5" log="$6"
   screen_exists "$name" && return 0
-  screen -dmS "$name" bash -c \
+  start_managed_screen "$name" -- bash -c \
     'cd "$1" && exec "$2" "$3" --config="$4" 2>&1 | tee -a "$5"' \
     _ "$root" "$node_bin" "$entry" "$config" "$log"
 }
