@@ -10,6 +10,7 @@ module.exports=async function roundtrip(page,argv,pass){
   await page.keyboard.press('Control+c');await delay(400);await page.keyboard.press('Control+c');
   await until(async()=>await page.evaluate(()=>term.modes.mouseTrackingMode==='none'));
   await until(async()=>(await page.evaluate(visible)).includes('staging-2080:'));
+  await until(async()=>page.evaluate(()=>!lastAgents.find(a=>a.id===currentAgentId)?.cliState?.isCodeCli));
   assert.equal(await page.evaluate(()=>term.buffer.active.type),'normal');
   await until(async()=>await page.locator('#btn-scroll-latest').isEnabled());
  }
@@ -57,6 +58,7 @@ module.exports=async function roundtrip(page,argv,pass){
  await run(command);
  await until(async()=>await page.evaluate(()=>term.modes.mouseTrackingMode!=='none'));
  await until(async()=>(await page.evaluate(visible)).includes('history line 49:4'));
+ await until(async()=>page.evaluate(()=>lastAgents.find(a=>a.id===currentAgentId)?.cliState?.app==='codex'));
  assert(await page.locator('#btn-scroll-latest').isDisabled());
  assert((await page.evaluate(allLines)).includes('SHELL-HISTORY-020'));
  const box=await page.locator('#term-container .xterm-screen').boundingBox();await page.mouse.move(box.x+80,box.y+80);await page.mouse.wheel(0,-600);

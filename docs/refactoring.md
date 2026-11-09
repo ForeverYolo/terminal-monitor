@@ -19,7 +19,9 @@
 | `service-runtime.sh` | Screen 会话名精确匹配、Node 运行时探测，以及正确处理路径引用的服务启动 |
 | `service-restart.js` | 脱离当前进程执行客户端、服务端重启，以及服务端失败回滚 |
 | `config-loader.js` | 服务端、客户端和 AI 督工三个入口共用的命令行配置解析 |
-| `claude-detector.js` | 客户端与手机结构化视图共用的纯函数状态检测器 |
+| `cli-state.js` / `cli-tracker.js` | 统一状态契约、屏幕识别，以及 hooks/屏幕状态的单次合并 |
+| `cli-process.js` / `cli-hooks.js` / `cli-hook.js` | CLI 进程绑定、本机事件接收和 hooks 上报 |
+| `terminal-text.js` | 前后端共用的终端纯文本预览工具，不参与工作状态检测 |
 | `public/connection.js` | 浏览器连接、终端身份管理和协议消息分发 |
 | `public/terminal-session.js` | 公共终端创建、输入处理，以及随视图销毁的资源管理 |
 | `public/terminal-view.js`、`public/multi-terminal.js` | 单终端、多终端布局、尺寸处理和文本选择 |

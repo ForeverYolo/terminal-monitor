@@ -3,8 +3,16 @@ import json, os, signal, subprocess, termios
 from pathlib import Path
 root = Path(__file__).resolve().parent.parent
 settings = json.loads((root / 'runtime/settings.json').read_text())
-os.environ['PATH'] = str(Path(settings['node']).parent) + ':/usr/local/bin:/usr/bin:/bin'
+task_paths = [str(Path(settings['node']).parent), str(Path.home() / '.qoder-cn/entry'), str(Path.home() / '.local/bin')]
+task_paths += os.environ.get('PATH', '').split(':') + ['/usr/local/bin', '/usr/bin', '/bin']
+os.environ['PATH'] = ':'.join(dict.fromkeys(p for p in task_paths if p))
 os.environ['LANG'] = os.environ['LC_ALL'] = 'C.UTF-8'
+# Deployment tools may export NO_COLOR for their own logs. It must not leak
+# into the interactive task/shell. Screen's display supports 256 colours;
+# don't advertise truecolor, which Screen 4.x cannot faithfully relay.
+os.environ.pop('NO_COLOR', None)
+os.environ.pop('COLORTERM', None)
+os.environ['TERM'] = 'screen-256color'
 for key, value in settings.get('taskEnvironment', {}).items():
     if key in {'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'}:
         os.environ[key] = value

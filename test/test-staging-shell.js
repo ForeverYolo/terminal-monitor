@@ -14,12 +14,16 @@ async function until(fn){const end=Date.now()+10000;while(Date.now()<end){if(awa
  fs.mkdirSync(path.join(root,'bin'));fs.mkdirSync(path.join(root,'runtime/sandbox'),{recursive:true});
  fs.copyFileSync(path.resolve(__dirname,'../infra/staging/run-task.py'),path.join(root,'bin/run-task.py'));
  fs.writeFileSync(path.join(root,'runtime/settings.json'),JSON.stringify({node:process.execPath}));
- const fake=path.join(root,'exit.py');fs.writeFileSync(fake,"import time,sys\ntime.sleep(1)\nprint('CHILD-EXIT',flush=True)\nsys.exit(42)\n");
+ const testHome=path.join(root,'test-home');fs.mkdirSync(path.join(testHome,'.local/bin'),{recursive:true});
+ fs.writeFileSync(path.join(testHome,'.local/bin/cli-probe'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+ const fake=path.join(root,'exit.py');fs.writeFileSync(fake,"import time,sys,os,shutil\nprint('LOCAL-CLI:'+str(bool(shutil.which('cli-probe'))),flush=True)\nprint('COLOR-ENV:'+os.environ.get('TERM','')+':'+os.environ.get('NO_COLOR','absent'),flush=True)\ntime.sleep(1)\nprint('CHILD-EXIT',flush=True)\nsys.exit(42)\n");
  // Include resume metadata, as the real launch command does.
  fs.writeFileSync(path.join(root,'runtime/codex-command.json'),JSON.stringify(['python3',fake,'resume','fixture-id']));
- execFileSync('screen',['-U','-dmS',session,'python3',path.join(root,'bin/run-task.py')]);
+ execFileSync('screen',['-U','-dmS',session,'python3',path.join(root,'bin/run-task.py')],{env:{...process.env,NO_COLOR:'1',HOME:testHome}});
  attachment=pty.spawn('screen',['-x',session],{cols:120,rows:30,name:'xterm-256color',env:process.env});attachment.onData(s=>term.write(s));
  await until(async()=>(await view()).some(l=>l.includes('状态 42')));
+ assert((await view()).some(l=>l.includes('COLOR-ENV:screen-256color:absent')),'deployment NO_COLOR leaked into interactive task');
+ assert((await view()).some(l=>l.includes('LOCAL-CLI:True')),'user-local CLI installation missing from task PATH');
  assert(execFileSync('screen',['-ls'],{encoding:'utf8'}).includes(session),'Screen exited with child');
  attachment.write('\x1b');await delay(500);
  assert(execFileSync('screen',['-ls'],{encoding:'utf8'}).includes(session),'Esc terminated the fallback Screen');

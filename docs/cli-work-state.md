@@ -1,0 +1,58 @@
+# CLI 身份与工作状态
+
+普通 shell、日志和非 code-cli 程序不显示工作状态。Codex、Claude、Qoder CN 使用专门的界面组合规则；未知 CLI 只有同时具有输入区、相邻操作提示、模型/上下文状态等组合时才进入通用检测。spinner、`Working`、`esc to interrupt`、正文提到品牌都不能单独确认身份。
+
+检测读取 client 已有 xterm 模型的当前屏幕，等待解析完成，不扫描原始字节流或历史滚动区。身份初次确认有 300ms 稳定窗口。已绑定 CLI 在头部消失时保留身份；进程退出/挂起后清理。Linux `/proc` 和 Screen 子进程用于辅助绑定，不以进程存在推断正在处理任务。相同 CLI 的 launcher/TUI/app-server 祖先链合并为一个实例。
+
+## 统一状态
+
+`cliState` 包含 `isCodeCli`、`app`、`status`、`source`、`prompt`、`options`、`sessionId`、`changedAt`。状态为 `working / idle / waiting_permission / waiting_input / unknown`；来源为 `hooks / screen`。连接在线/离线独立于任务状态。
+
+卡片、管理页、API、手机操作栏、通知和 supervisor 共用此结果。`needsInput` 和旧 `claudeState` 仅为派生兼容字段，服务端不再根据输出末尾字符另行判断。
+
+运行逻辑只维护 `cliState`；旧字段在协议输出时生成，不再维护第二份状态缓存。一次 `CliTracker.screen()` 完成当前屏幕识别与 hooks 校正，调用方无需分两次处理画面。`terminal-text.js` 只提供预览/结构化文本需要的 ANSI 清理，旧的历史字节流检测器已移除。卡片与管理页通过同一 `stateText()` 生成状态文字。
+
+## 配置 Codex / Claude hooks
+
+在运行被监控 Screen 的同一台机器上生成配置片段：
+
+```bash
+node /absolute/path/terminal-monitor/cli-hook.js codex --print-config
+node /absolute/path/terminal-monitor/cli-hook.js claude --print-config
+```
+
+将对应 `hooks` 片段合并到该 CLI 的配置中；不要覆盖已有 hooks。Codex 支持其配置层旁的 `hooks.json`；Claude 使用 settings 中的 `hooks`。Codex 非托管 hooks 需要在 `/hooks` 中信任。新配置应在 CLI 加载后验证；既有 Screen 可保留，必要时退出 CLI 并恢复原对话。监控不会自动改用户全局配置。
+
+hooks 通过 `STY` 找到 Screen 名称，连接当前用户私有目录中的 Unix socket（目录 700、socket 600）。事件绑定 CLI 进程 PID、进程启动时间、会话 ID 和可用的 turn ID；接收端验证该进程属于被监控 Screen 的前台 CLI。无法读取 `/proc` 或多个窗口归属有歧义时不接纳 hooks，继续画面推断。
+
+只传事件名和必要身份字段，不传提示正文、工具参数、模型回答、凭据或完整 transcript。脚本不返回授权决定或模型上下文；监控不可用时快速退出，不阻断 CLI。
+
+hooks 优先于旧画面。长时间无事件不会自动判空闲。`Stop` 是结束前事件，其他 hooks 可能继续任务，因此先标记未知，等新解析的空闲画面确认；继续调用工具会恢复工作中。等待授权后的恢复也可由新画面校正。Qoder 使用画面检测，尚未提供 Qoder hooks 适配。
+
+## 验证
+
+```bash
+npm test
+npm run test:screen
+npm run test:browser
+npm run test:codex
+```
+
+以上均不发送新模型提示。`test/fixtures/cli-screens.json` 是 2026-11-09 在隔离目录采集的真实 Codex 0.159.3、Claude 2.1.100、Qoder CN 1.1.85 当前屏幕，路径与邮箱已脱敏。Claude 此样本没有加载登录配置，应该显示未知/需要登录。
+
+以下是显式选择的实时 hooks 测试，每个 CLI 发送一条简短无工具任务，不属于默认测试或 `test:all`：
+
+```bash
+RUN_LIVE_CLI_HOOK_TEST=1 node test/test-cli-live-hooks.js codex
+RUN_LIVE_CLI_HOOK_TEST=1 node test/test-cli-live-hooks.js claude
+```
+
+该测试使用临时 Screen、目录和配置；Codex 凭据为临时副本，Claude 只复用本机提供方认证设置而不加载用户 hooks。结束后删除临时配置和凭据副本。授权、取消、进程复用、乱序/旧会话事件使用可重复的状态机和真实 Screen/socket 测试覆盖。
+
+## 边界
+
+画面检测属于推断，不能承诺对任意未知 CLI 都能识别。未匹配则隐藏状态，已确认 CLI 但状态证据不足则显示未知。纯画面模式翻看应用内部历史可能影响推断；hooks 工作态不会被旧空闲输入框覆盖。前台多窗口的 hooks 歧义不做自动猜测。
+
+Qoder CN 1.1.85 另在临时目录执行一条无工具短任务，已采集实际 `Generating... (esc to cancel, 0s)` 与结束后的空闲画面，见 `cli-task-screens.json`。模型回答区域已省略；固定输入框在工作期间仍然可见，不能单凭它判空闲。
+
+部署需同时更新测试 broker/client 与前端；新增文件已列入 `managed-files.js`。本分支仅用于隔离实现和测试服验收，未合入生产。

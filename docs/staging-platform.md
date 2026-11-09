@@ -82,6 +82,22 @@ node infra/staging/smoke.js --recovery --escape --shell
 
 手机实际触摸、真实 Claude、长期压测和整机重启仍未验证。
 
+## CLI 工作状态分支验收
+
+隔离分支新增统一 `cliState`，配置与边界见 [CLI 状态说明](cli-work-state.md)。普通 shell 不再显示工作状态；CLI 标签区分事件和画面推断。
+
+部署新分支后，可仅为专用测试 Codex 安装 hooks：
+
+```bash
+node infra/staging/enable-state-hooks.js /home/renhangqi/terminal-monitor-staging
+```
+
+该命令只修改 staging 的独立 `runtime/codex-home/hooks.json`、任务启动参数，并将 Claude hooks 合并到 `runtime/sandbox/.claude/settings.local.json`，保留原有配置和 hooks。不会修改用户全局配置，不会重启任务；运行中的 CLI 可能需要重新启动以加载配置。生成的测试 hooks 只上报事件，Codex 启动参数仅在这个独立 home 中跳过其信任提示。
+
+测试启动器会清除部署工具继承的 `NO_COLOR`，设置 `TERM=screen-256color`。已运行的 shell/CLI 无法通过重新部署修改其环境；旧 shell 可用 `env -u NO_COLOR TERM=screen-256color claude --resume` 恢复有色 Claude 会话。不要设置 `COLORTERM=truecolor`，Screen 4.x 无法保证 24 位颜色透传。
+
+Codex 可能直到第一条新任务才发送 SessionStart；此前空闲页面显示“推断”正常。发送一条无工具短任务后应看到“事件”来源、工作中和结束后的空闲。退出到 shell 后工作状态隐藏，重新恢复 CLI 后再次识别。恢复、Esc、翻页和 shell 往返仍使用原 smoke 脚本验证。
+
 ## 终端退出与 Esc
 
 专用 task 使用一个父进程运行 Codex；正常退出或异常退出后恢复终端设置并进入测试 shell，Screen 窗口继续存在。shell 会显示原测试会话的恢复命令。可用 `node test/test-staging-shell.js` 验证程序退出、Esc 和 shell 输入。

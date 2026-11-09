@@ -35,13 +35,13 @@ function renderAgents(agents) {
     const loadStr = s.loadAvg ? s.loadAvg.join(' / ') : '';
     const uptimeStr = s.uptime ? fmtUptime(s.uptime) : '';
     const tagHtml = tags.length ? `<div class="tags">${tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>` : '';
-    const dotClass = a.needsInput ? 'idle' : 'busy';
-    const dotTitle = a.needsInput ? '等待输入' : '运行中';
-    const statusHtml = a.lastLines ? `<div class="status-row"><div class="status-dot ${dotClass}" title="${dotTitle}"></div><div class="status-text">${escapeHtml(a.lastLines.split('\n').pop())}</div></div>` : '';
-
-    // Claude state badge
-    const cs = a.claudeState;
-    const claudeBadgeHtml = (cs && cs.running) ? `<div><span class="claude-badge kind-${cs.kind}" title="${escapeHtml(cs.prompt||'')}">claude:${cs.kind}${cs.prompt ? ' — ' + escapeHtml(cs.prompt.substring(0,50)) : ''}</span></div>` : '';
+    const cs = a.cliState;
+    const dotClass = cs?.status === 'working' ? 'busy' : cs?.status === 'unknown' ? 'unknown' : 'idle';
+    const statusHtml = cs?.isCodeCli ? `<div class="status-row"><span class="claude-badge" title="${escapeHtml(cs.prompt || '')}"><span class="status-dot ${dotClass}"></span>${escapeHtml(CliState.stateText(cs))}</span></div>` : '';
+    // Output preview is independent of CLI work state. A normal shell still
+    // shows its prompt/output, without a running/waiting dot or a CLI badge.
+    const preview = TerminalText.stripAnsi(a.lastLines || '').split('\n').map(line => line.trim()).filter(Boolean).at(-1) || '';
+    const previewHtml = preview ? `<div class="terminal-preview status-text" title="${escapeHtml(preview)}">${escapeHtml(preview)}</div>` : '';
 
     // Multi-select mode adds checkbox
     const isSelected = selectedAgents.has(a.id);
@@ -59,7 +59,7 @@ function renderAgents(agents) {
         ${loadStr ? `<div class="info-item">Load: <span>${loadStr}</span></div>` : ''}
         ${uptimeStr ? `<div class="info-item">Uptime: <span>${uptimeStr}</span></div>` : ''}
       </div>
-      ${memBar}${diskBar}${gpuHtml}${tagHtml}${statusHtml}${claudeBadgeHtml}
+      ${memBar}${diskBar}${gpuHtml}${tagHtml}${statusHtml}${previewHtml}
     </div>`;
   }).join('');
 

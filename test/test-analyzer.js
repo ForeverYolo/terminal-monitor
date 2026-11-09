@@ -14,11 +14,11 @@ function assert(cond, msg) {
 // --- Mock agents ---
 const MOCK_AGENTS = [
   { id: 'agent-1', name: 'overseer', screen: 'overseer', attrs: { clientId: 'C1' }, connectedAt: 't',
-    needsInput: false, claudeState: { running: true, kind: 'input', prompt: '' }, lastLines: 'claude> ' },
+    needsInput: false, cliState: { isCodeCli: true, app: 'claude', status: 'idle', prompt: '' }, lastLines: 'claude> ' },
   { id: 'agent-2', name: 'worker1', screen: 'w1', attrs: { clientId: 'C1' }, connectedAt: 't',
-    needsInput: true, claudeState: { running: true, kind: 'yesno', prompt: 'Proceed?', options: [] }, lastLines: 'Proceed?' },
+    needsInput: true, cliState: { isCodeCli: true, app: 'claude', status: 'waiting_input', prompt: 'Proceed?', options: [] }, lastLines: 'Proceed?' },
   { id: 'agent-3', name: 'shell1', screen: 's1', attrs: { clientId: 'C2' }, connectedAt: 't',
-    needsInput: false, claudeState: null, lastLines: '$ ls' }
+    needsInput: false, cliState: null, lastLines: '$ ls' }
 ];
 
 let rawOutputForAnalyzer = '';
@@ -66,7 +66,7 @@ setTimeout(() => {
 
   // --- Safety net test: analyzer raises a bash permission prompt → denied ---
   sentTo.length = 0;
-  MOCK_AGENTS[0].claudeState = { running: true, kind: 'bash', prompt: 'Allow Claude to run rm?' };
+  MOCK_AGENTS[0].cliState = { isCodeCli: true, app: 'claude', status: 'waiting_permission', prompt: 'Allow Claude to run rm?' };
   rawOutputForAnalyzer = '';   // no SUMMARY → watcher stays in reading phase... but it already stopped.
   // Restart a cycle to re-arm the watcher, then on its first tick it should deny the bash prompt.
   sup.runAnalyzerCycleNow();

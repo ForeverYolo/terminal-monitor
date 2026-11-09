@@ -30,12 +30,13 @@
 
 const http = require('http');
 const https = require('https');
-const { stripAnsi } = require('./claude-detector');
+const { stripAnsi } = require('./terminal-text');
+const { legacyState, fromLegacy, needsInput } = require('./cli-state');
 
 function createSupervisor(cfg, deps) {
   const { setInterval, clearInterval, setTimeout, clearTimeout } = deps.timers || globalThis;
   const {
-    getAgents,               // () => agentInfo[]  (includes claudeState, lastLines)
+    getAgents,               // () => agentInfo[]  (includes cliState, lastLines)
     getAgentRawOutput,       // (agentId) => raw lastOutput string (for SUMMARY extraction)
     sendToAgent,             // (agentId, input) => boolean  (types into the agent's PTY)
     sendToAgentObj,          // (agentId, obj) => boolean
@@ -67,11 +68,15 @@ function createSupervisor(cfg, deps) {
   // ============ Aggregation ============
 
   function onClaudeState(agentId, state) {
+    onCliState(agentId, fromLegacy(state));
+  }
+
+  function onCliState(agentId, cliState) {
     const prev = agentState.get(agentId) || {
-      claude: null, lastChange: Date.now(), lastStatus: 'RUNNING'
+      cliState: null, lastChange: Date.now(), lastStatus: 'RUNNING'
     };
-    prev.claude = state;
-    const newStatus = state && state.running ? (state.kind === 'working' ? 'RUNNING' : 'WAITING') : 'IDLE';
+    prev.cliState = cliState;
+    const newStatus = !cliState?.isCodeCli ? 'TERMINAL' : cliState.status === 'working' ? 'RUNNING' : needsInput(cliState) ? 'WAITING' : 'UNKNOWN';
     if (prev.lastStatus !== newStatus) {
       prev.lastStatus = newStatus;
       prev.lastChange = Date.now();
@@ -80,7 +85,7 @@ function createSupervisor(cfg, deps) {
   }
 
   function onAgentConnected(agentInfo) {
-    agentState.set(agentInfo.id, { claude: null, lastChange: Date.now(), lastStatus: 'RUNNING' });
+    agentState.set(agentInfo.id, { cliState: null, lastChange: Date.now(), lastStatus: 'TERMINAL' });
     notify('agent_connected', { agent: summarizeAgent(agentInfo) });
     if (requestAgentListScreens) {
       requestAgentListScreens(agentInfo.id).then(res => {
@@ -114,6 +119,7 @@ function createSupervisor(cfg, deps) {
       ? stripAnsi(a.lastOutput).split('\n').slice(-3).filter(l => l.trim()).join('\n')
       : (a.lastLines || '');
     const st = agentState.get(a.id);
+    const cliState = a.cliState || st?.cliState || null;
     return {
       id: a.id,
       name: a.name,
@@ -121,8 +127,9 @@ function createSupervisor(cfg, deps) {
       clientId: (a.attrs || {}).clientId || null,
       connectedAt: a.connectedAt,
       needsInput: a.needsInput,
+      cliState,
       status: st ? st.lastStatus : 'UNKNOWN',
-      claude: st && st.claude ? st.claude : null,
+      claude: cliState ? legacyState(cliState) : null,
       lastLines: last3.substring(0, 500)
     };
   }
@@ -148,8 +155,8 @@ function createSupervisor(cfg, deps) {
     const lines = summaries.map(s => {
       const c = s.claude;
       const cstr = c && c.running
-        ? `claude:${c.kind}${c.prompt ? ' "' + stripAnsi(c.prompt).substring(0, 60) + '"' : ''}`
-        : 'no-claude';
+        ? `${c.app || 'claude'}:${c.kind}${c.prompt ? ' "' + stripAnsi(c.prompt).substring(0, 60) + '"' : ''}`
+        : 'terminal';
       return `  [${s.status}] ${s.name} (${s.screen}) — ${cstr}`;
     });
     const message = `${summaries.length} agent(s) across ${clients.length} client(s):\n${lines.join('\n')}`;
@@ -247,15 +254,15 @@ function createSupervisor(cfg, deps) {
 
   function buildSnapshot() {
     const agents = getAgents();
-    const claude = agents.filter(a => a.claudeState && a.claudeState.running);
-    const nonClaude = agents.filter(a => !(a.claudeState && a.claudeState.running)).map(a => a.name);
+    const claude = agents.filter(a => a.cliState?.isCodeCli);
+    const nonClaude = agents.filter(a => !a.cliState?.isCodeCli).map(a => a.name);
     return {
       claude: claude.map(a => ({
         name: a.name,
         screen: a.screen,
-        kind: a.claudeState.kind,
-        prompt: a.claudeState.prompt,
-        options: a.claudeState.options,
+        kind: legacyState(a.cliState).kind,
+        prompt: a.cliState.prompt,
+        options: a.cliState.options,
         lastLine: (a.lastLines || '').split('\n').pop().substring(0, 200)
       })),
       nonClaude
@@ -309,8 +316,8 @@ function createSupervisor(cfg, deps) {
 
     // Safety net: deny any tool-permission prompt the analyzer raises so it can
     // never execute anything. (Its own prompt also forbids tools.)
-    const cs = a.claudeState;
-    if (cs && cs.running && cs.kind === 'bash') {
+    const cs = a.cliState;
+    if (cs?.isCodeCli && cs.status === 'waiting_permission') {
       sendToAgent(aid, 'n\r');
     }
 
@@ -370,6 +377,7 @@ function createSupervisor(cfg, deps) {
     start, stop,
     onAgentConnected, onAgentDisconnected,
     onClaudeState,
+    onCliState,
     buildSummary,
     runAnalyzerCycleNow: runAnalyzerCycle
   };

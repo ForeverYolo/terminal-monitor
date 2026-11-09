@@ -1,0 +1,53 @@
+'use strict';
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+function readProcess(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+    return { pid: +pid, state: fields[0], ppid: +fields[1], pgrp: +fields[2], tty: +fields[4], foreground: +fields[5], start: fields[19] };
+  } catch { return null; }
+}
+function processApp(pid) {
+  try {
+    const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+    // Only executable/script slots; never match a task prompt or shell -c text.
+    const names = args.slice(0, /^(?:node|python[\d.]*)$/.test(path.basename(args[0] || '')) ? 2 : 1).map(a => path.basename(a));
+    if (names.some(n => /^(?:codex|codex\.js)$/.test(n))) return 'codex';
+    if (names.some(n => /^(?:claude|claude\.js|claude\.exe)$/.test(n)) || args.slice(0, 2).some(a => /\/@anthropic-ai\/claude-code\/(?:cli\.js|bin\/claude\.exe)$/.test(a))) return 'claude';
+    if (names.some(n => /^(?:qoderclicn(?:-[\d.]+)?|qodercli|qoder-cn|qodercn)$/.test(n))) return 'qoder';
+  } catch {}
+  return null;
+}
+function screenProcesses(screenName) {
+  try {
+    const socketDir = process.env.SCREENDIR || `/run/screen/S-${os.userInfo().username}`;
+    const sockets = fs.readdirSync(socketDir).filter(n => n === screenName || n.endsWith('.' + screenName));
+    if (sockets.length !== 1) return null;
+    const screenPid = +sockets[0].split('.')[0];
+    const all = new Map(fs.readdirSync('/proc').filter(n => /^\d+$/.test(n)).map(readProcess).filter(Boolean).map(p => [p.pid, p]));
+    const descendants = [];
+    for (const p of all.values()) {
+      let q = p;
+      for (let depth = 0; q && depth < 32; depth++, q = all.get(q.ppid)) {
+        if (q.ppid === screenPid) { descendants.push(p); break; }
+      }
+    }
+    const candidates = descendants.filter(p => p.tty && p.pgrp === p.foreground && !['T', 't', 'Z'].includes(p.state)).map(p => ({ ...p, app: processApp(p.pid) })).filter(p => p.app);
+    // Codex has a launcher/TUI and a child app-server with the same executable.
+    // They are one CLI instance, not two Screen windows. Bind to the outermost
+    // ancestor so a replaced worker cannot resurrect a dead foreground CLI.
+    const byPid = new Map(candidates.map(p => [p.pid, p]));
+    const clis = candidates.filter(p => {
+      let parent = all.get(p.ppid);
+      for (let depth = 0; parent && depth < 32; depth++, parent = all.get(parent.ppid)) {
+        if (byPid.get(parent.pid)?.app === p.app) return false;
+      }
+      return true;
+    });
+    return { screenPid, descendants, clis };
+  } catch { return null; }
+}
+module.exports = { readProcess, processApp, screenProcesses };

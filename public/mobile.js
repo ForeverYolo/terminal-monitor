@@ -2,8 +2,8 @@
 
 // ========== Mobile structured view ==========
 // Alternative to raw xterm on phones: render the terminal stream as a readable
-// transcript + contextual action buttons (yes/no/options), driven by a JS port
-// of claude-detector. Input goes through a normal <input> so IMEs work.
+// transcript + contextual action buttons from the agent's unified CLI state.
+// Input goes through a normal <input> so IMEs work.
 
 let termViewMode = 'xterm';        // 'xterm' | 'structured'
 let structBuf = '';                // rolling ANSI-stripped transcript text
@@ -17,7 +17,7 @@ function feedStructured(base64Payload, agentId) {
   if (agentId !== structAgentId) return;
   let text;
   try { text = decodeURIComponent(escape(atob(base64Payload))); } catch { return; }
-  text = ClaudeDetector.stripAnsi(text);
+  text = TerminalText.stripAnsi(text);
   // Normalize line ends: \r\n → \n; lone \r (spinner redraws) → \n
   text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   structBuf += text;
@@ -55,21 +55,18 @@ function renderStructured() {
 function renderStructActionbar() {
   const bar = document.getElementById('struct-actionbar');
   if (!bar) return;
-  const st = ClaudeDetector.detectClaudeState(structBuf);
+  const st = lastAgents.find(a => a.id === structAgentId)?.cliState;
   let html = '';
-  if (st.running) {
-    if (st.kind === 'yesno') {
+  if (st?.isCodeCli) {
+    if (st.options.length && ['waiting_permission', 'waiting_input'].includes(st.status)) {
+      html = st.options.map(o => `<button onclick="structAnswer('opt','${o.index}')">${escapeHtml(String(o.index))}. ${escapeHtml(o.label.slice(0,24))}</button>`).join('');
+    } else if (st.status === 'waiting_input') {
       html = `<button class="primary" onclick="structAnswer('yes')">Yes</button>` +
              `<button class="danger" onclick="structAnswer('no')">No</button>`;
-    } else if (st.kind === 'option' && st.options.length) {
-      html = st.options.map(o =>
-        `<button onclick="structAnswer('opt','${o.index}')">${escapeHtml(String(o.index))}. ${escapeHtml(o.label.slice(0,24))}</button>`
-      ).join('');
-    } else if (st.kind === 'working') {
-      html = `<button disabled style="opacity:0.6">Claude 思考中…</button>`;
-    } else if (st.kind === 'bash') {
-      html = `<button class="primary" onclick="structAnswer('yes')">允许</button>` +
-             `<button class="danger" onclick="structAnswer('no')">拒绝</button>`;
+    } else if (st.status === 'working') {
+      html = `<button disabled style="opacity:0.6">${escapeHtml(st.app)} 工作中…</button>`;
+    } else if (st.status === 'waiting_permission') {
+      html = `<button disabled>等待授权，请在原始终端中确认</button>`;
     }
   }
   if (html) { bar.innerHTML = html; bar.style.display = 'flex'; }

@@ -368,7 +368,7 @@ async function main() {
     });
     try {
       const ev = await browser.waitFor(
-        es => es.find(x => x.type === 'claude_state' && x.agentId === found1.id && x.state && x.state.kind === 'option'),
+        es => es.find(x => x.type === 'cli_state' && x.agentId === found1.id && x.state && x.state.status === 'waiting_input'),
         5000
       );
       assert(ev && ev.state.options.length === 2, 'browser received updated claude_state');

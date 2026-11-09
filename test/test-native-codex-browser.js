@@ -47,6 +47,8 @@ const screenText=()=>Array.from({length:term.buffer.active.length},(_,i)=>term.b
   throw Error('PageDown did not return to latest');
  }
  const page=await openPage();
+ await until(async()=>page.evaluate(()=>lastAgents.some(a=>a.cliState?.app==='codex' && a.cliState.status==='idle')));
+ console.log('PASS real Codex identity and idle state through client/server');
  assert.equal(await page.evaluate(()=>term.buffer.active.type),'normal');
  assert(await page.locator('#btn-scroll-latest').isDisabled());
  const tail=await page.evaluate(screenText);

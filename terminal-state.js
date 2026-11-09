@@ -8,7 +8,7 @@ const { createAltScreenFilter } = require('./terminal-filter');
 // server. Resize and snapshot operations wait for preceding writes to finish;
 // subsequent output waits behind them. This preserves cursor and wrap state.
 class TerminalState {
-  constructor(cols, rows, emit) {
+  constructor(cols, rows, emit, onParsed = () => {}) {
     this.term = new Terminal({ allowProposedApi: true, cols, rows, scrollback: 5000 });
     this.serializer = new SerializeAddon();
     this.term.loadAddon(this.serializer);
@@ -31,6 +31,7 @@ class TerminalState {
       return false;
     });
     this.emit = emit;
+    this.onParsed = onParsed;
     this.pending = 0;
     this.blocked = false;
     this.waiting = [];
@@ -50,6 +51,7 @@ class TerminalState {
     this.pending++;
     this.term.write(bytes, () => {
       this.pending--;
+      this.onParsed();
       this.drain();
     });
     this.emit(Buffer.from(bytes).toString('base64'));
@@ -60,6 +62,13 @@ class TerminalState {
     this.blocked = true;
     this.waiting.push(['resize', cols, rows]);
     this.drain();
+  }
+
+  // Use baseY, not viewportY: browser scrolling must never select old shell
+  // scrollback as the current screen. Only read after the ordered parser drains.
+  readScreen() {
+    const buffer = this.term.buffer.active;
+    return Array.from({ length: this.term.rows }, (_, i) => buffer.getLine(buffer.baseY + i)?.translateToString(true) || '');
   }
 
   snapshot(done) {

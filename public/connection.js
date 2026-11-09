@@ -304,18 +304,20 @@ function connect(username, password) {
       if (typeof msg.lastSeq === 'number') lastSeqByAgent.set(msg.agentId, msg.lastSeq);
     } else if (typeof msg.type === 'string' && msg.type.startsWith('file_')) {
       handleFileMsg(msg);
-    } else if (msg.type === 'claude_state') {
-      // Update single agent's claudeState in cache + re-render.
-      // Server only sends this on an actual kind/prompt change, so this is the
+    } else if (msg.type === 'cli_state') {
+      // Update the canonical CLI state in cache + re-render.
+      // Server only sends this on an actual state change, so this is the
       // authoritative transition point for the attention pulse + notification.
       if (lastAgents && msg.agentId) {
         const a = lastAgents.find(x => x.id === msg.agentId);
         if (a) {
-          a.claudeState = msg.state;
-          setAgentAttention(a.id, a.name, a.claudeState);
+          a.cliState = CliState.normalizeState(msg.state);
+          a.needsInput = CliState.needsInput(a.cliState);
+          setAgentAttention(a.id, a.name, a.cliState);
           updateTitleBadge();
           if (currentMode === 'card') renderAgents(lastAgents);
           if (currentMode === 'mgmt') renderMgmtClients();
+          if (structAgentId === a.id) renderStructActionbar();
         }
       }
     } else if (msg.type === 'supervisor_event') {

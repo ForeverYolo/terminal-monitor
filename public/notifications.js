@@ -1,25 +1,26 @@
 'use strict';
 
-// ========== Attention: pulse + notify when a Claude session needs input ==========
-// "Needs input" is a deterministic fact from claudeState.kind — no LLM involved.
+// ========== Attention: pulse + notify when a CLI session needs input ==========
+// Attention comes from the unified cliState.status — no LLM involved.
 // Card/row pulsing (CSS) always reflects current membership in attentionAgents;
 // the one-shot alert (desktop notification + toast) fires only on a genuinely
 // NEW attention state per agent, tracked via notifiedKinds, so the periodic
 // 10s `agents` snapshot re-broadcast doesn't re-alert for a still-pending prompt.
-const ATTENTION_KINDS = new Set(['yesno', 'bash', 'option']);
+const ATTENTION_KINDS = new Set(['waiting_permission', 'waiting_input']);
 const attentionAgents = new Set();     // agentIds currently needing attention
 const notifiedKinds = new Map();       // agentId -> kind already alerted for
 const BASE_TITLE = document.title;
 
 function isAttentionState(cs) {
-  return !!(cs && cs.running && ATTENTION_KINDS.has(cs.kind));
+  return !!(cs && cs.isCodeCli && ATTENTION_KINDS.has(cs.status));
 }
 
 function setAgentAttention(agentId, agentName, cs) {
   if (isAttentionState(cs)) {
     attentionAgents.add(agentId);
-    if (notifiedKinds.get(agentId) !== cs.kind) {
-      notifiedKinds.set(agentId, cs.kind);
+    const key = [cs.sessionId, cs.status, cs.prompt, JSON.stringify(cs.options)].join('|');
+    if (notifiedKinds.get(agentId) !== key) {
+      notifiedKinds.set(agentId, key);
       notifyAttention(agentId, agentName, cs);
     }
   } else {
@@ -35,7 +36,7 @@ function syncAttentionFromAgents(agents) {
   for (const id of Array.from(attentionAgents)) {
     if (!currentIds.has(id)) { attentionAgents.delete(id); notifiedKinds.delete(id); }
   }
-  for (const a of agents) setAgentAttention(a.id, a.name, a.claudeState);
+  for (const a of agents) setAgentAttention(a.id, a.name, a.cliState);
   updateTitleBadge();
 }
 
@@ -84,10 +85,10 @@ function stopTitleFlash() {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) stopTitleFlash(); });
 window.addEventListener('focus', stopTitleFlash);
 
-const ATTENTION_LABELS = { yesno: '需要确认', bash: '请求执行权限', option: '需要选择' };
+const ATTENTION_LABELS = { waiting_permission: '请求执行权限', waiting_input: '需要输入' };
 
 function notifyAttention(agentId, agentName, cs) {
-  const label = ATTENTION_LABELS[cs.kind] || '需要输入';
+  const label = ATTENTION_LABELS[cs.status] || '需要输入';
   const body = (cs.prompt || '').substring(0, 120);
   try {
     if (window.Notification && Notification.permission === 'granted') {
@@ -100,7 +101,7 @@ function notifyAttention(agentId, agentName, cs) {
     }
   } catch { /* Notification not available/blocked — toast still fires below */ }
   flashToast(`${agentName}: ${label}${body ? ' — ' + body : ''}`, 'warn');
-  // claude_state is a structured {kind, prompt} fact (not free-form text), so
+  // cli_state is a structured status/prompt report, so
   // "agentName label" is always a clean, short, reliable description — safe
   // to put straight into the tab title.
   startTitleFlash(`🔔 ${agentName} ${label}`);

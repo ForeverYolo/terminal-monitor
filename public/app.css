@@ -58,6 +58,8 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
 .agent-card .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .agent-card .status-dot.idle { background: #ff6b6b; } /* waiting for input */
 .agent-card .status-dot.busy { background: #4caf50; } /* running/outputting */
+.agent-card .status-dot.unknown { background: #999; }
+.agent-card .terminal-preview { margin-top: 6px; }
 .agent-card .status-text { font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 10px; color: #6a9955; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .no-agents { color: #555; font-size: 14px; padding-top: 40px; text-align: center; width: 100%; }
 
@@ -121,10 +123,6 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
   color: #c896ff;
   border: 1px solid #5a3a8e;
 }
-.claude-badge.kind-working { background:#1a3a4a; color:#7ad6ff; border-color:#2a5a8e; }
-.claude-badge.kind-yesno, .claude-badge.kind-bash { background:#4a2a2a; color:#ff9b9b; border-color:#8e3a3a; }
-.claude-badge.kind-option { background:#4a4218; color:#ffe27a; border-color:#8e7a2a; }
-.claude-badge.kind-input { background:#1a4a2a; color:#9bffb0; border-color:#2a8e4a; }
 
 /* Attention: a Claude session is waiting on yes/no, a permission prompt, or an
    option list — pulse the card border so it's noticeable without staring at it. */

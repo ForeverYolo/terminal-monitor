@@ -46,7 +46,7 @@ let browser;
   assert(execFileSync('screen',['-ls'],{encoding:'utf8'}).includes('swt-staging-codex'),'Escape terminated staging Screen');
   const argv=JSON.parse(fs.readFileSync(path.join(root,'runtime/codex-command.json')));
   const id=argv[argv.indexOf('resume')+1];
-  assert(execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(s=>s.includes('codex --no-daemon resume '+id)),'Escape terminated Codex');
+  assert(execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(s=>/\bcodex\b/.test(s)&&s.includes('resume '+id)),'Escape terminated Codex');
   assert(!(await page.evaluate(lines)).includes('[screen is terminating]'));
   pass('keyboard and toolbar Escape send ESC and keep Codex/Screen alive');
  }

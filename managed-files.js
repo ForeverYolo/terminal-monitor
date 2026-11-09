@@ -3,7 +3,12 @@
 (function(root) {
   const CLIENT_FILES = [
   "client.js",
-  "claude-detector.js",
+  "terminal-text.js",
+  "cli-state.js",
+  "cli-process.js",
+  "cli-tracker.js",
+  "cli-hooks.js",
+  "cli-hook.js",
   "spawn-validator.js",
   "config-loader.js",
   "terminal-state.js",

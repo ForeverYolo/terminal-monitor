@@ -4,7 +4,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { createSupervisor } = require('./supervisor');
-const { stripAnsi } = require('./claude-detector');
+const { stripAnsi } = require('./terminal-text');
+const { emptyState, normalizeState, legacyState, fromLegacy, needsInput, stateLabel } = require('./cli-state');
 const { loadConfig } = require('./config-loader');
 const { PendingRequests } = require('./pending-requests');
 const { PROTOCOL_VERSION, validSize, validParserState } = require('./terminal-protocol');
@@ -58,18 +59,6 @@ const pendingPulls = new PendingRequests();         // reqId -> { ws, agentName 
 // → 待拉取) from "server published, agent not pushed yet" (r unchanged → 待更新).
 const agentRunningVersions = new Map();
 
-// Detect if output ends with a prompt (waiting for input)
-function hasPrompt(text) {
-  if (!text || !text.trim()) return false;
-  const lines = text.split('\n');
-  const lastLine = lines[lines.length - 1].trim();
-  if (!lastLine) return false;
-  // Common prompt endings: # $ > : |%
-  // But NOT when followed by more text (like "Select an option:")
-  const promptRe = /[#$:>%|]\s*$/;
-  return promptRe.test(lastLine);
-}
-
 let agentIdCounter = 0;
 
 function generateAgentId() {
@@ -110,8 +99,9 @@ function getAgentsList(user) {
         sys: a.sys || {},
         connectedAt: a.connectedAt,
         lastLines,
-        needsInput: hasPrompt(a.lastOutput),
-        claudeState: a.claudeState || null,
+        needsInput: needsInput(a.cliState),
+        cliState: a.cliState || emptyState(),
+        claudeState: a.cliState ? legacyState(a.cliState) : null,
         clientId: a.attrs && a.attrs.clientId ? a.attrs.clientId : null,
         fileHashes: a.fileHashes || null,
         runningHashes: a.runningHashes || null,
@@ -148,7 +138,7 @@ setInterval(() => {
   for (const a of agentList) {
     const lines = a.lastOutput.split('\n');
     const last3 = lines.slice(-3).filter(l => l.trim()).join(' | ');
-    const status = hasPrompt(a.lastOutput) ? 'WAITING' : 'RUNNING';
+    const status = stateLabel(a.cliState) || 'TERMINAL';
     console.log(`  [${status}] ${a.name} (${a.screen}) — ${last3.substring(0, 200)}`);
   }
 }, CONSOLE_SUMMARY_INTERVAL);
@@ -250,7 +240,7 @@ function spawnRestartScript() {
 
 const { createHttpHandler } = require('./server-http');
 const httpServer = http.createServer(createHttpHandler({
-  root: __dirname, config, agents, getSupervisor: () => supervisor, hasPrompt, maxActionBody: MAX_ACTION_BODY
+  root: __dirname, config, agents, getSupervisor: () => supervisor, maxActionBody: MAX_ACTION_BODY
 }));
 
 // --- WebSocket server ---
@@ -495,29 +485,22 @@ wss.on('connection', (ws) => {
       }
     }
 
-    // Agent periodically reports its detected Claude session state
-    if (role === 'agent' && msg.type === 'claude_state') {
+    // One state contract for cards, API, notifications and supervisor. Old
+    // clients are translated at the boundary, never re-detected on the server.
+    if (role === 'agent' && (msg.type === 'cli_state' || msg.type === 'claude_state')) {
       const agentInfo = agents.get(ws);
       if (!agentInfo) return;
-      const prev = agentInfo.claudeState;
-      agentInfo.claudeState = {
-        running: !!msg.state && msg.state.running,
-        kind: msg.state ? msg.state.kind : 'none',
-        prompt: msg.state ? (msg.state.prompt || '').substring(0, 500) : '',
-        options: msg.state ? (msg.state.options || []).slice(0, 20) : [],
-        lastLine: msg.state ? (msg.state.lastLine || '').substring(0, 300) : '',
-        detectedAt: msg.state ? msg.state.detectedAt : null,
-        receivedAt: new Date().toISOString()
-      };
-      if (supervisor) supervisor.onClaudeState(agentInfo.id, agentInfo.claudeState);
+      const prev = agentInfo.cliState;
+      agentInfo.cliState = msg.type === 'cli_state' ? normalizeState(msg.state) : fromLegacy(msg.state);
+      if (supervisor) supervisor.onCliState(agentInfo.id, agentInfo.cliState);
       // Notify watching browsers if state kind changed (saves bandwidth vs full broadcast).
       // Broadcast to all browsers so the dashboard management panel stays live
       // without each browser needing to subscribe to every agent.
-      if (!prev || prev.kind !== agentInfo.claudeState.kind || prev.prompt !== agentInfo.claudeState.prompt) {
+      if (JSON.stringify(prev) !== JSON.stringify(agentInfo.cliState)) {
         const update = JSON.stringify({
-          type: 'claude_state',
+          type: 'cli_state',
           agentId: agentInfo.id,
-          state: agentInfo.claudeState
+          state: agentInfo.cliState
         });
         for (const [bws, binfo] of browsers) {
           if (bws.readyState === bws.OPEN) {

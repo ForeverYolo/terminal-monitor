@@ -261,7 +261,7 @@ config.client-download.json  # 监控 download 会话
 2. **仪表盘**：所有在线机器以卡片展示，含：
    - 机器名 / screen 会话名 / 标签
    - 最后几行输出（实时刷新）
-   - 状态：`RUNNING`（运行中）/ `WAITING`（等待输入，检测到命令行提示符）
+   - 工作状态仅对识别为 code-cli 的终端显示：工作中、空闲、等待授权、等待输入或未知。Codex/Claude 可接 hooks，其余通过当前屏幕推断；普通 shell 不显示工作状态。配置与检测边界见 [CLI 状态说明](docs/cli-work-state.md)。
    - 系统信息（CPU / 内存 / GPU / 磁盘 / 负载 / 在线时长）
 3. **终端视图**：点击卡片进入，标准 xterm.js 终端，支持：
    - 多终端同屏（`connect_multi`）
@@ -463,7 +463,8 @@ terminal-monitor/
 ├── config-loader.js / pending-requests.js
 ├── service-runtime.sh / service-restart.js
 ├── supervisor.js / ai-overseer.js      # 建议型监督器 / 自动执行督工
-├── claude-detector.js / spawn-validator.js
+├── cli-state.js / cli-tracker.js / cli-process.js / cli-hooks.js / cli-hook.js
+├── terminal-text.js / spawn-validator.js
 ├── public/                            # HTML、CSS、按功能拆分的 JS；无需构建
 ├── install.sh / deploy.sh / restart.sh / backup.sh
 ├── infra/staging/                     # 独立测试平台与公网验收脚本

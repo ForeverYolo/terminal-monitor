@@ -235,14 +235,14 @@ function renderMgmtClients() {
       </div>
       <div class="mgmt-agent-list">
         ${agents.map(a => {
-          const cs = a.claudeState;
-          const csStr = (cs && cs.running) ? ` · claude:${cs.kind}${cs.prompt ? ' "' + escapeHtml(cs.prompt.substring(0,40)) + '"' : ''}` : '';
+          const cs = a.cliState;
+          const csStr = escapeHtml(CliState.stateText(cs));
           const rowClass = `mgmt-agent-row${attentionAgents.has(a.id) ? ' attention' : ''}`;
           const safeName = a.name.replace(/'/g, "\\'");
           return `<div class="${rowClass}">
             <span class="name">${escapeHtml(a.name)}</span>
             <span class="screen">[${escapeHtml(a.screen||'')}]</span>
-            <span class="state">${a.needsInput ? '⏳等待' : '▶运行'}${csStr}</span>
+            <span class="state${cs?.isCodeCli ? ' claude-badge' : ''}">${csStr}</span>
             <button class="kill-btn" onclick="killNode('${a.id}','${safeName}',false)" title="断开监控，保留任务 screen">停止监控</button>
             <button class="kill-btn danger" onclick="killNode('${a.id}','${safeName}',true)" title="断开监控并终止任务 screen">终止节点</button>
           </div>`;

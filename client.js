@@ -10,7 +10,9 @@ const { TerminalState } = require('./terminal-state');
 const { PROTOCOL_VERSION } = require('./terminal-protocol');
 const { encodeScreenInput } = require('./terminal-filter');
 const { prepareScreenTerminal, startScreenSession } = require('./screen-terminal');
-const { detectClaudeState } = require('./claude-detector');
+const { CliTracker } = require('./cli-tracker');
+const { screenProcesses } = require('./cli-process');
+const { createHookReceiver } = require('./cli-hooks');
 const { validateSpawnRequest, SPAWN_MAX_NODES } = require('./spawn-validator');
 const { loadConfig } = require('./config-loader');
 
@@ -414,34 +416,49 @@ function scheduleSelfRestart() {
   console.log(`[update] self-restart scheduled (screen swt-client-${screenName})`);
 }
 
-// --- Claude state detection ---
-// Client-side mirror of lastOutput for cheap local detection (avoids round-trip).
-let lastOutputBuffer = '';
-const LAST_OUTPUT_BUFFER_MAX = 20000; // 20KB tail
-let claudeStateTimer = null;
-const CLAUDE_STATE_INTERVAL = 4000; // report every 4s
-
-function pushOutput(text) {
-  lastOutputBuffer += text;
-  if (lastOutputBuffer.length > LAST_OUTPUT_BUFFER_MAX) {
-    lastOutputBuffer = lastOutputBuffer.slice(-LAST_OUTPUT_BUFFER_MAX);
+// --- Unified CLI identity and work state (parsed screen + bound hooks) ---
+const cliTracker = new CliTracker();
+let hookReceiver = null;
+let processSnapshot = null;
+let processCheckedAt = 0;
+let stateDebounce = null;
+let previousStateJson = '';
+let cliStateTimer = null;
+function currentProcesses(force = false) {
+  if (force || Date.now() - processCheckedAt > 900) {
+    processSnapshot = screenProcesses(screenName);
+    processCheckedAt = Date.now();
   }
+  return processSnapshot;
 }
-
-function reportClaudeState() {
+function reportCliState() {
+  if (!terminalState || terminalState.pending || terminalState.blocked) return;
+  const lines = terminalState.readScreen();
+  const state = cliTracker.screen(lines, currentProcesses());
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const state = detectClaudeState(lastOutputBuffer);
-  sendRawOrQueue(JSON.stringify({ type: 'claude_state', state }));
+  const serialized = JSON.stringify(state);
+  if (serialized === previousStateJson) return;
+  previousStateJson = serialized;
+  sendRawOrQueue(JSON.stringify({ type: 'cli_state', state }));
+}
+function scheduleStateReport() {
+  if (!stateDebounce) stateDebounce = setTimeout(() => { stateDebounce = null; reportCliState(); }, 100);
+}
+function startCliStateReporter() {
+  stopCliStateReporter();
+  previousStateJson = '';
+  cliStateTimer = setInterval(reportCliState, 500);
+}
+function stopCliStateReporter() {
+  if (cliStateTimer) { clearInterval(cliStateTimer); cliStateTimer = null; }
 }
 
-function startClaudeStateReporter() {
-  stopClaudeStateReporter();
-  claudeStateTimer = setInterval(reportClaudeState, CLAUDE_STATE_INTERVAL);
-}
-
-function stopClaudeStateReporter() {
-  if (claudeStateTimer) { clearInterval(claudeStateTimer); claudeStateTimer = null; }
-}
+createHookReceiver(screenName, event => {
+  if (!cliTracker.event(event, currentProcesses(true))) return false;
+  previousStateJson = '';
+  scheduleStateReport();
+  return true;
+}).then(receiver => { hookReceiver = receiver; }).catch(error => console.log(`[state] hooks unavailable: ${error.message}; using screen inference`));
 
 // -x: multi-display (for attached sessions), -r: reattach (for detached)
 // Use large default PTY size so TUI apps (claude, vim, etc.) have room.
@@ -535,7 +552,7 @@ function connect() {
     reconnectDelay = 1000;
     registered = false;
     startHeartbeat();
-    startClaudeStateReporter();
+    startCliStateReporter();
 
     // Spawn PTY with screen — unless it survived the disconnect (see the
     // keep-PTY logic in ws.on('close')); a fresh `screen -r` attach would
@@ -569,7 +586,7 @@ function connect() {
       if (ws && ws.readyState === WebSocket.OPEN) {
         sendRawOrQueue(JSON.stringify({ type: 'data', payload }));
       }
-    });
+    }, scheduleStateReport);
     if (ptyProcess) {
       try { ptyProcess.kill(); } catch {}
       ptyProcess.removeAllListeners('data');
@@ -598,7 +615,6 @@ function connect() {
     ptyProcess.onData((data) => {
       if (DEBUG_DUMP) dumpStream('OUT', data);
       oscTail = trackOscCwd(oscTail, data);
-      pushOutput(data);
       terminalState.write(data);
     });
 
@@ -751,7 +767,7 @@ function connect() {
     registered = false;
     pendingOutbound = [];
     stopHeartbeat();
-    stopClaudeStateReporter();
+    stopCliStateReporter();
     // KEEP the PTY attached to screen across reconnects. Killing it used to
     // mean: reconnect → fresh `screen -r` attach → screen repaints one
     // viewport → everything between the disconnect and reconnect was gone
@@ -781,6 +797,7 @@ function scheduleReconnect() {
 // --- Graceful shutdown ---
 function shutdown() {
   console.log('\nShutting down...');
+  if (hookReceiver) hookReceiver.close();
   if (ptyProcess) ptyProcess.kill();
   if (ws) ws.close();
   process.exit(0);
