@@ -46,3 +46,5 @@ node /absolute/install/root/file-update.js --configure-hooks codex /absolute/pro
 ## 验证
 
 `npm run test:update` 使用独立临时目录和 Screen 套接字目录，执行原始 `7cd9b52` 服务器的网页协议升级、旧客户端自动桥接、同目录两个监控进程切换、依赖锁变更、文件校验与失败回滚。`test-multiproc-update` 额外验证第一个监控健康时不能提前成功，以及跨用户操作被拒绝。
+
+实际测试服已通过 Chromium 管理页按钮完成拉取、服务器切换重连和客户端推送，任务 Screen PID `457389` 保持不变，无浏览器错误。验证报告位于 `/home/renhangqi/terminal-monitor-staging/runtime/web-update-verification/report.json`；测试服运行提交 `1ca2eab`，未合入生产。

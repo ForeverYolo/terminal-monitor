@@ -472,7 +472,7 @@ terminal-monitor/
 └── docs/                              # 部署、测试、架构与历史设计记录
 ```
 
-测试入口见 [测试说明](docs/testing.md)。模块职责和首次升级方式见 [重构说明](docs/refactoring.md)。旧版网页更新器的白名单不能安装新增模块，跨到此结构时先用 Git 或新版 `deploy.sh` 完整升级并重启；之后网页拉取、推送覆盖全部拆分后的运行文件。
+测试入口见 [测试说明](docs/testing.md)，模块职责见 [重构说明](docs/refactoring.md)。网页升级支持完整版本、依赖准备、健康检查与自动回滚；旧版首次接入可通过兼容发布端完成，无须逐台同步新增模块，操作步骤见 [网页更新说明](docs/web-release-updates.md)。
 
 ---
 
