@@ -97,6 +97,39 @@ function hookCommand(root, app) {
     .map(quote)
     .join(" ");
 }
+function isMonitorHook(command, root, app, currentCommand) {
+  if (command === currentCommand) return true;
+  if (typeof command !== "string") return false;
+  // Older generated adapters used three single-quoted shell arguments.
+  // Parse only that generated form; never evaluate arbitrary shell text.
+  const words = command.match(/(?:'[^']*'|\\.)+/g);
+  if (!words || words.join(" ") !== command) return false;
+  const args = words.map((word) =>
+    word.replace(/'([^']*)'|\\(.)/g, (_, quoted, escaped) => quoted ?? escaped),
+  );
+  if (!/^(?:node|nodejs)$/.test(path.basename(args[0]))) return false;
+  const legacy =
+    args.length === 3 &&
+    args[2] === app &&
+    path.basename(args[1]) === "cli-hook.js";
+  const stable =
+    args.length === 4 &&
+    args[2] === "--hook" &&
+    args[3] === app &&
+    path.basename(args[1]) === "file-update.js";
+  if (!legacy && !stable) return false;
+  try {
+    const script = fs.realpathSync(args[1]);
+    return (
+      script === path.join(root, path.basename(args[1])) ||
+      new RegExp("^releases/[a-f0-9]{64}/(?:cli-hook|file-update)\\.js$").test(
+        path.relative(store(root), script),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
 function mergeHooks(root, target) {
   if (
     !["codex", "claude"].includes(target.app) ||
@@ -115,8 +148,21 @@ function mergeHooks(root, target) {
   if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink())
     throw Error("Hook configuration cannot be a symlink");
   const before = fs.existsSync(file) ? fs.readFileSync(file) : null;
-  const config = before ? JSON.parse(before) : {},
-    command = hookCommand(root, target.app);
+  let config;
+  try { config = before ? JSON.parse(before) : {}; }
+  catch { throw Error("Invalid hook configuration"); }
+  const command = hookCommand(root, target.app);
+  if (
+    !config ||
+    typeof config !== "object" ||
+    Array.isArray(config) ||
+    (config.hooks !== undefined &&
+      (!config.hooks ||
+        typeof config.hooks !== "object" ||
+        Array.isArray(config.hooks)))
+  )
+    throw Error("Invalid hook configuration");
+  const original = JSON.stringify(config);
   const events = [
     "SessionStart",
     "UserPromptSubmit",
@@ -131,16 +177,44 @@ function mergeHooks(root, target) {
   ];
   config.hooks = config.hooks || {};
   for (const event of events) {
-    const groups = config.hooks[event] || [];
+    const groups = config.hooks[event] === undefined ? [] : config.hooks[event];
+    if (
+      !Array.isArray(groups) ||
+      groups.some((g) => !g || !Array.isArray(g.hooks))
+    )
+      throw Error("Invalid hook groups");
+    // Leave unrelated groups, including empty groups and their matchers, intact.
     config.hooks[event] = groups
-      .map((g) => ({
-        ...g,
-        hooks: (g.hooks || []).filter((h) => h.command !== command),
-      }))
-      .filter((g) => g.hooks.length)
+      .flatMap((g) => {
+        if (
+          !g.hooks.some((h) =>
+            isMonitorHook(h.command, root, target.app, command),
+          )
+        )
+          return [g];
+        const hooks = g.hooks.filter(
+          (h) => !isMonitorHook(h.command, root, target.app, command),
+        );
+        return hooks.length ? [{ ...g, hooks }] : [];
+      })
       .concat([{ hooks: [{ type: "command", command, timeout: 2 }] }]);
   }
-  writeJson(file, config);
+  if (JSON.stringify(config) !== original) {
+    const current = fs.existsSync(file) ? fs.readFileSync(file) : null;
+    if (
+      (before === null) !== (current === null) ||
+      (before && !before.equals(current))
+    )
+      throw Error("Hook configuration changed; retry later");
+    const backup = path.join(
+      store(root),
+      "hook-config-backups",
+      digest(file) + ".json",
+    );
+    if (!fs.existsSync(backup))
+      writeJson(backup, { file, before: before?.toString("base64") ?? null });
+    writeJson(file, config);
+  }
   return {
     file,
     before: before?.toString("base64") ?? null,
@@ -162,6 +236,10 @@ function configureHooks(root, target) {
   root = installRoot(root);
   const unlock = lock(root);
   try {
+    if (
+      readJson(path.join(store(root), "activation.json"))?.phase === "checking"
+    )
+      throw Error("Release health check in progress");
     if (!fs.existsSync(path.join(activeRoot(root), "cli-hook.js")))
       throw Error("This release has no CLI hook adapter");
     mergeHooks(root, target);
@@ -169,7 +247,11 @@ function configureHooks(root, target) {
       targets = readJson(file, []).filter(
         (t) => !(t.app === target.app && t.directory === target.directory),
       );
-    writeJson(file, [...targets, target]);
+    const next = [...targets, target].sort((a, b) =>
+      (a.app + a.directory).localeCompare(b.app + b.directory),
+    );
+    if (JSON.stringify(readJson(file, [])) !== JSON.stringify(next))
+      writeJson(file, next);
     return {
       app: target.app,
       directory: target.directory,
@@ -201,8 +283,17 @@ function activate(root, id) {
         for (const target of readJson(
           path.join(store(root), "hook-targets.json"),
           [],
-        ))
-          backups.push(mergeHooks(root, target));
+        )) {
+          const file = path.join(
+            target.directory,
+            target.app === "codex"
+              ? ".codex/hooks.json"
+              : ".claude/settings.local.json",
+          );
+          // A deleted project or removed local configuration must not block
+          // application upgrades or be recreated by the migration step.
+          if (fs.existsSync(file)) backups.push(mergeHooks(root, target));
+        }
       const state = {
         id,
         previous,

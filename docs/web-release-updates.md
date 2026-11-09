@@ -34,7 +34,7 @@ npm ci --omit=dev
 
 ## Hooks
 
-已配置的事件上报继续工作。若要让项目 hooks 使用始终指向当前版本的稳定命令，可在接入新更新器后执行：
+已配置的事件上报继续工作。监控默认自动为确认的 Codex／Claude 项目配置稳定命令并记录升级目标，不需要手工登记。手动诊断或预先接入项目时仍可执行：
 
 ```bash
 node /absolute/install/root/file-update.js --configure-hooks claude /absolute/project

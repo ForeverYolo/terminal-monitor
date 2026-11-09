@@ -491,3 +491,4 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
   [data-mode="multi"] { display: none; }   /* multi-terminal grid doesn't fit a phone screen */
   #notif-toggle { display: none; }         /* Notification API isn't usable on mobile Safari/Chrome-iOS */
 }
+.hook-setup-hint { font-size: 12px; line-height: 1.5; color: #d29922; margin-top: 5px; overflow-wrap: anywhere; }

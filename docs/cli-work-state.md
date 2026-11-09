@@ -12,7 +12,19 @@
 
 运行逻辑只维护 `cliState`；旧字段在协议输出时生成，不再维护第二份状态缓存。一次 `CliTracker.screen()` 完成当前屏幕识别与 hooks 校正，调用方无需分两次处理画面。`terminal-text.js` 只提供预览/结构化文本需要的 ANSI 清理，旧的历史字节流检测器已移除。卡片与管理页通过同一 `stateText()` 生成状态文字。
 
-## 配置 Codex / Claude hooks
+## 自动接入 Codex / Claude hooks
+
+监控现在默认自动接入。只有在 Screen 中确认唯一的前台 Codex／Claude 进程和对应项目后，才合并该项目的 hooks；不修改用户全局配置、不覆盖自定义 hooks 或权限设置。Codex 使用项目 `.codex/hooks.json`，Claude 按运行版本选择项目本地 `.claude/settings.local.json`。监控命令指向安装目录的稳定入口，升级后继续调用当前版本。配置备份保存在安装目录 `.swt/hook-config-backups/`，项目自动加入内部升级维护列表，无需手工登记。
+
+配置成功不代表事件已生效。尚未收到真实事件时仍显示“推断 · 事件待接通”，卡片列出后续操作；收到经过 PID、启动时间、Screen 归属和会话检查的事件后才显示“事件”，并移除接入提示。Codex 首次仍需在 `/hooks` 中信任监控 hooks；当前会话可以在 `/hooks` 中发现新增配置。监控不会自动信任其他 hooks 或重新启动任务。Claude 的配置会按其设置加载规则生效，未接通时可检查 `/hooks` 或重新加载会话配置。
+
+`client.autoHooks: false` 可关闭自动配置，已明确关闭 hooks 的 CLI 保留原设置。配置损坏、目录权限、来源限制或多 CLI 归属不明时不会强行修改；适用的失败原因会显示在卡片。生成的未跟踪配置写入项目 Git 内部 excludes，不修改团队 `.gitignore`。
+
+官方参考：[Codex hooks](https://learn.chatgpt.com/docs/hooks)、[Claude hooks](https://code.claude.com/docs/en/hooks)。
+
+### 手动诊断
+
+以下命令仍可用于查看适配器生成的配置：
 
 在运行被监控 Screen 的同一台机器上生成配置片段：
 
@@ -55,4 +67,4 @@ RUN_LIVE_CLI_HOOK_TEST=1 node test/test-cli-live-hooks.js claude
 
 Qoder CN 1.1.85 另在临时目录执行一条无工具短任务，已采集实际 `Generating... (esc to cancel, 0s)` 与结束后的空闲画面，见 `cli-task-screens.json`。模型回答区域已省略；固定输入框在工作期间仍然可见，不能单凭它判空闲。
 
-部署需同时更新测试 broker/client 与前端；新增文件已列入 `managed-files.js`。本分支仅用于隔离实现和测试服验收，未合入生产。
+部署需同时更新测试 broker/client 与前端；新增文件已列入 `managed-files.js`。自动接入的回归包括临时 Screen 中的首次自动配置、真实命令 hook/socket 上报、来源标记及任务会话保留；真实 Codex `/hooks` 的无模型请求测试可用 `RUN_LOCAL_CODEX_HOOK_SETUP_TEST=1 node test/test-auto-hooks-codex.js` 运行。

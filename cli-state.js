@@ -16,7 +16,9 @@
       prompt: String(value.prompt || '').slice(0, 300),
       options: Array.isArray(value.options) ? value.options.slice(0, 12).filter(o => o && Number.isInteger(o.index) && typeof o.label === 'string').map(o => ({ index: o.index, label: o.label.slice(0, 150) })) : [],
       sessionId: typeof value.sessionId === 'string' ? value.sessionId.slice(0, 160) : null,
-      changedAt: typeof value.changedAt === 'string' ? value.changedAt.slice(0, 40) : null
+      changedAt: typeof value.changedAt === 'string' ? value.changedAt.slice(0, 40) : null,
+      ...(['installing', 'configured', 'blocked', 'error', 'disabled', 'connected'].includes(value.hookSetup?.phase)
+        ? {hookSetup: {phase: value.hookSetup.phase, message: String(value.hookSetup.message || '').slice(0, 300)}} : {})
     };
   }
   function legacyState(state) {
@@ -79,9 +81,13 @@
   }
   function stateLabel(state) { return state?.isCodeCli ? labels[state.status] || labels.unknown : ''; }
   function appLabel(state) { return appLabels[state?.app] || ''; }
-  function stateText(state) { return state?.isCodeCli ? `${stateLabel(state)} · ${appLabel(state)} · ${state.source === 'hooks' ? '事件' : '推断'}` : ''; }
+  function hookHint(state) { return state?.isCodeCli && state.source !== 'hooks' ? state.hookSetup?.message || '' : ''; }
+  function stateText(state) {
+    const setup = {configured:'事件待接通',installing:'正在接入',blocked:'事件未接通',error:'事件未接通',disabled:'自动接入关闭'};
+    return state?.isCodeCli ? `${stateLabel(state)} · ${appLabel(state)} · ${state.source === 'hooks' ? '事件' : '推断'}${hookHint(state) ? ' · ' + (setup[state.hookSetup.phase] || '事件待接通') : ''}` : '';
+  }
   function needsInput(state) { return !!state?.isCodeCli && ['idle', 'waiting_input', 'waiting_permission'].includes(state.status); }
-  const api = { emptyState, normalizeState, legacyState, fromLegacy, detectScreen, stateLabel, appLabel, stateText, needsInput };
+  const api = { emptyState, normalizeState, legacyState, fromLegacy, detectScreen, stateLabel, appLabel, stateText, hookHint, needsInput };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.CliState = api;
 })(globalThis);

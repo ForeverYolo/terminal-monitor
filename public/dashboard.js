@@ -37,7 +37,8 @@ function renderAgents(agents) {
     const tagHtml = tags.length ? `<div class="tags">${tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>` : '';
     const cs = a.cliState;
     const dotClass = cs?.status === 'working' ? 'busy' : cs?.status === 'unknown' ? 'unknown' : 'idle';
-    const statusHtml = cs?.isCodeCli ? `<div class="status-row"><span class="claude-badge" title="${escapeHtml(cs.prompt || '')}"><span class="status-dot ${dotClass}"></span>${escapeHtml(CliState.stateText(cs))}</span></div>` : '';
+    const hookHint = CliState.hookHint(cs);
+    const statusHtml = cs?.isCodeCli ? `<div class="status-row"><span class="claude-badge" title="${escapeHtml([cs.prompt,hookHint].filter(Boolean).join('\n'))}"><span class="status-dot ${dotClass}"></span>${escapeHtml(CliState.stateText(cs))}</span></div>${hookHint ? `<div class="hook-setup-hint">${escapeHtml(hookHint)}</div>` : ''}` : '';
     // Output preview is independent of CLI work state. A normal shell still
     // shows its prompt/output, without a running/waiting dot or a CLI badge.
     const preview = TerminalText.stripAnsi(a.lastLines || '').split('\n').map(line => line.trim()).filter(Boolean).at(-1) || '';

@@ -9,6 +9,7 @@
   "cli-tracker.js",
   "cli-hooks.js",
   "cli-hook.js",
+  "cli-hook-setup.js",
   "spawn-validator.js",
   "config-loader.js",
   "terminal-state.js",

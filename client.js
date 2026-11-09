@@ -14,6 +14,8 @@ const { prepareScreenTerminal, startScreenSession } = require('./screen-terminal
 const { CliTracker } = require('./cli-tracker');
 const { screenProcesses } = require('./cli-process');
 const { createHookReceiver } = require('./cli-hooks');
+const { createAutoHookSetup } = require('./cli-hook-setup');
+const { normalizeState } = require('./cli-state');
 const { validateSpawnRequest, SPAWN_MAX_NODES } = require('./spawn-validator');
 const { loadConfig } = require('./config-loader');
 
@@ -424,6 +426,7 @@ function scheduleSelfRestart() {
 
 // --- Unified CLI identity and work state (parsed screen + bound hooks) ---
 const cliTracker = new CliTracker();
+const autoHookSetup = createAutoHookSetup(__dirname, {enabled: config.client.autoHooks !== false});
 let hookReceiver = null;
 let processSnapshot = null;
 let processCheckedAt = 0;
@@ -440,7 +443,10 @@ function currentProcesses(force = false) {
 function reportCliState() {
   if (!terminalState || terminalState.pending || terminalState.blocked) return;
   const lines = terminalState.readScreen();
-  const state = cliTracker.screen(lines, currentProcesses());
+  const processes = currentProcesses();
+  const detected = cliTracker.screen(lines, processes);
+  const hookSetup = autoHookSetup.observe(processes, detected, !!hookReceiver);
+  const state = normalizeState({...detected, hookSetup});
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const serialized = JSON.stringify(state);
   if (serialized === previousStateJson) return;
