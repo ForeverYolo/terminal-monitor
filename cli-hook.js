@@ -21,6 +21,9 @@ if (process.argv.includes('--print-config')) {
 }
 let input = '', bytes = 0;
 const timeout = setTimeout(() => process.exit(0), 1200);
+// Ignored events and non-Screen sessions must exit as soon as stdin closes.
+// Keep the hard deadline while stdin/socket I/O is still active.
+timeout.unref();
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => { bytes += Buffer.byteLength(chunk); if (bytes > 1024 * 1024) process.exit(0); input += chunk; });
 process.stdin.on('end', () => {

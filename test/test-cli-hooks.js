@@ -17,6 +17,9 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
 async function until(fn) { for (let i = 0; i < 100; i++) { if (fn()) return; await delay(80); } throw Error('hook test timeout'); }
 let receiver;
 (async () => {
+  const ignoredAt = Date.now();
+  execFileSync(process.execPath,[path.join(root,'cli-hook.js'),'codex'],{input:'{}'});
+  assert(Date.now()-ignoredAt<800,'an ignored hook must not wait for its hard timeout');
   receiver = await createHookReceiver(screen, event => { const accepted = tracker.event(event, screenProcesses(screen)); events.push({event, accepted}); return accepted; });
   assert.equal(fs.statSync(receiver.socket).mode & 0o777, 0o600);
   assert.equal(socketPath('123.' + screen), receiver.socket);
