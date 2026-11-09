@@ -1,7 +1,18 @@
 'use strict';
 
-const { Terminal } = require('xterm-headless');
-const { SerializeAddon } = require('xterm-addon-serialize');
+// Node 21+ exposes navigator without window. xterm 5.3 mistakes that for a
+// browser while loading its platform module. Preserve the host global after
+// initialization; only the headless dependencies need the Node detection.
+const [{ Terminal }, { SerializeAddon }] = (() => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const hideNavigator = typeof window === 'undefined' && descriptor?.configurable;
+  try {
+    if (hideNavigator) delete globalThis.navigator;
+    return [require('xterm-headless'), require('xterm-addon-serialize')];
+  } finally {
+    if (hideNavigator) Object.defineProperty(globalThis, 'navigator', descriptor);
+  }
+})();
 const { createAltScreenFilter } = require('./terminal-filter');
 
 // One ordered writer owns both the terminal model and the bytes sent to the

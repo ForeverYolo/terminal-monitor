@@ -98,6 +98,7 @@ function bridgeFiles(root, files) {
     ]),
   );
   const values = {
+    "terminal-state.js": fs.readFileSync(path.join(root, "terminal-state.js"), "utf8"),
     "client.js": patchClient(byName.get("client.js") || ""),
     "server.js": patchServer(byName.get("server.js") || ""),
     "file-update.js": bundle(root),

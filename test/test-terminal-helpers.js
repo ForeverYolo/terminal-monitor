@@ -22,3 +22,23 @@ for (const [input, ok] of [
   [{ screenName: undefined, cmd: undefined }, false]
 ]) assert.equal(validateSpawnRequest(input).ok, ok, JSON.stringify(input));
 console.log('PASS plain-text terminal previews and spawn validation');
+
+// Newer Node exposes navigator without a DOM. Exercise a cold dependency
+// import in a separate process so this cannot pass through require caching.
+const { spawnSync } = require('child_process');
+const startup = spawnSync(process.execPath, ['-e', `
+  const assert = require('assert');
+  const expectedNavigator = { userAgent: 'Node.js/test', platform: 'Linux x86_64' };
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: expectedNavigator });
+  const { TerminalState } = require(process.argv[1]);
+  assert.strictEqual(globalThis.navigator, expectedNavigator);
+  const state = new TerminalState(80, 24, () => {});
+  state.write(Buffer.from('Node runtime ready'));
+  state.snapshot(() => {
+    assert(state.readScreen()[0].includes('Node runtime ready'));
+    state.dispose();
+    console.log('PASS headless startup with Node navigator and global restoration');
+  });
+`, require.resolve('../terminal-state')], {encoding: 'utf8', timeout: 10000});
+assert.equal(startup.status, 0, startup.stderr.split('\n').filter(line => line.length < 1000).join('\n'));
+process.stdout.write(startup.stdout);

@@ -28,6 +28,7 @@ function buildBridge(output, baseline = "7cd9b52") {
       patch(fs.readFileSync(path.join(output, name), "utf8")),
     );
   fs.writeFileSync(path.join(output, "file-update.js"), bundle(source));
+  fs.copyFileSync(path.join(source, "terminal-state.js"), path.join(output, "terminal-state.js"));
   return output;
 }
 if (require.main === module) {

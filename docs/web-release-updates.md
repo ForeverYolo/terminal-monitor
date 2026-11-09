@@ -1,6 +1,6 @@
 # 网页更新与兼容桥接
 
-状态改进单独保存在 `d796163`，网页更新在独立分支 `feat/web-release-updates` 开发。
+状态改进单独保存在 `d796163`，网页更新已从 `feat/web-release-updates` 合入主线。
 
 ## 日常使用
 
@@ -22,7 +22,7 @@ cd /absolute/path/to/new-bridge-publisher
 npm ci --omit=dev
 ```
 
-给兼容发布端准备一份客户端配置，连接现有服务器、附着现有或专用 Screen，设置 `client.releaseSource` 为真正新版源码的绝对路径，再启动它的 `client.js`。网页先从它拉取一次并重启服务器，接入兼容更新器；随后再次拉取并重启，应用完整新版。兼容版保留历史文件布局，只修改旧白名单已有的 `client.js`、`server.js`、`file-update.js`、`service-restart.js`。新服务器向旧客户端推送时会自动完成同样的桥接。
+给兼容发布端准备一份客户端配置，连接现有服务器、附着现有或专用 Screen，设置 `client.releaseSource` 为真正新版源码的绝对路径，再启动它的 `client.js`。网页先从它拉取一次并重启服务器，接入兼容更新器；随后再次拉取并重启，应用完整新版。兼容版保留历史文件布局，只修改旧白名单已有的 `client.js`、`server.js`、`file-update.js`、`service-restart.js`、`terminal-state.js`。最后一个文件同时兼容 Node 21+ 的全局 navigator，避免旧版 xterm-headless 误判浏览器环境。新服务器向旧客户端推送时会自动完成同样的桥接。
 
 初次桥接的服务重启沿用 Screen；若由 systemd 托管，只有确认当前进程就是该单元的 MainPID 才退出交给 systemd 重启，单元须配置 `Restart=on-failure` 或 `always`。接入后由常驻启动器切换工作进程，Screen 与 systemd 使用相同机制。
 
@@ -47,4 +47,6 @@ node /absolute/install/root/file-update.js --configure-hooks codex /absolute/pro
 
 `npm run test:update` 使用独立临时目录和 Screen 套接字目录，执行原始 `7cd9b52` 服务器的网页协议升级、旧客户端自动桥接、同目录两个监控进程切换、依赖锁变更、文件校验与失败回滚。`test-multiproc-update` 额外验证第一个监控健康时不能提前成功，以及跨用户操作被拒绝。
 
-实际测试服已通过 Chromium 管理页按钮完成拉取、服务器切换重连和客户端推送，任务 Screen PID `457389` 保持不变，无浏览器错误。验证报告位于 `/home/renhangqi/terminal-monitor-staging/runtime/web-update-verification/report.json`；测试服运行提交 `1ca2eab`，未合入生产。
+实际测试服已通过 Chromium 管理页按钮完成拉取、服务器切换重连和客户端推送，任务 Screen PID `457389` 保持不变，无浏览器错误。验证报告位于 `/home/renhangqi/terminal-monitor-staging/runtime/web-update-verification/report.json`；测试服运行提交 `1ca2eab`，该次测试时尚未合入生产。
+
+2026-11-09：主线已合入，正式服已通过旧协议完成兼容桥接和完整版本切换。针对 Node 24 的 headless 初始化问题，已补充冷启动回归测试；监控进程的 Node 运行时必须满足版本要求。
