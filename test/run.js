@@ -7,6 +7,7 @@ const groups = {
   screen: ['cli-hooks', 'screen-terminal', 'screen-session', 'service-restart', 'restart', 'staging-shell'],
   browser: ['cli-browser', 'real-screen-browser', 'native-tui-browser', 'scroll-region-browser'],
   codex: ['native-codex-browser'],
+  update: ['release-update'],
 };
 const selected = process.argv.slice(2);
 if (!selected.length) selected.push('unit', 'protocol');

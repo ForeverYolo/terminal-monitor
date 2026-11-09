@@ -15,7 +15,8 @@
     "test:codex": "node test/run.js codex",
     "test:all": "node test/run.js all",
     "test:setup": "playwright install chromium",
-    "test:staging": "node infra/staging/smoke.js"
+    "test:staging": "node infra/staging/smoke.js",
+    "test:update": "node test/run.js update"
   },
   "dependencies": {
     "node-pty": "^1.0.0",

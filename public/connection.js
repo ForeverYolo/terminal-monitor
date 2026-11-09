@@ -8,6 +8,14 @@ let isReconnecting = false;       // true while waiting for auth_ok after a drop
 let ctrlActive = false;
 let lastAgents = [];
 let lastServerFiles = null;
+let lastServerReleaseId = null;
+function showReleaseStatus(status) {
+  lastServerReleaseId = status.releaseId || null;
+  const state = status.updateState;
+  if (state?.phase === 'rolled_back') showFloatingNotice('服务器更新失败，已恢复旧版：' + (state.error || '健康检查未通过'));
+  else if (state?.phase === 'completed') showFloatingNotice('服务器新版本已通过健康检查');
+  else if (state?.phase === 'checking') showFloatingNotice('服务器正在检查新版本…');
+}
 
 let currentMode = 'card'; // 'card', 'multi'
 let currentSort = localStorage.getItem('swt-sort') || 'name'; // 'name', 'id', 'recent'
@@ -167,6 +175,7 @@ function connect(username, password) {
       syncAgentIdMap(lastAgents);
       supervisorConfig = msg.supervisorConfig || {};
       if (msg.serverFiles) lastServerFiles = msg.serverFiles;
+      if (msg.releaseStatus) showReleaseStatus(msg.releaseStatus);
 
       const inTerm = views.term.style.display !== 'none';
       const inMulti = views.multi.style.display !== 'none';
@@ -363,9 +372,14 @@ function connect(username, password) {
       const p = msg.reqId && pendingUpdateReqs.get(msg.reqId);
       if (p) { clearTimeout(p.timer); pendingUpdateReqs.delete(msg.reqId); }
       showFloatingNotice(msg.ok
-        ? `✓ ${msg.agentName} 已更新` + (msg.updated && msg.updated.length ? `: ${msg.updated.join(', ')}` : '（已是最新）')
+        ? `✓ ${msg.agentName} ` + (msg.message || '已更新')
         : `✗ ${msg.agentName} 更新失败: ${msg.error || 'unknown'}`);
       if (currentMode === 'mgmt') renderMgmtClients();
+    } else if (msg.type === 'release_server_status') {
+      showReleaseStatus(msg);
+      if (currentMode === 'mgmt') renderMgmtClients();
+    } else if (msg.type === 'release_progress') {
+      showFloatingNotice(`${msg.clientId || '服务器'}：${msg.message || msg.phase}`);
     } else if (msg.type === 'query_files_result') {
       const p = msg.reqId && pendingUpdateReqs.get(msg.reqId);
       if (p) { clearTimeout(p.timer); pendingUpdateReqs.delete(msg.reqId); }
@@ -376,7 +390,7 @@ function connect(username, password) {
       const p = pendingPullReqs.get(msg.reqId);
       if (p) { clearTimeout(p.timer); pendingPullReqs.delete(msg.reqId); }
       showFloatingNotice(msg.ok
-        ? `✓ 已从 ${msg.agentName} 拉取: ${(msg.updated || []).join(', ')} — 重启服务器后生效`
+        ? `✓ ${msg.message || ('已从 ' + msg.agentName + ' 拉取，重启服务器后生效')}`
         : `✗ 从 ${msg.agentName} 拉取失败: ${msg.error || 'unknown'}`);
     }
   };

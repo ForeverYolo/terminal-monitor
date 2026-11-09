@@ -10,6 +10,7 @@ function launch(script, args) {
   child.unref();
 }
 function restartClient({ root, node, configFile, screenName, pid }) {
+  if ((process.env.SWT_WORKER === '1' || process.env.INVOCATION_ID) && require('./file-update').restartWorker()) return;
   launch(`set -euo pipefail
 root="$1"; node_bin="$2"; config="$3"; task="$4"; old_pid="$5"
 source "$root/service-runtime.sh"
@@ -24,6 +25,7 @@ start_service_screen "swt-client-$task" "$root" "$node_bin" client.js "$config" 
 `, [root, node, path.resolve(configFile), screenName, pid]);
 }
 function restartServer({ root, node, configFile, backup }) {
+  if ((process.env.SWT_WORKER === '1' || process.env.INVOCATION_ID) && require('./file-update').restartWorker()) return;
   launch(`set -euo pipefail
 root="$1"; node_bin="$2"; config="$3"; backup="$4"
 source "$root/service-runtime.sh"

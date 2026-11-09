@@ -224,10 +224,10 @@ function renderMgmtClients() {
         <button onclick="spawnNodeOnClient('${escapeHtml(cid)}')" ${overLimit?'disabled':''}>
           ${overLimit ? '已达 20 上限' : '+ 新增节点'}
         </button>
-        <button onclick="pushUpdateToClient('${escapeHtml(cid)}')" title="把服务器上的全部托管文件（客户端+服务端+页面）推送到这台机器；监控进程相关的文件有变化时自动重启">
+        <button onclick="pushUpdateToClient('${escapeHtml(cid)}')" title="推送完整版本，全部监控进程切换并通过健康检查后确认成功">
           ⬆ 推送更新
         </button>
-        <button onclick="pullUpdateFromClient('${escapeHtml(cid)}', '${escapeHtml(agents[0] ? agents[0].name : cid)}')" style="background:#3a6e2a; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;" title="把这台机器当作版本源：服务器从它拉取全部托管文件并覆盖自己的副本（覆盖前自动备份）">
+        <button onclick="pullUpdateFromClient('${escapeHtml(cid)}', '${escapeHtml(agents[0] ? agents[0].name : cid)}')" style="background:#3a6e2a; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;" title="从这台机器下载完整版本，校验和依赖准备成功后再应用">
           ⬇ 从此机拉取
         </button>${pendingRestartClients.has(cid) ? `<button onclick="restartNodeOnClient('${escapeHtml(cid)}')" style="background:#f0883e; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;" title="磁盘文件已最新但进程还是旧版：重启监控进程使新代码生效（不影响任务终端）">
           ⟳ 重启监控进程
@@ -301,6 +301,8 @@ const pendingSpawnReqs = new Map();
 const CLIENT_FILES_UI = ManagedFiles.CLIENT_FILES;
 const ALL_MANAGED_UI = ManagedFiles.SERVER_FILES;
 function versionBadge(agent) {
+  if (agent?.updateState?.phase === 'rolled_back') return '<span style="color:#f0883e;font-size:12px;">↩ 已回滚</span>';
+  if (lastServerReleaseId && agent?.updateProtocol === 1 && agent.releaseId !== lastServerReleaseId) return '<span style="color:#d29922;font-size:12px;">⬆ 待更新</span>';
   if (!lastServerFiles || !agent || !agent.fileHashes || !agent.runningHashes) {
     return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
   }
@@ -364,7 +366,7 @@ function sendPush(reqId, body, clientId) {
   const timer = setTimeout(() => {
     pendingUpdateReqs.delete(reqId);
     showFloatingNotice(`⏱ ${clientId} 更新无响应（可能正在重启，等待其重连）`);
-  }, 30000);
+  }, 250000);
   pendingUpdateReqs.set(reqId, { clientId, timer });
   ws.send(JSON.stringify(body));
 }
@@ -389,18 +391,18 @@ function restartNodeOnClient(clientId) {
 // restart + push_update_all distributes the new version everywhere.
 function pullUpdateFromClient(clientId, agentName) {
   const reqId = 'pull-' + Date.now().toString(36);
-  if (!confirm(`把 "${agentName || clientId}" 设为版本源？\n\n服务器将从这台机器拉取全部托管文件（client.js、server.js、前端页面等），并覆盖服务器磁盘上的副本（覆盖前自动备份）。\n\n之后需要重启服务器 + 全部推送更新，其他机器才会拿到新版本。`)) return;
+  if (!confirm(`把 "${agentName || clientId}" 设为版本源？\n\n服务器将下载并校验完整版本，准备好后点击重启服务器应用。启动失败会自动恢复旧版。\n\n然后可向其他在线机器推送更新。`)) return;
   const timer = setTimeout(() => {
     pendingPullReqs.delete(reqId);
     showFloatingNotice(`⏱ ${clientId} 拉取无响应（agent 可能掉线）`);
-  }, 30000);
+  }, 250000);
   pendingPullReqs.set(reqId, { timer });
   ws.send(JSON.stringify({ type: 'pull_update', reqId, clientId }));
   showFloatingNotice(`正在从 ${agentName || clientId} 拉取更新…`);
 }
 
 function pushUpdateAll() {
-  if (!confirm('向所有在线机器推送全部托管文件（客户端+服务端+页面）？\n\n监控进程相关文件有变化的机器会自动重启；旧版 server.js/index.html 残骸也会被对齐。')) return;
+  if (!confirm('向所有在线机器推送完整版本？\n\n监控进程会切换并检查健康状态，任务终端保持运行。')) return;
   const reqId = 'push-all-' + Date.now().toString(36);
   const clientIds = new Set();
   for (const a of lastAgents) {
@@ -414,7 +416,7 @@ function pushUpdateAll() {
 }
 
 function restartServer() {
-  if (!confirm('确认重启服务器以应用磁盘上的更新文件？\n\n所有连接会断开几秒后自动恢复。')) return;
+  if (!confirm('确认应用已准备好的版本并重启服务器？\n\n连接会短暂断开后自动恢复，新版启动失败会自动恢复旧版。')) return;
   ws.send(JSON.stringify({ type: 'restart_server', reqId: 'rst-' + Date.now().toString(36) }));
 }
 

@@ -1,109 +1,141 @@
-// Verifies push_update / restart_node fan out to EVERY client process of a
-// machine. One clientId can have several processes (one per monitor screen);
-// the old single-match lookup only reached the first, so the user had to
-// click update/restart once per terminal.
-//
-// Wire-level test: two raw agent sockets share a clientId; a browser sends
-// push_update / restart_node; BOTH sockets must receive the request.
-//
-// Run: node test/test-multiproc-update.js
-'use strict';
-
-const fs = require('fs');
-const path = require('path');
-const { fork } = require('child_process');
-
-const PROJECT = path.resolve(__dirname, '..');
-const PORT = 19600 + Math.floor(Math.random() * 300);
-const URL = `ws://127.0.0.1:${PORT}`;
-const TOKEN = 'tok-multi';
-
-const cfgPath = path.join(PROJECT, '.test-config-multiproc.json');
-fs.writeFileSync(cfgPath, JSON.stringify({
-  mode: 'server',
-  server: { port: PORT, password: 'pw', tokens: { [TOKEN]: { name: 't', user: 'user' } }, supervisor: { enabled: false } }
-}));
-
-let passed = 0, failed = 0;
-const check = (name, cond, extra) => {
-  if (cond) { passed++; console.log(`  ✓ ${name}`); }
-  else { failed++; console.log(`  ✗ ${name}${extra ? ' — ' + extra : ''}`); }
-};
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-async function main() {
-  const WebSocket = require(PROJECT + '/node_modules/ws');
-  const server = fork(path.join(PROJECT, 'server.js'), ['--config=' + cfgPath], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  let slog = '';
-  server.stdout.on('data', d => slog += d);
-  server.stderr.on('data', d => slog += d);
-  await sleep(800);
-
-  // Two agent processes, same machine identity (clientId), different screens —
-  // exactly monitor-1/monitor-2 on one box.
-  const connectAgent = async (screen) => {
-    const ws = new WebSocket(URL);
-    await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
-    ws.send(JSON.stringify({
-      type: 'register', protocolVersion: 2, token: TOKEN, name: 'multi-box', screen,
-      attrs: { clientId: 'c-multi' }, sys: {}, files: { 'client.js': 'OLDHASH' }, cols: 80, rows: 24
-    }));
-    await sleep(200);
-    return ws;
-  };
-  const agentA = await connectAgent('mon-a');
-  const agentB = await connectAgent('mon-b');
-
-  const browser = new WebSocket(URL);
-  await new Promise((res, rej) => { browser.on('open', res); browser.on('error', rej); });
-  browser.send(JSON.stringify({ type: 'auth', password: 'pw', username: 'user' }));
-
-  const gotOn = (ws, type) => new Promise((res) => {
-    const on = raw => { const m = JSON.parse(raw); if (m.type === type) { ws.off('message', on); res(m); } };
-    ws.on('message', on);
-  });
-
-  // --- push_update fans out ---
-  const pA = gotOn(agentA, 'update_files');
-  const pB = gotOn(agentB, 'update_files');
-  browser.send(JSON.stringify({ type: 'push_update', reqId: 'req-push-1', clientId: 'c-multi' }));
-  const [uA, uB] = await Promise.all([pA, pB]);
-  check('push_update reaches process A', Array.isArray(uA.files) && uA.files.length > 0);
-  check('push_update reaches process B', Array.isArray(uB.files) && uB.files.length > 0);
-  const inventory = require('../managed-files').SERVER_FILES;
-  check('push includes every split runtime module and browser asset', inventory.every(name => uA.files.some(file => file.name === name)));
-  check('both get the same reqId', uA.reqId === uB.reqId && uA.reqId === 'req-push-1');
-
-  // browser gets exactly one aggregated result (first reply wins; second ignored)
-  const oneResult = new Promise((res) => {
-    let n = 0;
-    browser.on('message', raw => { const m = JSON.parse(raw); if (m.type === 'push_update_result') { n++; res({ n, m }); } });
-  });
-  agentA.send(JSON.stringify({ type: 'update_files_result', reqId: 'req-push-1', ok: true, updated: ['client.js'] }));
-  await sleep(150);
-  agentB.send(JSON.stringify({ type: 'update_files_result', reqId: 'req-push-1', ok: true, updated: ['client.js'] }));
-  const agg = await oneResult;
-  check('browser sees one aggregated push result', agg.n === 1, `got ${agg.n}`);
-  // second reply must not crash the server or wedge state
-  await sleep(200);
-  check('server alive after duplicate result', server.connected !== false);
-
-  // --- restart_node fans out ---
-  const rA = gotOn(agentA, 'restart_node');
-  const rB = gotOn(agentB, 'restart_node');
-  browser.send(JSON.stringify({ type: 'restart_node', reqId: 'req-rn-1', clientId: 'c-multi' }));
-  const [nA, nB] = await Promise.all([rA, rB]);
-  check('restart_node reaches process A', nA.reqId === 'req-rn-1');
-  check('restart_node reaches process B', nB.reqId === 'req-rn-1');
-  await sleep(300); // let the second console.log flush
-  const rnHits = (slog.match(/restart_node sent to/g) || []).length;
-  if (rnHits < 2) console.log('  [debug] slog tail:', JSON.stringify(slog.split('\n').filter(Boolean).slice(-8)));
-  check('server logged restart fan-out to both', rnHits >= 2);
-
-  console.log(`\n${passed} passed, ${failed} failed`);
-  server.kill();
-  fs.unlinkSync(cfgPath);
-  process.exit(failed ? 1 : 0);
+"use strict";
+// A shared installation downloads once, but success requires every monitor.
+const assert = require("assert"),
+  fs = require("fs"),
+  os = require("os"),
+  path = require("path");
+const { fork } = require("child_process");
+const WebSocket = require("ws");
+const root = path.resolve(__dirname, ".."),
+  scratch = fs.mkdtempSync(path.join(os.tmpdir(), "swt-multi-release-"));
+const port = 19600 + Math.floor(Math.random() * 300),
+  url = "ws://127.0.0.1:" + port,
+  sockets = [];
+const config = path.join(scratch, "config.json");
+fs.writeFileSync(
+  config,
+  JSON.stringify({
+    server: {
+      port,
+      password: "pw",
+      tokens: { token: { user: "user" } },
+      supervisor: { enabled: false },
+    },
+  }),
+);
+const server = fork(path.join(root, "server.js"), ["--config=" + config], {
+  stdio: "ignore",
+});
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn) {
+  const end = Date.now() + 10000;
+  while (Date.now() < end) {
+    const r = fn();
+    if (r) return r;
+    await sleep(30);
+  }
+  throw Error("Protocol test timed out");
 }
-
-main().catch(e => { console.error('TEST ERROR:', e); process.exit(1); });
+async function connect() {
+  const ws = new WebSocket(url);
+  await new Promise((r, j) => {
+    ws.once("open", r);
+    ws.once("error", j);
+  });
+  sockets.push(ws);
+  ws.messages = [];
+  ws.on("message", (raw) => ws.messages.push(JSON.parse(raw)));
+  return ws;
+}
+const send = (ws, msg) => ws.send(JSON.stringify(msg));
+(async () => {
+  await sleep(700);
+  const a = await connect(),
+    b = await connect();
+  for (const [ws, screen] of [
+    [a, "a"],
+    [b, "b"],
+  ])
+    send(ws, {
+      type: "register",
+      token: "token",
+      protocolVersion: 2,
+      name: "multi",
+      screen,
+      attrs: { clientId: "multi" },
+      cols: 80,
+      rows: 24,
+      updateProtocol: 1,
+      installationId: "shared",
+      releaseId: null,
+    });
+  const browser = await connect();
+  send(browser, { type: "auth", username: "user", password: "pw" });
+  await until(() => browser.messages.some((m) => m.type === "auth_ok"));
+  send(browser, { type: "push_update", reqId: "push", clientId: "multi" });
+  const begin = await until(() =>
+    a.messages.find((m) => m.type === "release_begin"),
+  );
+  await until(() => a.messages.some((m) => m.type === "release_end"));
+  assert(
+    !b.messages.some((m) => m.type === "release_begin"),
+    "shared directory receives only one download",
+  );
+  send(a, {
+    type: "release_prepared",
+    reqId: begin.reqId,
+    releaseId: begin.manifest.id,
+    ok: true,
+  });
+  await until(() => a.messages.find((m) => m.type === "release_activate"));
+  const state = { id: begin.manifest.id, phase: "completed" };
+  send(a, {
+    type: "release_state",
+    reqId: begin.reqId,
+    installationId: "shared",
+    releaseId: begin.manifest.id,
+    updateState: state,
+  });
+  await sleep(800);
+  assert(
+    !browser.messages.some((m) => m.type === "push_update_result"),
+    "first healthy monitor cannot complete the job",
+  );
+  send(b, {
+    type: "release_state",
+    reqId: begin.reqId,
+    installationId: "shared",
+    releaseId: begin.manifest.id,
+    updateState: state,
+  });
+  const result = await until(() =>
+    browser.messages.find((m) => m.type === "push_update_result"),
+  );
+  assert(result.ok);
+  send(browser, { type: "restart_node", reqId: "restart", clientId: "multi" });
+  await until(
+    () =>
+      a.messages.some((m) => m.type === "restart_node") &&
+      b.messages.some((m) => m.type === "restart_node"),
+  );
+  const other = await connect();
+  send(other, { type: "auth", username: "other", password: "pw" });
+  await until(() => other.messages.some((m) => m.type === "auth_ok"));
+  send(other, { type: "push_update", reqId: "forbidden", clientId: "multi" });
+  const denied = await until(() =>
+    other.messages.find((m) => m.type === "push_update_result"),
+  );
+  assert.equal(denied.ok, false);
+  console.log(
+    "PASS one transfer per installation, all-monitor health completion, restart fanout and owner isolation",
+  );
+})()
+  .catch((e) => {
+    console.error(e);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    for (const ws of sockets) ws.terminate();
+    server.kill();
+    fs.rmSync(scratch, { recursive: true, force: true });
+  });

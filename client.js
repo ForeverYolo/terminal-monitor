@@ -1,3 +1,4 @@
+if (require('./file-update').runManaged('client', __dirname)) return;
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -102,6 +103,7 @@ const clientId = config.client.clientId;
 // written by the update path.
 const { CLIENT_FILES, FETCHABLE_FILES } = require('./managed-files');
 const { buildFileManifest, installFiles } = require('./file-update');
+const releaseClient = require('./file-update').createReleaseClient({root:__dirname,config,send:sendMsg});
 
 // {name: hash} of our FETCHABLE_FILES copies; missing files are omitted.
 // Deliberately wider than CLIENT_FILES: the server-side files (server.js,
@@ -306,7 +308,8 @@ async function handleSpawnNode(msg) {
   childConfig.name = msg.nodeName || `${name}-${newScreenName}`;
   childConfig.screenMode = childConfig.screenMode || 'reattach'; // detached screen → -r reattach
   childConfig.clientId = clientId;
-  const cfgPath = path.join(__dirname, `config.client-${newScreenName}.json`);
+  const installRoot = process.env.SWT_INSTALL_ROOT || __dirname;
+  const cfgPath = path.join(installRoot, `config.client-${newScreenName}.json`);
   fs.writeFileSync(cfgPath, JSON.stringify({ mode: 'client', client: childConfig }, null, 2), { mode: 0o600 });
 
   // Create a DETACHED screen session running the chosen command. Plain `bash`
@@ -337,11 +340,14 @@ async function handleSpawnNode(msg) {
   await new Promise(r => setTimeout(r, 800));
 
   // Spawn child client.js to attach to the new screen
-  const child = spawn(process.execPath, [path.join(__dirname, 'client.js'), `--config=${cfgPath}`], {
+  const monitorEnv = { ...process.env };
+  delete monitorEnv.SWT_WORKER;
+  delete monitorEnv.SWT_RELEASE_ID;
+  const child = spawn(process.execPath, [path.join(installRoot, 'client.js'), `--config=${cfgPath}`], {
     detached: true,
     stdio: 'ignore',
     cwd: __dirname,
-    env: { ...process.env }
+    env: monitorEnv
   });
   child.on('error', (e) => {
     console.error('[spawn_node] child error:', e.message);
@@ -548,6 +554,7 @@ function connect() {
     getSocket: () => transferSocket, getShellCwd
   });
   ws.on('open', () => {
+    releaseClient.connected(ws);
     console.log('Connected to server');
     reconnectDelay = 1000;
     registered = false;
@@ -572,6 +579,7 @@ function connect() {
         attrs: { ...(attrs || {}), clientId },
         sys: sysInfo,
         files,
+        ...releaseClient.identity(),
         protocolVersion: PROTOCOL_VERSION,
         cols,
         rows
@@ -643,6 +651,8 @@ function connect() {
       if (DEBUG_DUMP) dumpStream('IN', input);
       ptyProcess.write(encodeScreenInput(input));
     }
+
+    if (releaseClient.handle(msg,ws)) return;
 
     if (msg.type === 'resize' && ptyProcess) {
       const nextCols = msg.cols || cols, nextRows = msg.rows || rows;
@@ -763,6 +773,7 @@ function connect() {
   });
 
   ws.on('close', () => {
+    releaseClient.disconnected(ws);
     console.log('Disconnected from server');
     registered = false;
     pendingOutbound = [];

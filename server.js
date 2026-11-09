@@ -1,3 +1,4 @@
+if (require('./file-update').runManaged('server', __dirname)) return;
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -95,6 +96,10 @@ function getAgentsList(user) {
         name: a.name,
         screen: a.screen || '',
         protocolVersion: a.protocolVersion,
+        updateProtocol: a.updateProtocol,
+        installationId: a.installationId,
+        releaseId: a.releaseId,
+        updateState: a.updateState,
         attrs: a.attrs || {},
         sys: a.sys || {},
         connectedAt: a.connectedAt,
@@ -250,6 +255,7 @@ const httpServer = http.createServer(createHttpHandler({
 // maxPayload bounds a single frame's memory cost — `ws`'s own default is 100MB,
 // which would let one oversized/malformed message (bug or hostile peer) spike
 // memory well past what a small VPS has.
+const releaseService = require('./file-update').createReleaseServer({root:__dirname,config,agents,browsers,httpServer});
 const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: false, maxPayload: MAX_WS_PAYLOAD });
 
 wss.on('connection', (ws) => {
@@ -336,6 +342,7 @@ wss.on('connection', (ws) => {
       term.sizeOwner = null;
       info.lastSeq = term.scrollback.length > 0 ? term.scrollback[term.scrollback.length - 1].seq : null;
       agents.set(ws, info);
+      releaseService.registered(ws,info,msg);
       console.log(`[+] Agent connected: ${info.name} (${id})`);
       broadcastAgents();
       if (supervisor) supervisor.onAgentConnected(info);
@@ -383,7 +390,7 @@ wss.on('connection', (ws) => {
       role = 'browser';
       const user = msg.username || 'user';
       browsers.set(ws, { ws, agentIds: new Set(), user });
-      ws.send(JSON.stringify({ type: 'auth_ok', agents: getAgentsList(user), user, supervisorConfig: config.server.supervisor, serverFiles: serverManifest }));
+      ws.send(JSON.stringify({ type: 'auth_ok', agents: getAgentsList(user), user, supervisorConfig: config.server.supervisor, serverFiles: serverManifest, releaseStatus: releaseService.status() }));
       console.log(`[+] Browser connected (user: ${user})`);
       return;
     }
@@ -393,6 +400,8 @@ wss.on('connection', (ws) => {
       ws.close();
       return;
     }
+
+    if (releaseService.handle(role,ws,msg)) return;
 
     // --- Agent messages ---
     if (role === 'agent' && msg.type === 'data') {
@@ -930,6 +939,7 @@ wss.on('connection', (ws) => {
     cancelSocket(ws);
     pendingUpdateReqs.forgetSocket(ws);
     pendingPulls.forgetSocket(ws);
+    releaseService.disconnected(ws);
     if (role === 'agent') {
       const info = agents.get(ws);
       if (info) {

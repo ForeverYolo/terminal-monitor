@@ -17,6 +17,10 @@
   "screen-terminal.js",
   "managed-files.js",
   "file-update.js",
+  "release-package.js",
+  "release-runtime.js",
+  "release-transport.js",
+  "release-bridge.js",
   "file-transfer.js",
   "service-restart.js",
   "service-runtime.sh"

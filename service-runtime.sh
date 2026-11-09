@@ -46,7 +46,7 @@ start_managed_screen() {
   [ "$#" -gt 1 ] || { echo '[screen] expected -- COMMAND' >&2; return 1; }
   shift
   (
-    unset COLORTERM
+    unset COLORTERM SWT_WORKER SWT_RELEASE_ID SWT_INSTALL_ROOT
     screen "${options[@]}" -dmS "$name" sh -c \
       'screen -S "$STY" -X cjkwidth off || exit; exec "$@"' \
       tm-screen "$@"
