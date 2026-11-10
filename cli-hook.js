@@ -5,7 +5,7 @@
 const net = require('net');
 const path = require('path');
 const { socketPath } = require('./cli-hooks');
-const { readProcess, processApp } = require('./cli-process');
+const { hookRoute } = require('./cli-hook-route');
 const { EVENTS } = require('./cli-tracker');
 
 const app = process.argv[2];
@@ -30,11 +30,9 @@ process.stdin.on('end', () => {
   try {
     const payload = JSON.parse(input);
     if (!EVENTS.has(payload.hook_event_name) || typeof payload.session_id !== 'string' || payload.agent_id) return;
-    let cli = null, ancestor = readProcess(process.ppid);
-    for (let i = 0; ancestor && i < 32; i++, ancestor = readProcess(ancestor.ppid)) if (processApp(ancestor.pid) === app) cli = ancestor;
-    if (!cli) return;
-    const screen = process.env.STY;
-    if (!screen) return;
+    const route = hookRoute(app, payload);
+    if (!route) return;
+    const { cli, screen } = route;
     const event = {
       app, pid: cli.pid, start: cli.start, sessionId: payload.session_id,
       turnId: typeof payload.turn_id === 'string' ? payload.turn_id : null,

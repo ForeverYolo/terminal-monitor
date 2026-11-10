@@ -37,6 +37,8 @@ node /absolute/path/terminal-monitor/cli-hook.js claude --print-config
 
 hooks 通过 `STY` 找到 Screen 名称，连接当前用户私有目录中的 Unix socket（目录 700、socket 600）。事件绑定 CLI 进程 PID、进程启动时间、会话 ID 和可用的 turn ID；接收端验证该进程属于被监控 Screen 的前台 CLI。无法读取 `/proc` 或多个窗口归属有歧义时不接纳 hooks，继续画面推断。
 
+Codex 的共享 `app-server --managed-daemon` 不属于前台 Screen，继承的 `STY` 也可能已经过期。这一路只在实际 hook 执行目录与事件 `cwd` 一致时，查找同一 Codex 配置目录、同一项目的唯一前台 Screen Codex（包括 `-C`／`--cd`），然后交给接收端重新验证 PID 和启动时间。同项目多个 Screen Codex（含未监控会话）、多窗口或目录不明时继续推断，不按旧 `STY` 猜测。普通后台 CLI 和子代理不使用这一路径。
+
 只传事件名和必要身份字段，不传提示正文、工具参数、模型回答、凭据或完整 transcript。脚本不返回授权决定或模型上下文；监控不可用时快速退出，不阻断 CLI。
 
 hooks 优先于旧画面。长时间无事件不会自动判空闲。`Stop` 是结束前事件，其他 hooks 可能继续任务，因此先标记未知，等新解析的空闲画面确认；继续调用工具会恢复工作中。等待授权后的恢复也可由新画面校正。Qoder 使用画面检测，尚未提供 Qoder hooks 适配。
