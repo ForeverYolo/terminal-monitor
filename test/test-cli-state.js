@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('assert');
-const { detectScreen, normalizeState, legacyState } = require('../cli-state');
+const { detectScreen, normalizeState, legacyState, appLabel } = require('../cli-state');
 const { CliTracker } = require('../cli-tracker');
 const { TerminalState } = require('../terminal-state');
 const pad = text => [...Array(8).fill(''), ...text.split('\n')];
@@ -11,13 +11,13 @@ let checks = 0;
 function eq(actual, expected, reason) { checks++; assert.deepStrictEqual(actual, expected, reason); }
 for (const [app, frame] of [['codex', codex], ['claude', claude], ['qoder', qoder]]) {
   const state = detectScreen(frame);
-  eq([state.app, state.status], [app, 'idle'], app + ' real-layout idle input');
+  eq([state.app, state.status], ['generic', 'idle'], app + ' real-layout input passes the same generic rule');
 }
 // Captured from locally installed CLIs on 2026-11-09 in empty disposable
 // directories. Claude's isolated invocation has no login configuration.
 for (const [app, frame] of Object.entries(require('./fixtures/cli-screens.json'))) {
   const state = detectScreen(frame);
-  eq(state.app, app, app + ' captured native viewport');
+  eq(state.app, 'generic', app + ' captured native viewport uses generic identity');
   eq(state.status, app === 'claude' ? 'unknown' : 'idle', app + ' captured state');
 }
 const taskScreens = require('./fixtures/cli-task-screens.json');
@@ -29,20 +29,37 @@ const qoder186 = [' ⠋ Thinking... (esc to cancel, 1m 52s)       ? for shortcut
   '────────────────────', ' YOLO Shift+Tab to Auto Mode       21 skills',
   '────────────────────', ' *   Type your message or @path/to/file',
   '────────────────────', ' DeepSeek-V4-Pro Model · ctx ▓▓░░░░░░░░ 15% · <project>'];
-eq([detectScreen(qoder186, 'qoder').app, detectScreen(qoder186, 'qoder').status], ['qoder', 'working'], 'Qoder star input with scrolled banner remains working');
-eq(detectScreen(qoder186.slice(1), 'qoder').isCodeCli, false, 'shortcut hint required for star input');
+eq([detectScreen(qoder186).app, detectScreen(qoder186).status], ['generic', 'working'], 'star input with scrolled banner uses generic structure');
 const qoder186Idle = qoder186.map((line, i) => i === 0 ? '                         ? for shortcuts' : line);
-eq(detectScreen(qoder186Idle, 'qoder').status, 'idle', 'Qoder star input idle');
-eq(detectScreen(['Qoder CLI CN v1.1.86', ...qoder186Idle]).app, 'qoder', 'Qoder banner can establish star input identity');
-eq(detectScreen(qoder186).isCodeCli, false, 'star footer alone cannot establish CLI identity');
-eq(detectScreen(qoder186, 'claude').isCodeCli, false, 'Qoder star input is not applied to another CLI');
-eq(detectScreen(['* a bullet item', '? for shortcuts'], 'qoder').isCodeCli, false, 'a star and shortcut text without full footer are insufficient');
-eq(detectScreen(qoder186.slice(0, -1), 'qoder').isCodeCli, false, 'model/context footer required for star input');
+eq(detectScreen(qoder186Idle).status, 'idle', 'framed star input idle');
+eq(detectScreen(['Qoder CLI CN v1.1.86', ...qoder186Idle]), detectScreen(['Unrelated Product', ...qoder186Idle]), 'brand text cannot affect generic detection');
+eq(detectScreen(['* a bullet item', '? for shortcuts']).isCodeCli, false, 'star and shortcut text without input structure are insufficient');
+eq(detectScreen(qoder186.slice(0, -1)).isCodeCli, false, 'ambiguous marker needs model metadata');
 const qoderTracker = new CliTracker(), qoderProcess = {clis: [{pid: 44, start: '101', app: 'qoder'}]};
 qoderTracker.screen(qoder186, qoderProcess, 0);
 eq(qoderTracker.screen(qoder186, qoderProcess, 400).status, 'working', 'foreground Qoder binds without visible banner');
 eq(qoderTracker.screen(qoder186Idle, qoderProcess, 500).status, 'idle', 'Qoder task completes while same input stays visible');
 eq(qoderTracker.screen(['user@host:~$ '], {clis: []}, 600).isCodeCli, false, 'Qoder exit restores shell with no state');
+for (const app of ['codex', 'claude', 'qoder', 'generic']) {
+  const namedTracker = new CliTracker();
+  const p = {pid: 45, start: '102', app, ...(app === 'generic' ? {appName: 'starlight'} : {})};
+  const processes = {clis: app === 'generic' ? [] : [p], foreground: [p]};
+  namedTracker.screen(qoder186, processes, 0);
+  const named = namedTracker.screen(qoder186, processes, 400);
+  eq([named.app, named.status], [app, 'working'], 'same unbranded UI is named only by foreground process: ' + app);
+  if (app === 'generic') eq(appLabel(named), 'starlight', 'unknown foreground program provides its own display name');
+  eq(new CliTracker().screen(['normal application output'], processes, 400).isCodeCli, false, 'process name alone cannot establish Code CLI: ' + app);
+}
+const anonymous = new CliTracker(); anonymous.screen(qoder186, {clis: []}, 0);
+eq(anonymous.screen(qoder186, {clis: []}, 400).app, 'generic', 'unknown process is not required for generic identity');
+const noHints = qoder186Idle.filter(l => !/shortcuts|Shift\+Tab/.test(l));
+eq(detectScreen(noHints).isCodeCli, false, 'framed prompt and model without operation hints are insufficient');
+eq(detectScreen(['* notes...', 'model: example', '? for shortcuts']).isCodeCli, false, 'ordinary bullet/model/help text without input frame rejected');
+for (const brand of ['OpenAI Codex', 'Claude Code', 'Qoder CLI CN v1.1.86'])
+  eq(detectScreen([brand, '> quoted text', '? for shortcuts']).isCodeCli, false, 'brand cannot weaken the structural gate: ' + brand);
+eq(detectScreen(qoder186Idle.map(l => l.replace('Type your message or @path/to/file', 'Think...'))).status, 'idle', 'typed input with ellipsis cannot act as work spinner');
+const transient = new CliTracker(); transient.screen(qoder186, qoderProcess, 0);
+eq(transient.screen(['ordinary text'], qoderProcess, 100).isCodeCli, false, 'a transient UI match cannot leave a process binding before the stable window');
 const generic = qoder.filter(l => !l.startsWith('Qoder'));
 eq(detectScreen(generic).app, 'generic', 'unbranded coherent footer still detected');
 for (const frame of [
@@ -73,6 +90,7 @@ eq(tracker.event(event('PermissionRequest', { start: '99' }), proc), false, 'PID
 eq(tracker.event(event('PermissionRequest', { sessionId: 'session-b' }), proc), false, 'old session rejected');
 eq(tracker.event(event('Stop', { turnId: 'old-turn' }), proc), false, 'old turn rejected');
 eq(tracker.event(event('PermissionRequest'), { clis: [...proc.clis, {pid:43,app:'claude'}] }), false, 'ambiguous windows rejected');
+eq(tracker.event(event('PermissionRequest'), {...proc, foreground: [...proc.clis, {pid:43,app:'generic',appName:'other'}]}), false, 'unknown foreground window also makes hook attribution ambiguous');
 tracker.event(event('PermissionRequest'), proc);
 eq(tracker.screen(codex, proc).status, 'waiting_permission', 'old idle screen cannot override permission event');
 tracker.event(event('PostToolUse'), proc);

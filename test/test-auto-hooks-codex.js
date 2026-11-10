@@ -14,7 +14,7 @@ const { TerminalState } = require("../terminal-state");
 const { createAutoHookSetup } = require("../cli-hook-setup");
 const { screenProcesses } = require("../cli-process");
 const { prepareScreenTerminal } = require("../screen-terminal");
-const { detectScreen } = require("../cli-state");
+const { CliTracker } = require("../cli-tracker");
 const source = path.resolve(__dirname, ".."),
   temp = fs.mkdtempSync(path.join(os.tmpdir(), "swt-auto-real-codex-")),
   name = "auto-real-codex-" + process.pid;
@@ -75,7 +75,12 @@ const view = () => term?.readScreen().join("\n") || "";
     60000,
   );
   const setup = createAutoHookSetup(install);
-  let state = detectScreen(term.readScreen(), "codex");
+  const tracker = new CliTracker();
+  let state;
+  await until(() => {
+    state = tracker.screen(term.readScreen(), screenProcesses(name));
+    return state.isCodeCli;
+  }, "generic UI detection and process naming");
   setup.observe(screenProcesses(name), state);
   await until(
     () => setup.observe(screenProcesses(name), state)?.phase === "configured",

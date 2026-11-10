@@ -17,6 +17,8 @@
       options: Array.isArray(value.options) ? value.options.slice(0, 12).filter(o => o && Number.isInteger(o.index) && typeof o.label === 'string').map(o => ({ index: o.index, label: o.label.slice(0, 150) })) : [],
       sessionId: typeof value.sessionId === 'string' ? value.sessionId.slice(0, 160) : null,
       changedAt: typeof value.changedAt === 'string' ? value.changedAt.slice(0, 40) : null,
+      ...(value.app === 'generic' && typeof value.appName === 'string' && value.appName.trim()
+        ? {appName: value.appName.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 64)} : {}),
       ...(['installing', 'configured', 'blocked', 'error', 'disabled', 'connected'].includes(value.hookSetup?.phase)
         ? {hookSetup: {phase: value.hookSetup.phase, message: String(value.hookSetup.message || '').slice(0, 300)}} : {})
     };
@@ -24,46 +26,37 @@
   function legacyState(state) {
     const s = normalizeState(state);
     const kind = !s.isCodeCli ? 'none' : ({ working: 'working', idle: 'input', waiting_permission: 'bash', waiting_input: s.options.length ? 'option' : 'yesno', unknown: 'unknown' })[s.status];
-    return { running: s.isCodeCli, kind, prompt: s.prompt, options: s.options, app: s.app, source: s.source, lastLine: s.prompt };
+    return { running: s.isCodeCli, kind, prompt: s.prompt, options: s.options, app: s.app, source: s.source, lastLine: s.prompt, ...(s.appName ? {appName: s.appName} : {}) };
   }
   function fromLegacy(value) {
     if (!value || !value.running) return emptyState();
-    return normalizeState({ isCodeCli: true, app: value.app || 'claude', status: ({ working: 'working', input: 'idle', done: 'idle', bash: 'waiting_permission', yesno: 'waiting_input', option: 'waiting_input' })[value.kind], prompt: value.prompt, options: value.options });
+    return normalizeState({ isCodeCli: true, app: value.app || 'claude', appName: value.appName, status: ({ working: 'working', input: 'idle', done: 'idle', bash: 'waiting_permission', yesno: 'waiting_input', option: 'waiting_input' })[value.kind], prompt: value.prompt, options: value.options });
   }
-  function detectScreen(view, previousApp = null) {
+  function detectScreen(view) {
     const lines = (Array.isArray(view) ? view : String(view || '').split('\n')).slice(-300).map(l => String(l).trimEnd());
     while (lines.length && !lines.at(-1).trim()) lines.pop();
-    const top = lines.slice(0, 16).join('\n');
     const bottom = lines.slice(-14).join('\n');
-    const all = lines.join('\n');
     const hints = /(?:\?\s+for shortcuts|shift\s*\+\s*(?:tab|enter)|(?:enter|return)\s+(?:to\s+)?(?:send|submit)|esc\s+to\s+(?:interrupt|cancel)|\/\w+\s+for\s+(?:commands|help)|\d+%\s+context\s+(?:left|remaining))/i.test(bottom);
-    const model = /(?:\bctx\b[^\n]*\d+%|\bcontext\b[^\n]*(?:\d+%|\d+\s*(?:tokens|left))|\bmodel\s*[:：]|\b\S+\s+Model\s*[·|]|^\s*(?:gpt-|claude-|sonnet\b|opus\b|haiku\b|deepseek-|qwen|gemini-)\S*[^\n]*\s[·|])/im.test(bottom);
-    const qoderBrand = /^\s*[│┃╭─█ ]*Qoder\s+CLI(?:\s+CN)?\s+v?\d/im.test(top);
-    // Qoder 1.1.86 uses '*' for its input prompt. Scope this otherwise common
-    // prose marker to a verified Qoder process/banner and its complete footer.
-    const qoderStarInput = (previousApp === 'qoder' || qoderBrand) && model &&
-      /\?\s+for shortcuts/i.test(bottom) &&
-      /\b(?:Default|YOLO|Auto)\s+Shift\+Tab\s+to\s+(?:Accept Edits|Auto Mode|Default Mode|YOLO Mode)/i.test(bottom);
-    const isInput = line => /^\s*[>❯›]\s*(?!\d+[.)])[^\n]*$/.test(line) ||
-      (qoderStarInput && /^\s*\*\s+\S.*$/.test(line));
-    const input = bottom.split('\n').some(isInput);
-    const trust = /(?:trust (?:the files|this (?:folder|directory))|Trust folder)/i.test(all) && /(?:enter\s+(?:to\s+)?(?:select|confirm)|↑\/↓\s+navigate)/i.test(bottom);
+    // Metadata syntax, never provider/model names. A framed input plus its
+    // controls can establish a UI even when model metadata is not displayed.
+    const model = /(?:\bctx\b[^\n]*\d+%|\d+%\s+context\b|\bcontext\b[^\n]*(?:\d+%|\d+\s*(?:tokens|left))|\bmodel\s*[:：]|\b\S+\s+Model\s*[·|]|^\s*\S+\s+(?:default|low|medium|high|xhigh|max)\s*[·|])/im.test(bottom);
+    const separator = line => /^\s*[╭╰┌└]?[-=─━═_]{6,}[╮╯┐┘]?\s*$/.test(line);
+    const framed = i => lines.slice(Math.max(0, i - 2), i).some(separator) && lines.slice(i + 1, i + 3).some(separator);
+    const inputAt = lines.findLastIndex((line, i) => {
+      if (i < lines.length - 14) return false;
+      const match = line.match(/^\s*([>❯›*»➜])(?!\s*\d+[.)])(?:\s+[^\n]*|$)/);
+      // A bullet-like marker needs an actual input frame and metadata. This
+      // requirement depends on its structure, not a CLI name or process.
+      return !!match && (!/[*»➜]/.test(match[1]) || (framed(i) && model));
+    });
+    const input = inputAt >= 0;
     const selection = /^\s*[❯>]\s*\d+[.)]\s+\S/m.test(bottom) && /(?:enter|esc|↑|↓)/i.test(bottom);
-    let app = null;
-    if (/^\s*[│┃╭─*✻ ]*(?:Welcome to\s+)?(?:OpenAI\s+Codex)(?:\s|$|\()/im.test(top)) app = 'codex';
-    else if (/^\s*[│┃╭─*✻ ]*(?:Welcome to\s+)?Claude Code(?:\s|$|[!v])/im.test(top)) app = 'claude';
-    else if (qoderBrand) app = 'qoder';
-    else if (/^\s*›\s+Ask Codex to do anything\s*$/m.test(bottom) && hints && model) app = 'codex';
-    // A brand mentioned in prose is insufficient. Require an actual UI region.
-    if (app && !((input && (hints || model)) || trust || selection || /esc to interrupt/i.test(bottom))) app = null;
-    if (!app && input && hints && model) app = previousApp || 'generic';
-    if (!app && previousApp && (input && hints)) app = previousApp;
-    if (!app && previousApp && (selection || /esc\s+to\s+interrupt/i.test(bottom))) app = previousApp;
+    const identified = hints && ((input && (model || framed(inputAt))) || (selection && model));
     const last = lines.filter(l => l.trim()).at(-1) || '';
     const shell = /(?:^|\s)(?:[\w.-]+@[\w.-]+:[^\n]*|(?:bash|sh|zsh)[-\w.]*|staging-2080:[^\n]*)[#$]\s*$/.test(last) || /^\s*[$#]\s*$/.test(last);
     if (shell) return { ...emptyState(), shell: true };
-    if (!app) return emptyState();
-    const result = { ...emptyState(), isCodeCli: true, app, prompt: '', status: 'unknown' };
+    if (!identified) return emptyState();
+    const result = { ...emptyState(), isCodeCli: true, app: 'generic', prompt: '', status: 'unknown' };
     if (/Not logged in|Run \/login|Waiting for authentication/i.test(bottom)) return { ...result, prompt: '需要登录' };
     const selected = lines.findLastIndex(l => /^\s*[❯>]\s*\d+[.)]\s+\S/.test(l));
     const panel = selected >= Math.max(0, lines.length - 22) ? lines.slice(Math.max(0, selected - 6), selected + 9).join('\n') : '';
@@ -76,9 +69,8 @@
     } else {
       // Match task indicators in the interaction area, excluding updater and
       // download spinners. A bullet list or the word "working" in prose isn't one.
-      const inputAt = lines.findLastIndex(isInput);
       const interactionStart = inputAt >= 0 ? Math.max(0, inputAt - 5) : Math.max(0, lines.length - 8);
-      const task = lines.slice(interactionStart).find(l => !/\b(?:updat(?:e|ing)|download(?:ing)?|install(?:ing)?)\b/i.test(l) && (
+      const task = lines.slice(interactionStart).find((l, i) => interactionStart + i !== inputAt && !/\b(?:updat(?:e|ing)|download(?:ing)?|install(?:ing)?)\b/i.test(l) && (
         /esc\s+to\s+interrupt/i.test(l) ||
         /^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✻✽✢✶✳*•]\s+\S.*(?:\(\s*\d+(?:m|s)|…|\.\.\.)/.test(l)
       ));
@@ -88,7 +80,7 @@
     return result;
   }
   function stateLabel(state) { return state?.isCodeCli ? labels[state.status] || labels.unknown : ''; }
-  function appLabel(state) { return appLabels[state?.app] || ''; }
+  function appLabel(state) { return state?.app === 'generic' ? state.appName || appLabels.generic : appLabels[state?.app] || ''; }
   function hookHint(state) { return state?.isCodeCli && state.source !== 'hooks' ? state.hookSetup?.message || '' : ''; }
   function stateText(state) {
     const setup = {configured:'事件待接通',installing:'正在接入',blocked:'事件未接通',error:'事件未接通',disabled:'自动接入关闭'};

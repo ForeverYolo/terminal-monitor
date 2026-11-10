@@ -1,12 +1,14 @@
 # CLI 身份与工作状态
 
-普通 shell、日志和非 code-cli 程序不显示工作状态。Codex、Claude、Qoder CN 使用专门的界面组合规则；未知 CLI 只有同时具有输入区、相邻操作提示、模型/上下文状态等组合时才进入通用检测。spinner、`Working`、`esc to interrupt`、正文提到品牌都不能单独确认身份。
+普通 shell、日志和非 code-cli 程序不显示工作状态。所有 CLI 共用一套界面规则：相邻输入区、操作提示、模型/上下文状态，或输入框上下边界与操作提示的组合。`*` 等容易与正文混淆的提示符必须同时具备输入框边界和模型状态。品牌标题、进程名、spinner、`Working`、`esc to interrupt` 都不能单独确认 Code CLI。
+
+识别顺序固定为「通用界面判断 → 前台进程命名」。`detectScreen()` 不读取品牌、模型厂商或进程提示，只产生 `generic` 结果；`CliTracker` 在识别成功后根据唯一前台进程命名。已知进程显示 Codex、Claude、Qoder 等名称，未知进程显示安全截取的程序/脚本名（`app: generic` 与可选 `appName`），无法唯一确定时保留 Code CLI。进程存在不代表正在工作，也不放宽界面规则。
 
 检测读取 client 已有 xterm 模型的当前屏幕，等待解析完成，不扫描原始字节流或历史滚动区。身份初次确认有 300ms 稳定窗口。已绑定 CLI 在头部消失时保留身份；进程退出/挂起后清理。Linux `/proc` 和 Screen 子进程用于辅助绑定，不以进程存在推断正在处理任务。相同 CLI 的 launcher/TUI/app-server 祖先链合并为一个实例。
 
 ## 统一状态
 
-`cliState` 包含 `isCodeCli`、`app`、`status`、`source`、`prompt`、`options`、`sessionId`、`changedAt`。状态为 `working / idle / waiting_permission / waiting_input / unknown`；来源为 `hooks / screen`。连接在线/离线独立于任务状态。
+`cliState` 包含 `isCodeCli`、`app`、可选 `appName`、`status`、`source`、`prompt`、`options`、`sessionId`、`changedAt`。状态为 `working / idle / waiting_permission / waiting_input / unknown`；来源为 `hooks / screen`。连接在线/离线独立于任务状态。
 
 卡片、管理页、API、手机操作栏、通知和 supervisor 共用此结果。`needsInput` 和旧 `claudeState` 仅为派生兼容字段，服务端不再根据输出末尾字符另行判断。
 

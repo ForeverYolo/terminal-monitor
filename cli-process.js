@@ -21,6 +21,20 @@ function processApp(pid) {
   } catch {}
   return null;
 }
+function processName(pid) {
+  try {
+    const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+    let name = path.basename(args[0] || '');
+    if (/^(?:bash|sh|dash|zsh|fish|screen|SCREEN|env)$/.test(name)) return null;
+    if (/^(?:node|nodejs|python[\d.]*|ruby|perl)$/.test(name)) {
+      // Only an executable/script slot; never display prompts, -c/-e code,
+      // arguments or full paths as a CLI name.
+      if (!args[1] || args[1].startsWith('-')) return null;
+      name = path.basename(args[1]).replace(/\.(?:js|mjs|cjs|py|rb|pl)$/i, '');
+    }
+    return /^[\p{L}\p{N}_.+-]{1,64}$/u.test(name) ? name : null;
+  } catch { return null; }
+}
 function screenProcesses(screenName) {
   try {
     const socketDir = process.env.SCREENDIR || `/run/screen/S-${os.userInfo().username}`;
@@ -35,7 +49,8 @@ function screenProcesses(screenName) {
         if (q.ppid === screenPid) { descendants.push(p); break; }
       }
     }
-    const candidates = descendants.filter(p => p.tty && p.pgrp === p.foreground && !['T', 't', 'Z'].includes(p.state)).map(p => ({ ...p, app: processApp(p.pid) })).filter(p => p.app);
+    const active = descendants.filter(p => p.tty && p.pgrp === p.foreground && !['T', 't', 'Z'].includes(p.state));
+    const candidates = active.map(p => ({ ...p, app: processApp(p.pid) })).filter(p => p.app);
     // Codex has a launcher/TUI and a child app-server with the same executable.
     // They are one CLI instance, not two Screen windows. Bind to the outermost
     // ancestor so a replaced worker cannot resurrect a dead foreground CLI.
@@ -47,7 +62,16 @@ function screenProcesses(screenName) {
       }
       return true;
     });
-    return { screenPid, descendants, clis };
+    // Unknown foreground programs are naming/lifecycle candidates only. They
+    // become a Code CLI only after the independent screen detector accepts UI.
+    const named = active.map(p => ({ ...p, app: processApp(p.pid) || 'generic', appName: processName(p.pid) })).filter(p => p.appName);
+    const namedPids = new Set(named.map(p => p.pid));
+    const foreground = named.filter(p => {
+      for (let parent = all.get(p.ppid), depth = 0; parent && depth < 32; parent = all.get(parent.ppid), depth++)
+        if (namedPids.has(parent.pid)) return false;
+      return true;
+    });
+    return { screenPid, descendants, clis, foreground };
   } catch { return null; }
 }
-module.exports = { readProcess, processApp, screenProcesses };
+module.exports = { readProcess, processApp, processName, screenProcesses };

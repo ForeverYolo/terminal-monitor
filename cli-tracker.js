@@ -21,13 +21,16 @@ class CliTracker {
   }
   screen(lines, processes, now = Date.now()) {
     const frame = JSON.stringify(lines);
+    const foreground = processes?.foreground || processes?.clis || [];
     if (this.endedBinding) {
       if (!processes || processes.clis.some(p => sameProcess(p, this.endedBinding))) return this.publish(emptyState());
       this.endedBinding = null; this.exited = true;
     }
-    if (processes && this.binding && !processes.clis.some(p => sameProcess(p, this.binding))) { this.reset(); this.exited = true; }
+    if (processes && this.binding && !foreground.some(p => sameProcess(p, this.binding))) { this.reset(); this.exited = true; }
     this.frame = frame;
-    const screen = detectScreen(lines, this.binding?.app || (processes?.clis.length === 1 ? processes.clis[0].app : null) || (this.state.isCodeCli ? this.state.app : null));
+    // The screen detector never receives a process/brand hint. Naming happens
+    // only after the same generic UI test succeeds for every application.
+    const screen = detectScreen(lines);
     // A shell prompt alone can be printed by tool output: only clear a bound
     // live CLI when its process is gone. Unbound screen inference clears now.
     if (screen.shell && !this.binding) { this.hook = null; this.candidate = null; this.exited = false; return this.publish(emptyState()); }
@@ -40,20 +43,24 @@ class CliTracker {
       }
       return this.publish(this.hook);
     }
-    const matching = processes?.clis.filter(p => p.app === screen.app) || [];
-    if (screen.isCodeCli && matching.length === 1) this.binding = matching[0];
-    // If /proc is available and says there is no known CLI, stale brand text
-    // must not keep a formerly bound known CLI alive after exit.
-    if (processes && !processes.clis.length && this.exited) {
+    const namedProcess = screen.isCodeCli && foreground.length === 1 ? foreground[0] : null;
+    if (namedProcess) {
+      screen.app = namedProcess.app;
+      if (namedProcess.app === 'generic' && namedProcess.appName) screen.appName = namedProcess.appName;
+    }
+    // A former foreground program cannot survive exit through stale UI bytes.
+    if (processes && !foreground.length && this.exited) {
       this.candidate = null; return this.publish(emptyState());
     }
-    if (this.binding) this.exited = false;
-    if (this.binding && !screen.isCodeCli) return this.publish({ ...this.state, isCodeCli: true, app: this.binding.app, status: 'unknown', source: 'screen', prompt: '', options: [] });
+    if (!screen.isCodeCli) this.candidate = null;
+    if (this.binding && !screen.isCodeCli) return this.publish({ ...this.state, isCodeCli: true, app: this.binding.app, appName: this.binding.appName, status: 'unknown', source: 'screen', prompt: '', options: [] });
     if (screen.isCodeCli && !this.state.isCodeCli) {
-      const key = screen.app;
+      const key = JSON.stringify([screen.app, screen.appName, namedProcess?.pid, namedProcess?.start]);
       if (!this.candidate || this.candidate.key !== key) this.candidate = { key, since: now };
       if (now - this.candidate.since < 300) return this.state;
     } else this.candidate = null;
+    if (namedProcess) this.binding = namedProcess;
+    if (this.binding) this.exited = false;
     return this.publish(screen);
   }
   event(event, processes) {
@@ -61,7 +68,7 @@ class CliTracker {
     if (event.event === 'Notification' && !['permission_prompt', 'idle_prompt'].includes(event.notificationType)) return false;
     const match = processes?.clis.find(p => sameProcess(p, event) && p.app === event.app);
     // Fail closed on ambiguous multi-window sessions; no cross-window hooks.
-    if (!match || processes.clis.length !== 1) return false;
+    if (!match || processes.clis.length !== 1 || processes.foreground?.length > 1) return false;
     if (this.endedBinding && event.event !== 'SessionStart') return false;
     if (event.sentAt !== undefined && (!Number.isFinite(event.sentAt) || event.sentAt < this.lastEventAt || Math.abs(Date.now() - event.sentAt) > 30000)) return false;
     if (this.binding && !sameProcess(match, this.binding)) return false;
