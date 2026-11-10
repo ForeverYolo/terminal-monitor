@@ -23,6 +23,26 @@ for (const [app, frame] of Object.entries(require('./fixtures/cli-screens.json')
 const taskScreens = require('./fixtures/cli-task-screens.json');
 eq(detectScreen(taskScreens.qoderWorking).status, 'working', 'real Qoder generating while input remains visible');
 eq(detectScreen(taskScreens.qoderIdle).status, 'idle', 'real Qoder completes and restores idle footer');
+// Qoder 1.1.86, captured from monitor-4's actual coding footer. The banner
+// scrolls out of view while a response is generated. No task content is kept.
+const qoder186 = [' ⠋ Thinking... (esc to cancel, 1m 52s)       ? for shortcuts',
+  '────────────────────', ' YOLO Shift+Tab to Auto Mode       21 skills',
+  '────────────────────', ' *   Type your message or @path/to/file',
+  '────────────────────', ' DeepSeek-V4-Pro Model · ctx ▓▓░░░░░░░░ 15% · <project>'];
+eq([detectScreen(qoder186, 'qoder').app, detectScreen(qoder186, 'qoder').status], ['qoder', 'working'], 'Qoder star input with scrolled banner remains working');
+eq(detectScreen(qoder186.slice(1), 'qoder').isCodeCli, false, 'shortcut hint required for star input');
+const qoder186Idle = qoder186.map((line, i) => i === 0 ? '                         ? for shortcuts' : line);
+eq(detectScreen(qoder186Idle, 'qoder').status, 'idle', 'Qoder star input idle');
+eq(detectScreen(['Qoder CLI CN v1.1.86', ...qoder186Idle]).app, 'qoder', 'Qoder banner can establish star input identity');
+eq(detectScreen(qoder186).isCodeCli, false, 'star footer alone cannot establish CLI identity');
+eq(detectScreen(qoder186, 'claude').isCodeCli, false, 'Qoder star input is not applied to another CLI');
+eq(detectScreen(['* a bullet item', '? for shortcuts'], 'qoder').isCodeCli, false, 'a star and shortcut text without full footer are insufficient');
+eq(detectScreen(qoder186.slice(0, -1), 'qoder').isCodeCli, false, 'model/context footer required for star input');
+const qoderTracker = new CliTracker(), qoderProcess = {clis: [{pid: 44, start: '101', app: 'qoder'}]};
+qoderTracker.screen(qoder186, qoderProcess, 0);
+eq(qoderTracker.screen(qoder186, qoderProcess, 400).status, 'working', 'foreground Qoder binds without visible banner');
+eq(qoderTracker.screen(qoder186Idle, qoderProcess, 500).status, 'idle', 'Qoder task completes while same input stays visible');
+eq(qoderTracker.screen(['user@host:~$ '], {clis: []}, 600).isCodeCli, false, 'Qoder exit restores shell with no state');
 const generic = qoder.filter(l => !l.startsWith('Qoder'));
 eq(detectScreen(generic).app, 'generic', 'unbranded coherent footer still detected');
 for (const frame of [

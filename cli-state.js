@@ -36,15 +36,23 @@
     const top = lines.slice(0, 16).join('\n');
     const bottom = lines.slice(-14).join('\n');
     const all = lines.join('\n');
-    const input = /^\s*[>❯›]\s*(?!\d+[.)])[^\n]*$/m.test(bottom);
     const hints = /(?:\?\s+for shortcuts|shift\s*\+\s*(?:tab|enter)|(?:enter|return)\s+(?:to\s+)?(?:send|submit)|esc\s+to\s+(?:interrupt|cancel)|\/\w+\s+for\s+(?:commands|help)|\d+%\s+context\s+(?:left|remaining))/i.test(bottom);
     const model = /(?:\bctx\b[^\n]*\d+%|\bcontext\b[^\n]*(?:\d+%|\d+\s*(?:tokens|left))|\bmodel\s*[:：]|\b\S+\s+Model\s*[·|]|^\s*(?:gpt-|claude-|sonnet\b|opus\b|haiku\b|deepseek-|qwen|gemini-)\S*[^\n]*\s[·|])/im.test(bottom);
+    const qoderBrand = /^\s*[│┃╭─█ ]*Qoder\s+CLI(?:\s+CN)?\s+v?\d/im.test(top);
+    // Qoder 1.1.86 uses '*' for its input prompt. Scope this otherwise common
+    // prose marker to a verified Qoder process/banner and its complete footer.
+    const qoderStarInput = (previousApp === 'qoder' || qoderBrand) && model &&
+      /\?\s+for shortcuts/i.test(bottom) &&
+      /\b(?:Default|YOLO|Auto)\s+Shift\+Tab\s+to\s+(?:Accept Edits|Auto Mode|Default Mode|YOLO Mode)/i.test(bottom);
+    const isInput = line => /^\s*[>❯›]\s*(?!\d+[.)])[^\n]*$/.test(line) ||
+      (qoderStarInput && /^\s*\*\s+\S.*$/.test(line));
+    const input = bottom.split('\n').some(isInput);
     const trust = /(?:trust (?:the files|this (?:folder|directory))|Trust folder)/i.test(all) && /(?:enter\s+(?:to\s+)?(?:select|confirm)|↑\/↓\s+navigate)/i.test(bottom);
     const selection = /^\s*[❯>]\s*\d+[.)]\s+\S/m.test(bottom) && /(?:enter|esc|↑|↓)/i.test(bottom);
     let app = null;
     if (/^\s*[│┃╭─*✻ ]*(?:Welcome to\s+)?(?:OpenAI\s+Codex)(?:\s|$|\()/im.test(top)) app = 'codex';
     else if (/^\s*[│┃╭─*✻ ]*(?:Welcome to\s+)?Claude Code(?:\s|$|[!v])/im.test(top)) app = 'claude';
-    else if (/^\s*[│┃╭─█ ]*Qoder\s+CLI(?:\s+CN)?\s+v?\d/im.test(top)) app = 'qoder';
+    else if (qoderBrand) app = 'qoder';
     else if (/^\s*›\s+Ask Codex to do anything\s*$/m.test(bottom) && hints && model) app = 'codex';
     // A brand mentioned in prose is insufficient. Require an actual UI region.
     if (app && !((input && (hints || model)) || trust || selection || /esc to interrupt/i.test(bottom))) app = null;
@@ -68,7 +76,7 @@
     } else {
       // Match task indicators in the interaction area, excluding updater and
       // download spinners. A bullet list or the word "working" in prose isn't one.
-      const inputAt = lines.findLastIndex(l => /^\s*[>❯›]\s*(?!\d+[.)])[^\n]*$/.test(l));
+      const inputAt = lines.findLastIndex(isInput);
       const interactionStart = inputAt >= 0 ? Math.max(0, inputAt - 5) : Math.max(0, lines.length - 8);
       const task = lines.slice(interactionStart).find(l => !/\b(?:updat(?:e|ing)|download(?:ing)?|install(?:ing)?)\b/i.test(l) && (
         /esc\s+to\s+interrupt/i.test(l) ||
