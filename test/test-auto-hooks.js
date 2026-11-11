@@ -190,6 +190,20 @@ try {
     "PASS HOME sessions, opt-out, disabled hooks, ambiguous/shell processes and discovery cancellation",
   );
 
+  const tomlFile = path.join(project, ".codex/config.toml");
+  const trustState = '[hooks.state."fixture"]\ntrusted_hash = "sha256:' + '0'.repeat(64) + '"\n';
+  const inline = '[[hooks.PreToolUse]]\nmatcher = "fixture-only"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = "echo keep-inline"\n';
+  for (const text of [trustState, inline, inline + trustState]) {
+    fs.writeFileSync(tomlFile, text);
+    const configured = manager();
+    configured.observe(processes, state); flush();
+    assert.equal(configured.observe(processes, state).phase, "configured");
+    assert.equal(fs.readFileSync(tomlFile, "utf8"), text, "inline definitions and trust records remain byte-for-byte unchanged");
+    assert(fs.readFileSync(file).equals(content), "JSON adapter remains idempotent alongside TOML hooks/state");
+  }
+  fs.unlinkSync(tomlFile);
+  console.log("PASS Codex inline hooks and hooks.state coexist with the JSON monitor adapter without modifying TOML");
+
   const bad = path.join(project, ".claude/settings.local.json");
   fs.mkdirSync(path.dirname(bad));
   fs.writeFileSync(bad, "{ private-token invalid json");

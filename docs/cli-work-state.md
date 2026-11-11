@@ -20,6 +20,10 @@
 
 配置成功不代表事件已生效。尚未收到真实事件时仍显示“推断 · 事件待接通”，卡片列出后续操作；收到经过 PID、启动时间、Screen 归属和会话检查的事件后才显示“事件”，并移除接入提示。Codex 首次仍需在 `/hooks` 中信任监控 hooks；当前会话可以在 `/hooks` 中发现新增配置。监控不会自动信任其他 hooks 或重新启动任务。Claude 的配置会按其设置加载规则生效，未接通时可检查 `/hooks` 或重新加载会话配置。
 
+Codex 已有内联 TOML hooks 时，保留其 `config.toml`，监控适配器仍合并到同层 `hooks.json`，由 Codex 加载两种来源；Codex 可能提示同层配置合并，这不会禁止执行。`[hooks.state]` 是信任记录，不能据此判断存在内联事件，更不会阻止自动接入。
+
+`RUN_LOCAL_CODEX_HOOK_SETUP_TEST=1 node test/test-codex-inline-hooks.js` 用临时配置启动本机 Codex 的只读 hooks 目录接口，验证 TOML 自定义事件与 JSON 监控事件同时可见；不启动任务、不请求模型，也不执行 hooks。
+
 `client.autoHooks: false` 可关闭自动配置，已明确关闭 hooks 的 CLI 保留原设置。配置损坏、目录权限、来源限制或多 CLI 归属不明时不会强行修改；适用的失败原因会显示在卡片。生成的未跟踪配置写入项目 Git 内部 excludes，不修改团队 `.gitignore`。
 
 官方参考：[Codex hooks](https://learn.chatgpt.com/docs/hooks)、[Claude hooks](https://code.claude.com/docs/en/hooks)。

@@ -179,8 +179,8 @@ function disabledReason(app, directory, context) {
     }
     if (enabled === false)
       return "Codex hooks 已关闭；保留原设置，请先启用 hooks";
-    if (/^\s*\[\[?hooks(?:\.|\])/m.test(project))
-      return "项目使用内联 hooks 配置，未覆盖；请将监控 hook 合并到现有配置";
+    // Codex merges inline TOML and hooks.json sources. Leave TOML (including
+    // hooks.state trust records) untouched and install our JSON adapter normally.
   } else {
     if (context.args.includes("--bare"))
       return "Claude 本次未加载项目配置，无法接入项目事件";
