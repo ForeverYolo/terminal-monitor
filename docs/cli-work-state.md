@@ -16,7 +16,7 @@
 
 ## 自动接入 Codex / Claude hooks
 
-监控现在默认自动接入。只有在 Screen 中确认唯一的前台 Codex／Claude 进程和对应项目后，才合并该项目的 hooks；不修改用户全局配置、不覆盖自定义 hooks 或权限设置。Codex 使用项目 `.codex/hooks.json`，Claude 按运行版本选择项目本地 `.claude/settings.local.json`。监控命令指向安装目录的稳定入口，升级后继续调用当前版本。配置备份保存在安装目录 `.swt/hook-config-backups/`，项目自动加入内部升级维护列表，无需手工登记。
+监控现在默认自动接入。在 Screen 中确认唯一的前台 Codex／Claude 进程和工作目录后，合并对应目录的 hooks；不要求 Git 仓库，也不排除用户主目录。Codex 使用 `.codex/hooks.json`，Claude 按运行版本选择本地 `.claude/settings.local.json`。在 `~` 启动 Claude 时写入 `~/.claude/settings.local.json`，保留 `~/.claude/settings.json`；Codex 在 `~` 使用默认配置目录时，该 hooks 文件同时是用户级来源，首次仍需按其规则信任。已有自定义 hooks、权限和其他设置均保留。监控命令指向安装目录的稳定入口，升级后继续调用当前版本。配置备份保存在安装目录 `.swt/hook-config-backups/`，目录自动加入内部升级维护列表，无需手工登记。
 
 配置成功不代表事件已生效。尚未收到真实事件时仍显示“推断 · 事件待接通”，卡片列出后续操作；收到经过 PID、启动时间、Screen 归属和会话检查的事件后才显示“事件”，并移除接入提示。Codex 首次仍需在 `/hooks` 中信任监控 hooks；当前会话可以在 `/hooks` 中发现新增配置。监控不会自动信任其他 hooks 或重新启动任务。Claude 的配置会按其设置加载规则生效，未接通时可检查 `/hooks` 或重新加载会话配置。
 
@@ -35,7 +35,7 @@ node /absolute/path/terminal-monitor/cli-hook.js codex --print-config
 node /absolute/path/terminal-monitor/cli-hook.js claude --print-config
 ```
 
-将对应 `hooks` 片段合并到该 CLI 的配置中；不要覆盖已有 hooks。Codex 支持其配置层旁的 `hooks.json`；Claude 使用 settings 中的 `hooks`。Codex 非托管 hooks 需要在 `/hooks` 中信任。新配置应在 CLI 加载后验证；既有 Screen 可保留，必要时退出 CLI 并恢复原对话。监控不会自动改用户全局配置。
+将对应 `hooks` 片段合并到该 CLI 的配置中；不要覆盖已有 hooks。Codex 支持其配置层旁的 `hooks.json`；Claude 使用 settings 中的 `hooks`。Codex 非托管 hooks 需要在 `/hooks` 中信任。新配置应在 CLI 加载后验证；既有 Screen 可保留，必要时退出 CLI 并恢复原对话。
 
 hooks 通过 `STY` 找到 Screen 名称，连接当前用户私有目录中的 Unix socket（目录 700、socket 600）。事件绑定 CLI 进程 PID、进程启动时间、会话 ID 和可用的 turn ID；接收端验证该进程属于被监控 Screen 的前台 CLI。无法读取 `/proc` 或多个窗口归属有歧义时不接纳 hooks，继续画面推断。
 

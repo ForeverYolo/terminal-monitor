@@ -168,25 +168,25 @@ try {
   });
   homeSession.observe(processes, state);
   flush();
-  assert(homeSession.observe(processes, state).message.includes("全局"));
-  assert(!fs.existsSync(path.join(home, ".codex/hooks.json")));
+  assert.equal(homeSession.observe(processes, state).phase, "configured");
+  assert(fs.existsSync(path.join(home, ".codex/hooks.json")), "HOME is a valid working directory");
   const cancellation = manager();
   cancellation.observe(processes, state);
   cancellation.observe({ clis: [] }, { isCodeCli: false });
   flush();
-  assert.equal(writes, 2, "a cancelled discovery cannot write configuration");
+  assert.equal(writes, 3, "a cancelled discovery cannot write configuration");
   current = false;
   const exited = manager();
   exited.observe(processes, state);
   flush();
   assert.equal(
     writes,
-    2,
+    3,
     "an exited/replaced process cannot write configuration",
   );
   current = true;
   console.log(
-    "PASS opt-out, disabled hooks, global-config boundary, ambiguous/shell processes and discovery cancellation",
+    "PASS HOME sessions, opt-out, disabled hooks, ambiguous/shell processes and discovery cancellation",
   );
 
   const bad = path.join(project, ".claude/settings.local.json");
@@ -194,6 +194,18 @@ try {
   fs.writeFileSync(bad, "{ private-token invalid json");
   const claudeProc = { clis: [{ ...cli, app: "claude" }] },
     claudeState = { ...state, app: "claude" };
+  const homeLocal = path.join(home, ".claude/settings.local.json"),
+    homeGlobal = path.join(home, ".claude/settings.json");
+  fs.mkdirSync(path.dirname(homeLocal));
+  writeJson(homeGlobal, { env: { KEEP: "user setting" } });
+  writeJson(homeLocal, { permissions: { allow: ["Read"] }, hooks: { Stop: [{ hooks: [{ type: "command", command: "echo home-custom" }] }] } });
+  const globalBefore = fs.readFileSync(homeGlobal);
+  const claudeHome = manager({ getContext: () => ({cwd: home, env: {HOME: home}, args: ["claude"], version: "2.1.300"}) });
+  claudeHome.observe(claudeProc, claudeState); flush();
+  assert.equal(claudeHome.observe(claudeProc, claudeState).phase, "configured");
+  assert.deepEqual(readJson(homeLocal).permissions, { allow: ["Read"] });
+  assert.equal(readJson(homeLocal).hooks.Stop.length, 2);
+  assert(fs.readFileSync(homeGlobal).equals(globalBefore), "Claude HOME setup preserves user settings.json");
   const claude = manager();
   claude.observe(claudeProc, claudeState);
   flush();

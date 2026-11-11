@@ -41,7 +41,7 @@ node /absolute/install/root/file-update.js --configure-hooks claude /absolute/pr
 node /absolute/install/root/file-update.js --configure-hooks codex /absolute/project
 ```
 
-仅合并该项目的 `.claude/settings.local.json` 或 `.codex/hooks.json`，保留其他配置和自定义 hooks，不改用户全局配置；Codex 仍可能要求信任 hook。已登记的项目在切换时迁移，失败时恢复配置备份；期间若用户自行编辑过文件则保留用户修改。首次配置后需要 CLI 重新加载或重启。
+合并对应目录的 `.claude/settings.local.json` 或 `.codex/hooks.json`，保留其他配置和自定义 hooks；工作目录可以是 `~`，不要求进入 Git 项目。Claude 的用户 `settings.json` 保持原样；Codex 在主目录使用默认配置路径时，hooks 文件属于用户级来源，仍可能要求信任。已登记目录在切换时迁移，失败时恢复配置备份；期间若用户自行编辑过文件则保留用户修改。首次配置后需要 CLI 加载新配置。
 
 ## 验证
 

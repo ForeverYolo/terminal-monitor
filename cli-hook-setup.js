@@ -1,6 +1,6 @@
 "use strict";
-// Configure only a verified foreground CLI's project. No prompts, transcripts,
-// credentials, trust databases or global settings are written.
+// Configure a verified foreground CLI's working directory, including HOME.
+// No prompts, transcripts, credentials or trust databases are written.
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -143,11 +143,6 @@ function projectDirectory(app, context) {
         directory = context.cwd;
     } catch {}
   directory = fs.realpathSync(directory);
-  if (
-    directory === fs.realpathSync(context.env.HOME || os.homedir()) ||
-    directory === path.parse(directory).root
-  )
-    throw Error("会话未进入项目目录，未修改全局 hooks 配置");
   if (process.getuid && fs.statSync(directory).uid !== process.getuid())
     throw Error("项目目录不属于当前用户，未自动修改 hooks");
   return directory;
@@ -340,7 +335,7 @@ function createAutoHookSetup(
               phase: "error",
               message: /Another update|health check/.test(e.message)
                 ? "版本切换中，稍后自动重试事件接入"
-                : /^(?:项目目录不属于|会话未进入|现有 hooks 配置无法解析)/.test(
+                : /^(?:项目目录不属于|现有 hooks 配置无法解析)/.test(
                       e.message,
                     )
                   ? e.message

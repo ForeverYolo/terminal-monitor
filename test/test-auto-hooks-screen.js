@@ -56,20 +56,21 @@ let wss,
       if (m.type === "ping") ws.send(JSON.stringify({ type: "pong" }));
     }),
   );
-  for (const app of ["codex", "claude"]) {
+  for (const {app, atHome} of [{app: "codex"}, {app: "claude"}, {app: "codex", atHome: true}, {app: "claude", atHome: true}]) {
     states = [];
     log = "";
-    const project = path.join(scratch, app + "-project");
-    fs.mkdirSync(project);
-    execFileSync("git", ["init", "-q", project]);
+    const project = atHome ? env.HOME : path.join(scratch, app + "-project");
+    fs.mkdirSync(project, {recursive: true});
+    if (!atHome) execFileSync("git", ["init", "-q", project]);
     const fake = path.join(scratch, app);
-    fs.symlinkSync(process.execPath, fake);
-    const name = "auto-" + app + "-" + process.pid,
+    if (!fs.existsSync(fake)) fs.symlinkSync(process.execPath, fake);
+    const name = "auto-" + app + (atHome ? "-home" : "") + "-" + process.pid,
       configFile = path.join(
         project,
         app === "codex" ? ".codex/hooks.json" : ".claude/settings.local.json",
       ),
       gate = path.join(project, "send-event");
+    fs.rmSync(gate, {force: true});
     const fixture = path.join(project, "cli-fixture.js");
     const title =
       app === "codex" ? "OpenAI Codex v0.159.3" : "Claude Code v2.1.197";
@@ -155,7 +156,7 @@ let sent=false;setInterval(()=>{if(sent||!fs.existsSync(${JSON.stringify(gate)})
     screen(["-S", name, "-X", "quit"]);
     console.log(
       "PASS " +
-        app +
+        app + (atHome ? " in HOME" : "") +
         " foreground discovery -> automatic project hooks -> real command/socket event; source remains truthful and task Screen survives monitor exit",
     );
   }
