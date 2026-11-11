@@ -7,7 +7,6 @@ let reconnectTimer = null;        // setTimeout handle for reconnect
 let isReconnecting = false;       // true while waiting for auth_ok after a drop
 let ctrlActive = false;
 let lastAgents = [];
-let lastServerFiles = null;
 let lastServerReleaseId = null;
 function showReleaseStatus(status) {
   lastServerReleaseId = status.releaseId || null;
@@ -174,7 +173,6 @@ function connect(username, password) {
       syncAttentionFromAgents(lastAgents);
       syncAgentIdMap(lastAgents);
       supervisorConfig = msg.supervisorConfig || {};
-      if (msg.serverFiles) lastServerFiles = msg.serverFiles;
       if (msg.releaseStatus) showReleaseStatus(msg.releaseStatus);
 
       const inTerm = views.term.style.display !== 'none';
@@ -230,7 +228,6 @@ function connect(username, password) {
       lastAgents = msg.agents || [];
       syncAttentionFromAgents(lastAgents);
       syncAgentIdMap(lastAgents);
-      if (msg.serverFiles) lastServerFiles = msg.serverFiles;
       renderAgents(lastAgents);
       if (currentMode === 'mgmt') { renderMgmtClients(); refreshAnalyzerOptions(); }
       // Mid-session id rotation: if the agent we're watching reconnected (new
@@ -380,10 +377,6 @@ function connect(username, password) {
       if (currentMode === 'mgmt') renderMgmtClients();
     } else if (msg.type === 'release_progress') {
       showFloatingNotice(`${msg.clientId || '服务器'}：${msg.message || msg.phase}`);
-    } else if (msg.type === 'query_files_result') {
-      const p = msg.reqId && pendingUpdateReqs.get(msg.reqId);
-      if (p) { clearTimeout(p.timer); pendingUpdateReqs.delete(msg.reqId); }
-      if (currentMode === 'mgmt') renderMgmtClients();
     } else if (msg.type === 'restart_server_result') {
       showFloatingNotice(msg.ok ? (msg.message || '服务器重启中…') : `✗ 重启失败: ${msg.error || 'unknown'}`);
     } else if (msg.type === 'pull_update_result') {

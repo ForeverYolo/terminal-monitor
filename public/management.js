@@ -2,7 +2,6 @@
 
 const pendingUpdateReqs = new Map();
 const pendingPullReqs = new Map();
-const pendingRestartClients = new Set();
 
 // --- Copy SSH / SCP command for an agent ---
 function copySshCmd(agentId) {
@@ -207,9 +206,6 @@ function renderMgmtClients() {
     const nodeCount = agents[0] && agents[0].reportedNodeCount;
     const overLimit = agents.length >= 20;
     const badge = versionBadge(agents[0]);
-    // ⏳ 待应用 → offer a one-click restart of the monitoring process (the only
-    // fix for disk-new/process-old, since a push has no diff to send).
-    if (/待应用/.test(badge)) pendingRestartClients.add(cid); else pendingRestartClients.delete(cid);
     const sv = saved[cid] || { name: '', disp: '', cmd: 'bash' };
     return `<div class="mgmt-client">
       <h4>Client: ${escapeHtml(cid)} · ${agents.length} agent(s)${nodeCount != null ? ' / ' + nodeCount + ' screen(s)' : ''} ${badge}</h4>
@@ -229,9 +225,9 @@ function renderMgmtClients() {
         </button>
         <button onclick="pullUpdateFromClient('${escapeHtml(cid)}', '${escapeHtml(agents[0] ? agents[0].name : cid)}')" style="background:#3a6e2a; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;" title="从这台机器下载完整版本，校验和依赖准备成功后再应用">
           ⬇ 从此机拉取
-        </button>${pendingRestartClients.has(cid) ? `<button onclick="restartNodeOnClient('${escapeHtml(cid)}')" style="background:#f0883e; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;" title="磁盘文件已最新但进程还是旧版：重启监控进程使新代码生效（不影响任务终端）">
+        </button><button onclick="restartNodeOnClient('${escapeHtml(cid)}')" style="background:#f0883e; color:#fff; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:12px;" title="重启这台机器的监控进程，保留任务终端">
           ⟳ 重启监控进程
-        </button>` : ''}
+        </button>
       </div>
       <div class="mgmt-agent-list">
         ${agents.map(a => {
@@ -282,83 +278,13 @@ const pendingSpawnReqs = new Map();
 
 // --- Push-update UI ---
 
-// Five-state version badge for one agent. Inputs:
-//   S = lastServerFiles (server manifest)   A = agent.fileHashes (fresh disk
-//   hashes via register + periodic query_files)   R = agent.runningHashes
-//   (register-time snapshot = running version)   rPrev = previous register's
-//   R.client.js for this clientId (server-tracked)
-// States:
-//   green   ✓ 最新     S==A==R for client files, no server-side drift
-//   orange  ⏳ 待应用  A==S but R≠A: disk synced, old process still running.
-//                  push_update canNOT fix this (no diff to send); needs the
-//                  monitoring process restarted (restart.sh / next push)
-//   yellow  ⬆ 待更新  A==R≠S (or ambiguous): server has a newer version the
-//                  agent hasn't received — push_update fixes it
-//   blue    ⬇ 待拉取  this machine's disk has unpublished changes: server-side
-//                  file drift, or client-file edit on disk (A≠R with R==S), or
-//                  agent restarted onto local code (A==R≠S with rPrev==S)
-//   grey    ? 版本未知  old client without hashes
-const CLIENT_FILES_UI = ManagedFiles.CLIENT_FILES;
-const ALL_MANAGED_UI = ManagedFiles.SERVER_FILES;
+// Version state comes from complete-release identities and health checks.
 function versionBadge(agent) {
-  if (agent?.updateState?.phase === 'rolled_back') return '<span style="color:#f0883e;font-size:12px;">↩ 已回滚</span>';
-  if (lastServerReleaseId && agent?.updateProtocol === 1 && agent.releaseId !== lastServerReleaseId) return '<span style="color:#d29922;font-size:12px;">⬆ 待更新</span>';
-  if (!lastServerFiles || !agent || !agent.fileHashes || !agent.runningHashes) {
-    return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
-  }
-  const A = agent.fileHashes, R = agent.runningHashes, S = lastServerFiles;
-  // Per-file three-way compare over ALL managed files. Server-side files
-  // (server.js, public/*) don't run on the agent, but R still records the
-  // disk state at client startup. That lets us distinguish a local edit made
-  // after startup (待拉取) from a server update that arrived later (待更新).
-  let yellow = false, orange = false, blue = false;
-  for (const name of ALL_MANAGED_UI) {
-    if (!S[name]) continue; // missing server copy — skip
-    const a = A[name];
-    if (a === S[name]) {
-      // Disk current. Only running-state matters, and only for client files.
-      if (!CLIENT_FILES_UI.includes(name)) continue;
-      if (!(name in R)) return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
-      if (R[name] !== a) {
-        // Disk new, process old → push is a no-op, needs 应用 (restart).
-        orange = true;
-      }
-    } else if (a === undefined) {
-      // A missing client runtime file needs an update; optional server-side
-      // copies on agents can still be absent without blocking the badge.
-      if (CLIENT_FILES_UI.includes(name)) yellow = true;
-      continue;
-    } else {
-      // Disk differs from server. For files that this process does not run,
-      // the startup snapshot is still useful: R==S means this machine edited
-      // its copy after connecting, while R!=S means it was already behind the
-      // server when it connected.
-      if (!CLIENT_FILES_UI.includes(name)) {
-        if ((name in R) && R[name] === S[name] && a !== R[name]) blue = true;
-        else yellow = true;
-        continue;
-      }
-      if (!(name in R)) return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
-      const r = R[name];
-      if (r === S[name]) {
-        // Process runs the server version, disk was edited locally
-        // (published or not) → this machine is the source: pull from it.
-        blue = true;
-      } else if (a === r) {
-        // Process runs the edited disk → agent restarted onto local code.
-        // If it PREVIOUSLY ran the server version, someone is developing
-        // here → 待拉取; otherwise (rPrev differs) the server just has a
-        // newer published version → 待更新.
-        if (name === 'client.js' && agent.rPrev && agent.rPrev === S[name]) blue = true;
-        else yellow = true;
-      } else {
-        yellow = true; // three-way mismatch: ambiguous → conservative push
-      }
-    }
-  }
-  if (blue) return '<span style="color:#58a6ff;font-size:12px;">⬇ 待拉取</span>';
-  if (orange) return '<span style="color:#f0883e;font-size:12px;">⏳ 待应用</span>';
-  if (yellow) return '<span style="color:#d29922;font-size:12px;">⬆ 待更新</span>';
+  const phase = agent?.updateState?.phase;
+  if (phase === 'rolled_back') return '<span style="color:#f0883e;font-size:12px;">↩ 已回滚</span>';
+  if (phase === 'checking' || phase === 'activating') return '<span style="color:#f0883e;font-size:12px;">⏳ 健康检查中</span>';
+  if (!lastServerReleaseId || agent?.updateProtocol !== 1 || !agent.releaseId) return '<span style="color:#8b949e;font-size:12px;">? 版本未知</span>';
+  if (agent.releaseId !== lastServerReleaseId) return '<span style="color:#d29922;font-size:12px;">⬆ 待更新</span>';
   return '<span style="color:#3fb950;font-size:12px;">✓ 最新</span>';
 }
 

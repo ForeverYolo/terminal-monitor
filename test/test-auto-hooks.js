@@ -51,9 +51,10 @@ try {
   const file = path.join(project, ".codex/hooks.json");
   fs.mkdirSync(path.dirname(file));
   const quote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
-  const legacyCommand = [
+  const monitorCommand = [
     process.execPath,
-    path.join(install, "cli-hook.js"),
+    path.join(install, "file-update.js"),
+    "--hook",
     "codex",
   ]
     .map(quote)
@@ -66,7 +67,7 @@ try {
           matcher: "custom",
           hooks: [{ type: "command", command: "echo keep" }],
         },
-        { hooks: [{ type: "command", command: legacyCommand }] },
+        { hooks: [{ type: "command", command: monitorCommand }] },
       ],
       Stop: [{ hooks: [] }],
     },

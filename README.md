@@ -472,7 +472,7 @@ terminal-monitor/
 └── docs/                              # 部署、测试、架构与历史设计记录
 ```
 
-测试入口见 [测试说明](docs/testing.md)，模块职责见 [重构说明](docs/refactoring.md)。网页升级支持完整版本、依赖准备、健康检查与自动回滚；旧版首次接入可通过兼容发布端完成，无须逐台同步新增模块，操作步骤见 [网页更新说明](docs/web-release-updates.md)。
+测试入口见 [测试说明](docs/testing.md)，模块职责见 [重构说明](docs/refactoring.md)。网页升级支持完整版本、依赖准备、健康检查与自动回滚；运行版本以 release ID 和健康结果为准，操作步骤见 [网页更新说明](docs/web-release-updates.md)。
 
 ---
 

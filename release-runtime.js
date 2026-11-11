@@ -100,7 +100,7 @@ function hookCommand(root, app) {
 function isMonitorHook(command, root, app, currentCommand) {
   if (command === currentCommand) return true;
   if (typeof command !== "string") return false;
-  // Older generated adapters used three single-quoted shell arguments.
+  // Generated stable adapters use single-quoted shell arguments.
   // Parse only that generated form; never evaluate arbitrary shell text.
   const words = command.match(/(?:'[^']*'|\\.)+/g);
   if (!words || words.join(" ") !== command) return false;
@@ -108,21 +108,17 @@ function isMonitorHook(command, root, app, currentCommand) {
     word.replace(/'([^']*)'|\\(.)/g, (_, quoted, escaped) => quoted ?? escaped),
   );
   if (!/^(?:node|nodejs)$/.test(path.basename(args[0]))) return false;
-  const legacy =
-    args.length === 3 &&
-    args[2] === app &&
-    path.basename(args[1]) === "cli-hook.js";
   const stable =
     args.length === 4 &&
     args[2] === "--hook" &&
     args[3] === app &&
     path.basename(args[1]) === "file-update.js";
-  if (!legacy && !stable) return false;
+  if (!stable) return false;
   try {
     const script = fs.realpathSync(args[1]);
     return (
       script === path.join(root, path.basename(args[1])) ||
-      new RegExp("^releases/[a-f0-9]{64}/(?:cli-hook|file-update)\\.js$").test(
+      new RegExp("^releases/[a-f0-9]{64}/file-update\\.js$").test(
         path.relative(store(root), script),
       )
     );
@@ -485,27 +481,6 @@ function restartWorker() {
     process.send({ type: "swt_restart" });
     return true;
   }
-  // The initial bridge still runs inside the original service process. Ask
-  // its supervisor to relaunch only when we can verify we are that unit's MainPID.
-  if (process.env.INVOCATION_ID)
-    try {
-      const unit = fs
-        .readFileSync("/proc/self/cgroup", "utf8")
-        .match(/\/([A-Za-z0-9_.@-]+\.service)(?:\/|$)/m)?.[1];
-      if (unit) {
-        const main = require("child_process")
-          .execFileSync(
-            "systemctl",
-            ["show", unit, "--property=MainPID", "--value"],
-            { encoding: "utf8", timeout: 3000 },
-          )
-          .trim();
-        if (Number(main) === process.pid) {
-          setTimeout(() => process.exit(75), 250);
-          return true;
-        }
-      }
-    } catch {}
   return false;
 }
 function runHook(app, root = __dirname) {

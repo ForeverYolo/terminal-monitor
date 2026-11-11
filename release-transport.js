@@ -20,7 +20,6 @@ const PHASES = {
   checking: "检查代码",
   prepared: "已准备，等待应用",
   activating: "切换并检查健康状态",
-  bridging: "安装兼容更新器",
 };
 function createReleaseClient({ root, config }) {
   const install = runtime.installRoot(root);
@@ -135,7 +134,6 @@ function createReleaseClient({ root, config }) {
   }
   return {
     identity: () => runtime.identity(root),
-    connected: () => {},
     disconnected,
     handle,
   };
@@ -174,7 +172,6 @@ function createReleaseServer({ root, config, agents, browsers, httpServer }) {
       agentName: job.name,
       ok,
       error,
-      updated: [],
       message: ok
         ? job.kind === "pull"
           ? "完整版本已准备，点击重启服务器应用"
@@ -213,19 +210,8 @@ function createReleaseServer({ root, config, agents, browsers, httpServer }) {
   }
   function startPush(job) {
     const matches = peers(job.user, job.cid);
-    const legacy = matches.filter(([, a]) => a.updateProtocol !== 1);
-    if (legacy.length) {
-      job.socket = legacy[0][0];
-      job.bridgeSockets = legacy.map(([ws]) => ws);
-      job.bridgeExpected = matches.map(([, a]) => a.screen);
-      progress(job, "bridging");
-      send(job.socket, {
-        type: "fetch_files",
-        reqId: job.id,
-        names: ["client.js", "server.js", "service-restart.js"],
-      });
-      return;
-    }
+    if (matches.some(([, a]) => a.updateProtocol !== 1 || !a.installationId))
+      throw Error("节点不支持当前完整版本更新协议，请更新安装后重试");
     // Each independent installation receives once; its launcher switches every monitor.
     const groups = new Map();
     for (const [ws, a] of matches)
@@ -251,27 +237,6 @@ function createReleaseServer({ root, config, agents, browsers, httpServer }) {
       updateState: msg.updateState,
     });
     if (info.updateProtocol === 1) send(ws, { type: "release_registered" });
-    for (const job of jobs.values())
-      if (
-        job.kind === "push" &&
-        job.cid === info.attrs?.clientId &&
-        job.user === info.user &&
-        job.phase === "bridging"
-      ) {
-        const matches = peers(job.user, job.cid);
-        if (
-          job.bridgeExpected.every((screen) =>
-            matches.some(
-              ([, a]) => a.screen === screen && a.updateProtocol === 1,
-            ),
-          )
-        )
-          try {
-            startPush(job);
-          } catch (e) {
-            finish(job, false, e.message);
-          }
-      }
   }
   function disconnected(ws) {
     for (const job of jobs.values()) {
@@ -281,7 +246,6 @@ function createReleaseServer({ root, config, agents, browsers, httpServer }) {
       if (
         job.kind === "push" &&
         job.phase !== "activating" &&
-        job.phase !== "bridging" &&
         [...(job.groups?.values() || [])].some((g) => g.ws === ws)
       )
         finish(job, false, "更新传输连接中断");
@@ -302,7 +266,7 @@ function createReleaseServer({ root, config, agents, browsers, httpServer }) {
       try {
         if (msg.type === "restart_server") {
           const prepared = readJson(path.join(store(install), "prepared.json"));
-          if (!prepared) return false; // compatibility: an old file-based pull
+          if (!prepared) throw Error("没有已准备好的完整版本，请先拉取版本");
           const state = runtime.activate(install, prepared.id);
           send(ws, {
             type: "restart_server_result",
@@ -339,7 +303,7 @@ function createReleaseServer({ root, config, agents, browsers, httpServer }) {
         } else {
           const matches = peers(user, msg.clientId);
           if (matches.length && matches[0][1].updateProtocol !== 1)
-            throw Error('版本源尚未接入更新器，请先启动兼容发布端');
+            throw Error("版本源不支持当前完整版本更新协议");
           const job = jobFor(ws, msg, "pull");
           progress(job, "downloading");
           send(job.socket, { type: "release_export", reqId: job.id });
@@ -355,7 +319,6 @@ function createReleaseServer({ root, config, agents, browsers, httpServer }) {
           reqId: msg.reqId,
           ok: false,
           error: e.message,
-          updated: [],
         });
       }
       return true;
@@ -377,23 +340,6 @@ function createReleaseServer({ root, config, agents, browsers, httpServer }) {
     if (!job)
       return typeof msg.type === "string" && msg.type.startsWith("release_");
     try {
-      if (
-        job.phase === "bridging" &&
-        msg.type === "fetch_files_result" &&
-        job.socket === ws
-      ) {
-        if (!msg.ok)
-          throw Error(msg.error || "Could not read old installation");
-        const files = require("./release-bridge").bridgeFiles(root, msg.files);
-        for (const target of job.bridgeSockets)
-          send(target, { type: "update_files", reqId: job.id, files });
-        return true;
-      }
-      if (job.phase === "bridging" && msg.type === "update_files_result") {
-        if (!job.bridgeSockets.includes(ws)) return true;
-        if (!msg.ok) throw Error(msg.error || "Bridge installation failed");
-        return true;
-      }
       if (typeof msg.type !== "string" || !msg.type.startsWith("release_"))
         return false;
       if (job.kind === "pull") {

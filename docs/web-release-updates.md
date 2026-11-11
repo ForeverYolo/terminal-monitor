@@ -1,6 +1,6 @@
-# 网页更新与兼容桥接
+# 网页完整版本更新
 
-状态改进单独保存在 `d796163`，网页更新已从 `feat/web-release-updates` 合入主线。
+服务端和客户端统一使用完整版本更新协议，版本状态由发布摘要与健康检查结果确定。
 
 ## 日常使用
 
@@ -11,20 +11,9 @@
 
 新增模块、静态页面和 npm 依赖不再要求旧进程预先认识文件名。发布者以 `managed-files.js` 的部署清单和完整 `public/` 目录构建版本；增加模块仍应把它加入部署清单。依赖文件完全相同时复用既有 `node_modules`；变更时在新版本目录执行 `npm ci --omit=dev`。依赖安装失败不切换运行版本。成功的依赖安装日志保存在版本目录；失败日志保存在本机 `.swt/last-preparation.log`，不通过网页发送。
 
-## 首次升级旧版
+## 更新协议
 
-旧进程的文件白名单固定，必须先接入一次兼容更新器。支持的历史基线为 `7cd9b52`，状态改进版本 `d796163` 也使用同样的接口；其他版本若补丁定位不唯一会拒绝，避免猜测修改。
-
-```bash
-node infra/build-update-bridge.js /absolute/path/to/new-bridge-publisher
-# 若当前部署的是状态改进版本，可追加基线参数 d796163
-cd /absolute/path/to/new-bridge-publisher
-npm ci --omit=dev
-```
-
-给兼容发布端准备一份客户端配置，连接现有服务器、附着现有或专用 Screen，设置 `client.releaseSource` 为真正新版源码的绝对路径，再启动它的 `client.js`。网页先从它拉取一次并重启服务器，接入兼容更新器；随后再次拉取并重启，应用完整新版。兼容版保留历史文件布局，只修改旧白名单已有的 `client.js`、`server.js`、`file-update.js`、`service-restart.js`、`terminal-state.js`。最后一个文件同时兼容 Node 21+ 的全局 navigator，避免旧版 xterm-headless 误判浏览器环境。新服务器向旧客户端推送时会自动完成同样的桥接。
-
-初次桥接的服务重启沿用 Screen；若由 systemd 托管，只有确认当前进程就是该单元的 MainPID 才退出交给 systemd 重启，单元须配置 `Restart=on-failure` 或 `always`。接入后由常驻启动器切换工作进程，Screen 与 systemd 使用相同机制。
+网页更新只接受支持当前完整版本协议的节点。旧文件覆盖协议和首次升级桥接已移除；不支持的版本源或目标节点会收到明确错误，需要通过标准安装/部署方式更新。管理页只比较 release ID 与健康检查状态，不再轮询文件哈希或推断本地磁盘版本。
 
 ## 文件与恢复
 
@@ -45,8 +34,4 @@ node /absolute/install/root/file-update.js --configure-hooks codex /absolute/pro
 
 ## 验证
 
-`npm run test:update` 使用独立临时目录和 Screen 套接字目录，执行原始 `7cd9b52` 服务器的网页协议升级、旧客户端自动桥接、同目录两个监控进程切换、依赖锁变更、文件校验与失败回滚。`test-multiproc-update` 额外验证第一个监控健康时不能提前成功，以及跨用户操作被拒绝。
-
-实际测试服已通过 Chromium 管理页按钮完成拉取、服务器切换重连和客户端推送，任务 Screen PID `457389` 保持不变，无浏览器错误。验证报告位于 `/home/renhangqi/terminal-monitor-staging/runtime/web-update-verification/report.json`；测试服运行提交 `1ca2eab`，该次测试时尚未合入生产。
-
-2026-11-09：主线已合入，正式服已通过旧协议完成兼容桥接和完整版本切换。针对 Node 24 的 headless 初始化问题，已补充冷启动回归测试；监控进程的 Node 运行时必须满足版本要求。
+`npm run test:update` 在独立临时目录和 Screen 套接字目录验证完整版本拉取、应用、多监控推送、依赖锁变更、文件校验、hooks 配置保留和启动失败回滚；同时确认不支持的更新器被拒绝且不会触发文件覆盖。`test-multiproc-update` 验证全部监控健康后才能确认成功，以及跨用户操作被拒绝。`test-release-status` 验证 release ID 状态展示、旧消息忽略和旧 API 字段移除。

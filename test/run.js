@@ -3,7 +3,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const groups = {
   unit: ['deploy', 'supervisor-lifecycle', 'file-transfer', 'refactor-contracts', 'terminal-helpers', 'cli-state', 'auto-hooks', 'terminal-snapshot', 'terminal-replay', 'native-tui', 'screen-relay-scroll', 'analyzer'],
-  protocol: ['local', 'stable-resume', 'snapshot-protocol', 'reconnect', 'register-query', 'multiproc-update', 'running-hash'],
+  protocol: ['local', 'stable-resume', 'snapshot-protocol', 'reconnect', 'release-status', 'multiproc-update'],
   screen: ['cli-hooks', 'cli-hook-daemon', 'cli-generic-screen', 'auto-hooks-screen', 'screen-terminal', 'screen-session', 'service-restart', 'restart', 'staging-shell'],
   browser: ['cli-browser', 'real-screen-browser', 'native-tui-browser', 'scroll-region-browser'],
   codex: ['native-codex-browser'],

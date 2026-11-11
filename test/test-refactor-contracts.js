@@ -3,10 +3,8 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const crypto = require('crypto');
 const http = require('http');
 const { createHttpHandler } = require('../server-http');
-const { installFiles, buildFileManifest } = require('../file-update');
 const inventory = require('../managed-files');
 const root = path.resolve(__dirname, '..');
 (async () => {
@@ -27,7 +25,6 @@ const root = path.resolve(__dirname, '..');
   console.log('PASS pending requests release owners on disconnect and timeout');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'swt-install-'));
   try {
-    fs.writeFileSync(path.join(scratch, 'a'), 'old');
     const configPath = path.join(scratch, 'settings=value.json');
     fs.writeFileSync(configPath, '{"value":42}');
     const argv = process.argv;
@@ -39,18 +36,8 @@ const root = path.resolve(__dirname, '..');
     } finally { process.argv = argv; }
     fs.unlinkSync(configPath);
 
-    const entry = (name, content) => ({ name, content: Buffer.from(content).toString('base64'), sha256: crypto.createHash('sha256').update(content).digest('hex') });
-    assert.throws(() => installFiles(scratch, [entry('a', 'new'), entry('../escape', 'bad')], ['a']));
-    assert.equal(fs.readFileSync(path.join(scratch, 'a'), 'utf8'), 'old');
-    assert.throws(() => installFiles(scratch, [entry('a', 'new'), { ...entry('b', 'bad'), sha256: 'invalid' }], ['a','b']));
-    assert.equal(fs.readFileSync(path.join(scratch, 'a'), 'utf8'), 'old');
-    assert.throws(() => installFiles(scratch, [entry('a', '1'), entry('a', '2')], ['a']));
-    installFiles(scratch, [entry('a', 'new'), entry('nested/b', 'data')], ['a','nested/b']);
-    assert.equal(fs.readFileSync(path.join(scratch, 'nested/b'), 'utf8'), 'data');
-    assert.deepStrictEqual(fs.readdirSync(scratch).sort(), ['a','nested']);
-    assert.equal((await buildFileManifest(scratch, ['a','absent'])).a, entry('a','new').sha256);
   } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
-  console.log('PASS deployment inventory and validated file installation');
+  console.log('PASS deployment inventory and configuration loading');
 
   const sent = [], socket = { readyState: 1, OPEN: 1, send: data => sent.push(JSON.parse(data)) };
   const config = { server: { tokens: { own: { user: 'test' }, other: { user: 'other' } } } };

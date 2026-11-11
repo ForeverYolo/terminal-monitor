@@ -1,13 +1,13 @@
 /**
- * Local end-to-end test for the supervisor / claude_state / spawn_node features.
+ * Local end-to-end test for the supervisor / cli_state / spawn_node features.
  *
  * Spins up:
  *   - a real SWT server (in-process, on an ephemeral port)
  *   - two MOCK agents that connect via WebSocket and emit fake Claude-like
  *     output (NO real screen, NO real claude binary)
  *   - a "browser" client that subscribes to events and asserts:
- *       * claude_state arrives with correct kind
- *       * dashboard-style agents list includes claudeState
+ *       * cli_state arrives with correct status
+ *       * dashboard-style agents list includes cliState
  *       * /api/supervisor returns a summary
  *       * spawn_node validation rejects bad input (no screen touched)
  *
@@ -53,9 +53,9 @@ function log(...args) { console.log(`[test] ${args.join(' ')}`); }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Tiny WS mock agent. Sends register, then emits `claude_state` directly
+// Tiny WS mock agent. Sends register, then emits `cli_state` directly
 // (bypassing the detector) AND periodically sends `data` payloads that look
-// like Claude output, so the server's claude_state propagation can be verified.
+// like Claude output, so the server's cli_state propagation can be verified.
 class MockAgent {
   constructor(name, screen, clientId) {
     this.name = name;
@@ -90,7 +90,7 @@ class MockAgent {
   }
   sendState(state) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify({ type: 'claude_state', state }));
+    this.ws.send(JSON.stringify({ type: 'cli_state', state }));
   }
   sendData(text) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
@@ -208,26 +208,22 @@ async function main() {
 
     // Agent 1: yes/no Claude state
     agent1.sendState({
-      running: true,
-      kind: 'yesno',
+      isCodeCli: true, app: 'claude', source: 'screen',
+      status: 'waiting_input',
       prompt: 'Do you want to proceed?',
       options: [],
-      lastLine: '❯ Yes',
-      detectedAt: new Date().toISOString()
     });
     agent1.sendData('Welcome to Claude Code!\nDo you want to proceed?\n  ❯ Yes\n    No\n');
 
     // Agent 2: option-list Claude state
     agent2.sendState({
-      running: true,
-      kind: 'option',
+      isCodeCli: true, app: 'claude', source: 'screen',
+      status: 'waiting_input',
       prompt: 'Pick a strategy',
       options: [
         { index: 1, label: 'aggressive' },
         { index: 2, label: 'conservative' }
       ],
-      lastLine: '2. conservative',
-      detectedAt: new Date().toISOString()
     });
     agent2.sendData('Welcome to Claude Code!\nPick a strategy\n  1. aggressive\n  2. conservative\n');
 
@@ -237,30 +233,30 @@ async function main() {
     browser.send({ type: 'connect_multi', agentIds: [] }); // subscribe to all broadcasts
     log('browser connected');
 
-    // Wait for at least one claude_state event
+    // Wait for at least one cli_state event
     await sleep(2500);
 
     // 4. Assertions
     log('--- assertions ---');
 
-    // (a) agents list includes claudeState
+    // (a) agents list includes cliState
     await sleep(500);
     const found1 = browser.agents.find(a => a.name === 'test-alpha');
     const found2 = browser.agents.find(a => a.name === 'test-beta');
     assert(found1 && found2, 'browser received both agents in list');
-    assert(found1 && found1.claudeState && found1.claudeState.kind === 'yesno',
-      `agent1 claudeState.kind = yesno (got: ${found1 && found1.claudeState && found1.claudeState.kind})`);
-    assert(found2 && found2.claudeState && found2.claudeState.kind === 'option',
-      `agent2 claudeState.kind = option (got: ${found2 && found2.claudeState && found2.claudeState.kind})`);
+    assert(found1 && found1.cliState && found1.cliState.status === 'waiting_input',
+      `agent1 cliState.status = waiting_input (got: ${found1 && found1.cliState && found1.cliState.status})`);
+    assert(found2 && found2.cliState && found2.cliState.status === 'waiting_input',
+      `agent2 cliState.status = waiting_input (got: ${found2 && found2.cliState && found2.cliState.status})`);
     assert(found1 && found1.clientId === 'CLIENT-A', 'agent1 clientId propagated');
-    assert(found2 && found2.claudeState.options.length === 2, 'agent2 has 2 options');
+    assert(found2 && found2.cliState.options.length === 2, 'agent2 has 2 options');
 
     // (b) detector unit test (re-check via /api/agents or locally)
     const apiRes = await httpGet(`http://127.0.0.1:${PORT}/api/agents`);
     assert(apiRes.status === 200, '/api/agents returns 200');
     assert(apiRes.body.agents && apiRes.body.agents.length === 2, '/api/agents lists 2 agents');
     const apiA1 = apiRes.body.agents.find(a => a.name === 'test-alpha');
-    assert(apiA1 && apiA1.claudeState && apiA1.claudeState.kind === 'yesno', '/api/agents has agent1 claudeState=yesno');
+    assert(apiA1 && apiA1.cliState && apiA1.cliState.status === 'waiting_input', '/api/agents has agent1 cliState=waiting_input');
 
     // (c) /api/supervisor returns summary
     const supRes = await httpGet(`http://127.0.0.1:${PORT}/api/supervisor`);
@@ -357,23 +353,21 @@ async function main() {
       assert(false, `spawn_node no-target rejection (${e.message})`);
     }
 
-    // (h) Verify claude_state broadcast reaches browser when state changes
+    // (h) Verify cli_state broadcast reaches browser when state changes
     agent1.sendState({
-      running: true,
-      kind: 'option',
+      isCodeCli: true, app: 'claude', source: 'screen',
+      status: 'waiting_input',
       prompt: 'Pick again',
       options: [{ index: 1, label: 'foo' }, { index: 2, label: 'bar' }],
-      lastLine: '2. bar',
-      detectedAt: new Date().toISOString()
     });
     try {
       const ev = await browser.waitFor(
         es => es.find(x => x.type === 'cli_state' && x.agentId === found1.id && x.state && x.state.status === 'waiting_input'),
         5000
       );
-      assert(ev && ev.state.options.length === 2, 'browser received updated claude_state');
+      assert(ev && ev.state.options.length === 2, 'browser received updated cli_state');
     } catch (e) {
-      assert(false, `claude_state broadcast (${e.message})`);
+      assert(false, `cli_state broadcast (${e.message})`);
     }
 
     // (i) Verify supervisor event payload structure on initial summary
@@ -383,7 +377,7 @@ async function main() {
         8000
       );
       const ags = ev.event.agents;
-      assert(ags[0].claude !== undefined, 'supervisor summary agent has claude field');
+      assert(ags[0].cliState !== undefined, 'supervisor summary agent has cliState field');
       assert(ev.event.clients && ev.event.clients.length === 2, 'supervisor summary has 2 clients');
     } catch (e) {
       assert(false, `supervisor summary structure (${e.message})`);

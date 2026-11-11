@@ -10,7 +10,7 @@
 
 `cliState` 包含 `isCodeCli`、`app`、可选 `appName`、`status`、`source`、`prompt`、`options`、`sessionId`、`changedAt`。状态为 `working / idle / waiting_permission / waiting_input / unknown`；来源为 `hooks / screen`。连接在线/离线独立于任务状态。
 
-卡片、管理页、API、手机操作栏、通知和 supervisor 共用此结果。`needsInput` 和旧 `claudeState` 仅为派生兼容字段，服务端不再根据输出末尾字符另行判断。
+卡片、管理页、API、手机操作栏、通知和 supervisor 共用此结果。`needsInput` 由统一状态派生。旧 `claude_state` 消息、`claudeState` API 字段和内部转换函数已移除。
 
 运行逻辑只维护 `cliState`；旧字段在协议输出时生成，不再维护第二份状态缓存。一次 `CliTracker.screen()` 完成当前屏幕识别与 hooks 校正，调用方无需分两次处理画面。`terminal-text.js` 只提供预览/结构化文本需要的 ANSI 清理，旧的历史字节流检测器已移除。卡片与管理页通过同一 `stateText()` 生成状态文字。
 

@@ -1,0 +1,38 @@
+'use strict';
+const assert = require('assert'), fs = require('fs'), os = require('os'), path = require('path'), net = require('net'), vm = require('vm');
+const { spawn } = require('child_process'), WebSocket = require('ws');
+const root = path.resolve(__dirname, '..'), temp = fs.mkdtempSync(path.join(os.tmpdir(), 'swt-release-status-'));
+const delay = ms => new Promise(r => setTimeout(r, ms));
+async function until(fn) { for (let i=0;i<150;i++) { try { const x=await fn(); if(x)return x; } catch {} await delay(100); } throw Error('release status timeout'); }
+let server, agent, browser, log = '';
+(async()=>{
+  const source=fs.readFileSync(path.join(root,'public/management.js'),'utf8');
+  const context=vm.createContext({lastServerReleaseId:'a'.repeat(64)});
+  vm.runInContext(source.slice(source.indexOf('function versionBadge('),source.indexOf('function sendPush(')),context);
+  const badge=a=>context.versionBadge(a), current={updateProtocol:1,releaseId:'a'.repeat(64),updateState:{phase:'completed'}};
+  assert(badge(current).includes('最新'));assert(badge({...current,releaseId:'b'.repeat(64)}).includes('待更新'));
+  assert(badge({...current,updateState:{phase:'checking'}}).includes('健康检查中'));
+  assert(badge({...current,updateState:{phase:'rolled_back'}}).includes('已回滚'));
+  assert(badge({updateProtocol:1}).includes('版本未知'));
+  const port=await new Promise(r=>{const s=net.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p))})});
+  const config=path.join(temp,'server.json');fs.writeFileSync(config,JSON.stringify({server:{port,host:'127.0.0.1',password:'pw',tokens:{token:{user:'test'}},supervisor:{enabled:false}}}));
+  server=spawn(process.execPath,[path.join(root,'server.js'),'--config='+config],{cwd:root});server.stdout.on('data',d=>log+=d);server.stderr.on('data',d=>log+=d);
+  const url='http://127.0.0.1:'+port;await until(async()=> (await fetch(url)).ok);
+  agent=new WebSocket(url.replace('http:','ws:'));await new Promise((r,j)=>{agent.once('open',r);agent.once('error',j)});
+  const received=[];agent.on('message',raw=>received.push(JSON.parse(raw)));
+  agent.send(JSON.stringify({type:'register',token:'token',protocolVersion:2,name:'current',screen:'fixture',attrs:{clientId:'current'},cols:80,rows:24,updateProtocol:1,installationId:'fixture',releaseId:current.releaseId,updateState:current.updateState}));
+  const api=async()=> (await(await fetch(url+'/api/agents')).json()).agents[0];
+  await until(async()=> (await api())?.releaseId===current.releaseId);
+  agent.send(JSON.stringify({type:'cli_state',state:{isCodeCli:true,app:'codex',status:'working',source:'hooks'}}));
+  await until(async()=> (await api())?.cliState?.status==='working');
+  agent.send(JSON.stringify({type:'claude_state',state:{running:true,kind:'input'}}));await delay(150);
+  const state=await api();assert.equal(state.cliState.status,'working');
+  for(const key of ['claudeState','fileHashes','runningHashes','rPrev'])assert(!(key in state),'obsolete field '+key);
+  agent.send(JSON.stringify({type:'release_state',installationId:'fixture',releaseId:'b'.repeat(64),updateState:{phase:'completed'}}));
+  await until(async()=> (await api())?.releaseId==='b'.repeat(64));
+  browser=new WebSocket(url.replace('http:','ws:'));await new Promise((r,j)=>{browser.once('open',r);browser.once('error',j)});
+  const auth=new Promise(r=>browser.on('message',raw=>{const m=JSON.parse(raw);if(m.type==='auth_ok')r(m)}));browser.send(JSON.stringify({type:'auth',username:'test',password:'pw'}));const response=await auth;
+  assert(!('serverFiles' in response));assert(!('claudeState' in response.agents[0]));
+  await delay(1600);assert(!received.some(m=>m.type==='query_files'),'no periodic/register file-hash polling');
+  console.log('PASS release-ID health badges and API metadata; obsolete state ignored; old fields and hash polling absent');
+})().catch(e=>{console.error(e,log.slice(-2000));process.exitCode=1}).finally(()=>{agent?.terminate();browser?.terminate();server?.kill();fs.rmSync(temp,{recursive:true,force:true})});

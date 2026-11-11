@@ -12,7 +12,6 @@ const {
   store,
   readJson,
 } = require("../release-package");
-const { buildBridge } = require("../infra/build-update-bridge");
 const WebSocket = require("ws");
 const project = path.resolve(__dirname, ".."),
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), "swt-release-test-"));
@@ -180,172 +179,62 @@ async function main() {
   const broker = path.join(scratch, "broker"),
     publisher = path.join(scratch, "publisher"),
     target = path.join(scratch, "target");
-  buildBridge(publisher);
-  for (const dir of [broker, target]) {
-    fs.mkdirSync(dir);
-    execFileSync("tar", ["-x", "-C", dir], {
-      input: execFileSync("git", ["archive", "7cd9b52"], {
-        cwd: project,
-        maxBuffer: 32 * 1024 * 1024,
-      }),
-    });
-  }
-  for (const dir of [broker, publisher, target])
-    fs.symlinkSync(
-      path.join(project, "node_modules"),
-      path.join(dir, "node_modules"),
-    );
-  const port = 21000 + Math.floor(Math.random() * 8000),
-    url = "ws://127.0.0.1:" + port;
+  for (const dir of [broker, publisher, target]) copyRelease(dir);
+  const rootServer = fs.readFileSync(path.join(broker, "server.js"));
+  const port = 21000 + Math.floor(Math.random() * 8000), url = "ws://127.0.0.1:" + port;
   const serverConfig = writeConfig(broker, "config.json", {
-    server: {
-      port,
-      listenHost: "127.0.0.1",
-      password: "pw",
-      tokens: { token: { user: "test" } },
-      supervisor: { enabled: false },
-    },
+    server: {port, host: "127.0.0.1", password: "pw", tokens: {token: {user: "test"}}, supervisor: {enabled: false}},
   });
-  screen(
-    "swt-server",
-    [
-      "bash",
-      "-c",
-      'exec "$1" server.js --config="$2" > server.log 2>&1',
-      "_",
-      process.execPath,
-      serverConfig,
-    ],
-    broker,
-  );
-  await until(async () => {
-    const r = await fetch("http://127.0.0.1:" + port);
-    return r.ok;
-  }, "original broker");
+  screen("swt-server", ["bash", "-c", 'exec "$1" server.js --config="$2" > server.log 2>&1', "_", process.execPath, serverConfig], broker);
+  await until(async () => (await fetch("http://127.0.0.1:" + port)).ok, "current broker");
   for (const [root, name, cid, releaseSource] of [
-    [publisher, "publisher", "publisher", src],
-    [target, "target-a", "target"],
-    [target, "target-b", "target"],
+    [publisher, "publisher", "publisher", src], [target, "target-a", "target"], [target, "target-b", "target"],
   ]) {
     screen(name, ["bash", "--noprofile", "--norc"], root);
     const cfg = writeConfig(root, "config.client-" + name + ".json", {
-      client: {
-        server: url,
-        token: "token",
-        name,
-        screen: name,
-        clientId: cid,
-        releaseSource,
-      },
+      client: {serverUrl: url, token: "token", name, screen: name, clientId: cid, releaseSource},
     });
-    // These option names deliberately match the actual application configuration.
-    const data = JSON.parse(fs.readFileSync(cfg));
-    data.client.serverUrl = url;
-    data.client.screenName = name;
-    fs.writeFileSync(cfg, JSON.stringify(data));
-    screen(
-      "swt-client-" + name,
-      [
-        "bash",
-        "-c",
-        'exec "$1" client.js --config="$2" > "$3" 2>&1',
-        "_",
-        process.execPath,
-        cfg,
-        name + ".log",
-      ],
-      root,
-    );
+    screen("swt-client-" + name, ["bash", "-c", 'exec "$1" client.js --config="$2" > "$3" 2>&1', "_", process.execPath, cfg, name + ".log"], root);
   }
   await login(url);
-  await until(() => agents.length === 3, "three original/bridge agents");
-  assert(agents.filter((a) => a.clientId === "target").length === 2);
-  let result = await request(
-    { type: "pull_update", clientId: "publisher" },
-    "pull_update_result",
-  );
-  assert(result.ok, JSON.stringify(result));
-  assert(
-    fs
-      .readFileSync(path.join(broker, "file-update.js"), "utf8")
-      .startsWith("// SWT update bridge v1"),
-  );
-  assert(
-    !fs.existsSync(path.join(broker, "release-runtime.js")),
-    "bridge uses only previously allowed paths",
-  );
-  console.log(
-    "PASS original 7cd9b52 broker pulls the compatibility bridge using its original web protocol",
-  );
-  await request({ type: "restart_server" }, "restart_server_result");
-  await until(() => browser.readyState !== 1, "old broker stops");
-  browserMessages = [];
-  await until(async () => {
-    const ws = await connect(url);
-    ws.close();
-    return true;
-  }, "bridge broker restart");
-  await login(url);
-  await until(
-    () => agents.some((a) => a.updateProtocol === 1),
-    "bridge capability registration",
-  );
-  result = await request(
-    { type: "pull_update", clientId: "publisher" },
-    "pull_update_result",
-    60000,
-  );
+  await until(() => agents.length === 3, "three current agents");
+  assert(agents.every(a => a.updateProtocol === 1));
+  let result = await request({type: "restart_server"}, "restart_server_result");
+  assert(!result.ok, "no prepared release must fail instead of restarting files in place");
+  // A client without the complete-release protocol receives an explicit error;
+  // the server must never send a bootstrap or a file-overwrite request.
+  const unsupported = await connect(url), received = [];
+  unsupported.on("message", raw => received.push(JSON.parse(raw)));
+  unsupported.send(JSON.stringify({type: "register", protocolVersion: 2, token: "token", name: "unsupported", screen: "unsupported", attrs: {clientId: "unsupported"}, cols: 80, rows: 24}));
+  await until(() => agents.some(a => a.clientId === "unsupported"), "unsupported agent registration");
+  for (const type of ["push_update", "pull_update"]) {
+    result = await request({type, clientId: "unsupported"}, type + "_result");
+    assert(!result.ok && /协议/.test(result.error));
+  }
+  assert(!received.some(m => ["fetch_files", "update_files"].includes(m.type)));
+  unsupported.close();
+  console.log("PASS unsupported updaters rejected without a compatibility bridge or in-place file writes");
+  result = await request({type: "pull_update", clientId: "publisher"}, "pull_update_result", 60000);
   assert(result.ok && result.prepared, JSON.stringify(result));
-  assert(
-    !fs.existsSync(path.join(broker, "release-runtime.js")),
-    "preparing a release does not overwrite live root",
-  );
-  await request({ type: "restart_server" }, "restart_server_result");
+  assert(fs.readFileSync(path.join(broker, "server.js")).equals(rootServer), "preparation leaves running source untouched");
+  await request({type: "restart_server"}, "restart_server_result");
   await until(() => browser.readyState !== 1, "version switch");
   browserMessages = [];
-  await until(async () => {
-    const ws = await connect(url);
-    ws.close();
-    return true;
-  }, "new broker listens");
+  await until(async () => { const ws = await connect(url); ws.close(); return true; }, "new broker listens");
   await login(url);
-  await until(
-    () =>
-      readJson(path.join(store(broker), "activation.json"))?.phase ===
-      "completed",
-    "broker health",
-  );
-  assert.equal(
-    readJson(path.join(store(broker), "activation.json")).id,
-    manifest.id,
-  );
-  console.log(
-    "PASS bridge -> full release through web pull/restart with health-checked activation",
-  );
-  await until(
-    () => agents.filter((a) => a.clientId === "target").length === 2,
-    "target agents reconnect",
-  );
-  result = await request(
-    { type: "push_update", clientId: "target" },
-    "push_update_result",
-    90000,
-  );
+  await until(() => readJson(path.join(store(broker), "activation.json"))?.phase === "completed", "broker health");
+  assert.equal(readJson(path.join(store(broker), "activation.json")).id, manifest.id);
+  console.log("PASS complete release web pull and health-checked server activation");
+  await until(() => agents.filter(a => a.clientId === "target").length === 2, "target agents reconnect");
+  result = await request({type: "push_update", clientId: "target"}, "push_update_result", 90000);
   assert(result.ok, JSON.stringify(result));
   const state = readJson(path.join(store(target), "activation.json"));
   assert.equal(state.phase, "completed");
   assert.equal(state.expected.length, 2, "both monitors required for success");
-  assert.equal(
-    readJson(
-      path.join(store(target), "releases", state.id, "release-manifest.json"),
-    ).id,
-    manifest.id,
-  );
-  execFileSync("screen", ["-S", "target-a", "-Q", "windows"], { env });
-  execFileSync("screen", ["-S", "target-b", "-Q", "windows"], { env });
-  console.log(
-    "PASS web push automatically bridges old agents and checks both monitors; task Screens survive",
-  );
+  assert.equal(readJson(path.join(store(target), "releases", state.id, "release-manifest.json")).id, manifest.id);
+  execFileSync("screen", ["-S", "target-a", "-Q", "windows"], {env});
+  execFileSync("screen", ["-S", "target-b", "-Q", "windows"], {env});
+  console.log("PASS complete release push verifies both monitors and preserves task Screens");
 
   const hookProject = path.join(scratch, "project 'quoted'");
   fs.mkdirSync(hookProject);

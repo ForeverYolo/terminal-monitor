@@ -2,11 +2,10 @@ if (require('./file-update').runManaged('server', __dirname)) return;
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { createSupervisor } = require('./supervisor');
 const { stripAnsi } = require('./terminal-text');
-const { emptyState, normalizeState, legacyState, fromLegacy, needsInput, stateLabel } = require('./cli-state');
+const { emptyState, normalizeState, needsInput, stateLabel } = require('./cli-state');
 const { loadConfig } = require('./config-loader');
 const { PendingRequests } = require('./pending-requests');
 const { PROTOCOL_VERSION, validSize, validParserState } = require('./terminal-protocol');
@@ -52,14 +51,7 @@ const MAX_AGENTS = config.server.maxAgents || 200;                  // concurren
 config.server.supervisor = config.server.supervisor || {};
 
 const pendingScreenQueries = new Map(); // reqId -> (result) => void
-const pendingUpdateReqs = new PendingRequests();    // reqId -> browser ws awaiting update_files_result/query_files_result
-const pendingPulls = new PendingRequests();         // reqId -> { ws, agentName } awaiting fetch_files_result
-// clientId -> { r, rPrev } — the running-version hashes this machine's agents
-// reported at their last TWO registers. Used by the badge to disambiguate
-// "agent restarted onto an unpublished local version" (rPrev==server, r!=server
-// → 待拉取) from "server published, agent not pushed yet" (r unchanged → 待更新).
-const agentRunningVersions = new Map();
-
+const pendingNodeRestarts = new PendingRequests();    // reqId -> browser ws awaiting restart_node_result
 let agentIdCounter = 0;
 
 function generateAgentId() {
@@ -106,16 +98,7 @@ function getAgentsList(user) {
         lastLines,
         needsInput: needsInput(a.cliState),
         cliState: a.cliState || emptyState(),
-        claudeState: a.cliState ? legacyState(a.cliState) : null,
         clientId: a.attrs && a.attrs.clientId ? a.attrs.clientId : null,
-        fileHashes: a.fileHashes || null,
-        runningHashes: a.runningHashes || null,
-        rPrev: (() => {
-          const cid = a.attrs && a.attrs.clientId;
-          if (!cid) return null;
-          const rv = agentRunningVersions.get(cid);
-          return rv ? (rv.rPrev || null) : null;
-        })()
       };
     });
 }
@@ -123,7 +106,7 @@ function getAgentsList(user) {
 function broadcastAgents() {
   for (const [ws, binfo] of browsers) {
     if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ type: 'agents', agents: getAgentsList(binfo.user), serverFiles: serverManifest }));
+      ws.send(JSON.stringify({ type: 'agents', agents: getAgentsList(binfo.user) }));
     }
   }
 }
@@ -153,96 +136,6 @@ setInterval(() => {
 // request — fs.readFileSync() stalls the whole (single-threaded) event loop,
 // including in-flight WebSocket traffic, while it runs. A code change to a
 // cached page needs a server restart to take effect.
-// --- Push-update: file manifests and known-good backup ---
-// This server's on-disk copies are the single source of truth: the web UI
-// pushes managed-file diffs to agents (see push_update handler) and restarts
-// itself to apply SERVER_FILES landed here out-of-band (deploy.sh/scp).
-const { SERVER_FILES, FETCHABLE_FILES } = require('./managed-files');
-const { sha256File, buildFileManifest: manifestFor, installFiles } = require('./file-update');
-const buildFileManifest = list => manifestFor(__dirname, list);
-
-// Snapshot the booting (i.e. known-good) files for the restart rollback guard.
-// Flat names in one dir to keep the restore `cp` simple; public/ files get
-// re-split on restore. Only overwrite a backup when its content differs.
-async function ensureRestartBackup() {
-  const bakDir = path.join(__dirname, 'backups', 'pre-restart-latest');
-  fs.mkdirSync(bakDir, { recursive: true });
-  for (const name of SERVER_FILES) {
-    const flat = name.replace(/\//g, '__');
-    const src = path.join(__dirname, name);
-    const dst = path.join(bakDir, flat);
-    try {
-      const srcHash = await sha256File(src);
-      let dstHash = null;
-      try { dstHash = await sha256File(dst); } catch { /* no backup yet */ }
-      if (srcHash !== dstHash) fs.copyFileSync(src, dst);
-    } catch (e) {
-      console.log(`[!] backup skip ${name}: ${e.message}`);
-    }
-  }
-}
-
-let serverManifest = null; // filled before the WS server accepts connections
-
-// Snapshot the files we're about to overwrite via pull_update, so a bad pull
-// (e.g. wrong machine picked as source) can be undone by hand. Separate dir
-// from the restart rollback backup — that one must stay "last known booting".
-async function snapshotBeforePull(names) {
-  const dir = path.join(__dirname, 'backups', 'pre-pull');
-  fs.mkdirSync(dir, { recursive: true });
-  const stamped = path.join(dir, new Date().toISOString().replace(/[:.]/g, '-'));
-  fs.mkdirSync(stamped, { recursive: true });
-  for (const name of names) {
-    try {
-      const flat = name.replace(/\//g, '__');
-      fs.copyFileSync(path.join(__dirname, name), path.join(stamped, flat));
-    } catch { /* source missing — nothing to snapshot */ }
-  }
-  return stamped;
-}
-
-// Write files received from an agent (pull_update): verify sha256, then
-// atomically replace. Any validation failure aborts the whole batch.
-function applyPulledFiles(files) {
-  return installFiles(__dirname, files, FETCHABLE_FILES);
-}
-
-// Verify + write the files an agent uploaded, snapshotting our old copies
-// first. Replies to the requesting browser via the recorded pull request.
-async function handleFetchFilesResult(msg, agentInfo, pull) {
-  let result;
-  try {
-    if (!msg.ok || !Array.isArray(msg.files) || msg.files.length === 0) {
-      throw new Error(msg.error || 'agent returned no files');
-    }
-    const names = msg.files.map(f => f.name);
-    const backupDir = await snapshotBeforePull(names);
-    const applied = applyPulledFiles(msg.files);
-    // Refresh our manifest so subsequent pushes diff against what we just
-    // wrote, and record new hashes as the agent's own (they ARE the source).
-    serverManifest = await buildFileManifest(SERVER_FILES);
-    for (const f of msg.files) {
-      if (agentInfo.fileHashes && f.name in agentInfo.fileHashes) agentInfo.fileHashes[f.name] = f.sha256;
-    }
-    console.log(`[*] pull_update applied from ${agentInfo.name}: ${applied.join(', ')} (backup: ${backupDir})`);
-    result = { type: 'pull_update_result', reqId: msg.reqId, ok: true, agentName: agentInfo.name, clientId: (agentInfo.attrs || {}).clientId || null, updated: applied, backupDir, message: '文件已落盘，重启服务器后生效' };
-  } catch (e) {
-    console.error(`[!] pull_update failed from ${agentInfo.name}: ${e.message}`);
-    result = { type: 'pull_update_result', reqId: msg.reqId, ok: false, agentName: agentInfo.name, clientId: (agentInfo.attrs || {}).clientId || null, error: e.message };
-  }
-  if (pull.ws && pull.ws.readyState === pull.ws.OPEN) pull.ws.send(JSON.stringify(result));
-}
-
-// Self-restart (web "重启服务器应用更新" button): quit our swt-server screen and
-// relaunch with the files currently on disk. Rollback guard: if the new server
-// doesn't come up within 5s, restore the known-good boot snapshot and try once
-// more. Runs detached — it must survive this process exiting.
-function spawnRestartScript() {
-  require('./service-restart').restartServer({
-    root: __dirname, node: process.execPath, configFile, backup: path.join(__dirname, 'backups/pre-restart-latest')
-  });
-}
-
 const { createHttpHandler } = require('./server-http');
 const httpServer = http.createServer(createHttpHandler({
   root: __dirname, config, agents, getSupervisor: () => supervisor, maxActionBody: MAX_ACTION_BODY
@@ -296,17 +189,6 @@ wss.on('connection', (ws) => {
       role = 'agent';
       const id = generateAgentId();
       const user = tokenUserMap[msg.token] || 'user';
-      const regFiles = (msg.files && typeof msg.files === 'object' && !Array.isArray(msg.files)) ? msg.files : null;
-      // Register-time file hashes are the RUNNING version (R): the process
-      // hashed its own files as of startup. Track the previous register's R
-      // per clientId so the badge can tell "restarted onto unpublished local
-      // code" (rPrev==serverManifest.client.js, r differs) apart from "server
-      // is ahead, agent needs pushing" (r never changed).
-      const cid = (msg.attrs || {}).clientId || null;
-      if (cid && regFiles) {
-        const prev = agentRunningVersions.get(cid) || {};
-        agentRunningVersions.set(cid, { r: regFiles['client.js'] || null, rPrev: prev.r || null });
-      }
       const info = {
         id,
         name: msg.name || 'unknown',
@@ -314,12 +196,6 @@ wss.on('connection', (ws) => {
         attrs: msg.attrs || {},
         sys: msg.sys || {},
         protocolVersion: PROTOCOL_VERSION,
-        // sha256 of the agent's file copies (push-update versioning); at
-        // register this equals the running version; query_files refreshes
-        // update it to fresh DISK state afterwards. runningHashes stays the
-        // register-time snapshot (R) — cloned, never mutated in place.
-        fileHashes: regFiles,
-        runningHashes: regFiles ? { ...regFiles } : null,
         connectedAt: new Date().toISOString(),
         ws,
         lastOutput: '',
@@ -346,17 +222,6 @@ wss.on('connection', (ws) => {
       console.log(`[+] Agent connected: ${info.name} (${id})`);
       broadcastAgents();
       if (supervisor) supervisor.onAgentConnected(info);
-
-      // Register上报的 fileHashes 是进程启动时的磁盘快照——机器是版本源或
-      // 进程启动后磁盘被改过时，A 会滞后真实磁盘最长一个 query_files 周期
-      // (60s)，期间徽章可能误报 待更新。注册后立刻补发一次 query_files 把
-      // A 拉到当前磁盘状态，不等心跳。
-      const qfReqId = 'qf-reg-' + id;
-      setTimeout(() => {
-        if (ws.readyState === ws.OPEN) {
-          try { ws.send(JSON.stringify({ type: 'query_files', reqId: qfReqId })); } catch { /* ignore */ }
-        }
-      }, 1500); // 给注册回包一点时间，避免和新连接的初始流量挤在一起
 
       // Server-side heartbeat timeout: if no message from agent for 120s, consider dead
       ws._agentAlive = true;
@@ -390,7 +255,7 @@ wss.on('connection', (ws) => {
       role = 'browser';
       const user = msg.username || 'user';
       browsers.set(ws, { ws, agentIds: new Set(), user });
-      ws.send(JSON.stringify({ type: 'auth_ok', agents: getAgentsList(user), user, supervisorConfig: config.server.supervisor, serverFiles: serverManifest, releaseStatus: releaseService.status() }));
+      ws.send(JSON.stringify({ type: 'auth_ok', agents: getAgentsList(user), user, supervisorConfig: config.server.supervisor, releaseStatus: releaseService.status() }));
       console.log(`[+] Browser connected (user: ${user})`);
       return;
     }
@@ -494,13 +359,12 @@ wss.on('connection', (ws) => {
       }
     }
 
-    // One state contract for cards, API, notifications and supervisor. Old
-    // clients are translated at the boundary, never re-detected on the server.
-    if (role === 'agent' && (msg.type === 'cli_state' || msg.type === 'claude_state')) {
+    // One state contract for cards, API, notifications and supervisor.
+    if (role === 'agent' && msg.type === 'cli_state') {
       const agentInfo = agents.get(ws);
       if (!agentInfo) return;
       const prev = agentInfo.cliState;
-      agentInfo.cliState = msg.type === 'cli_state' ? normalizeState(msg.state) : fromLegacy(msg.state);
+      agentInfo.cliState = normalizeState(msg.state);
       if (supervisor) supervisor.onCliState(agentInfo.id, agentInfo.cliState);
       // Notify watching browsers if state kind changed (saves bandwidth vs full broadcast).
       // Broadcast to all browsers so the dashboard management panel stays live
@@ -539,48 +403,15 @@ wss.on('connection', (ws) => {
       }
     }
 
-    // Push-update results: agent → requesting browser. On success the agent
-    // re-registers with fresh hashes anyway; update the tracked copy here too
-    // so the badge flips without waiting for the reconnect cycle.
-    if (role === 'agent' && msg.type === 'update_files_result') {
-      const agentInfo = agents.get(ws);
-      if (!agentInfo) return;
-      if (msg.ok && agentInfo.fileHashes && serverManifest) {
-        for (const f of (msg.updated || [])) agentInfo.fileHashes[f] = serverManifest[f];
-      }
-      const out = JSON.stringify({ ...msg, type: 'push_update_result', agentName: agentInfo.name, agentId: agentInfo.id, clientId: (agentInfo.attrs || {}).clientId || null });
-      const target = msg.reqId && pendingUpdateReqs.get(msg.reqId);
-      if (target && target.readyState === target.OPEN) target.send(out);
-      pendingUpdateReqs.delete(msg.reqId);
-    }
-
-    if (role === 'agent' && msg.type === 'query_files_result') {
-      const agentInfo = agents.get(ws);
-      if (!agentInfo) return;
-      if (msg.ok && msg.files) agentInfo.fileHashes = msg.files;
-      const out = JSON.stringify({ ...msg, agentName: agentInfo.name, agentId: agentInfo.id, clientId: (agentInfo.attrs || {}).clientId || null });
-      const target = msg.reqId && pendingUpdateReqs.get(msg.reqId);
-      if (target && target.readyState === target.OPEN) target.send(out);
-      pendingUpdateReqs.delete(msg.reqId);
-    }
-
     // restart_node ack: forwarded as push_update_result so the browser reuses
-    // its existing pendingUpdateReqs plumbing (same Map, same timeout, same UI).
+    // its existing pendingNodeRestarts plumbing (same Map, same timeout, same UI).
     if (role === 'agent' && msg.type === 'restart_node_result') {
       const agentInfo = agents.get(ws);
       if (!agentInfo) return;
-      const out = JSON.stringify({ ...msg, type: 'push_update_result', agentName: agentInfo.name, agentId: agentInfo.id, clientId: (agentInfo.attrs || {}).clientId || null, updated: [], message: '已请求重启监控进程' });
-      const target = msg.reqId && pendingUpdateReqs.get(msg.reqId);
+      const out = JSON.stringify({ ...msg, type: 'push_update_result', agentName: agentInfo.name, agentId: agentInfo.id, clientId: (agentInfo.attrs || {}).clientId || null, message: '已请求重启监控进程' });
+      const target = msg.reqId && pendingNodeRestarts.get(msg.reqId);
       if (target && target.readyState === target.OPEN) target.send(out);
-      pendingUpdateReqs.delete(msg.reqId);
-    }
-
-    if (role === 'agent' && msg.type === 'fetch_files_result') {
-      const agentInfo = agents.get(ws);
-      const pull = msg.reqId && pendingPulls.get(msg.reqId);
-      if (!agentInfo || !pull) return;
-      pendingPulls.delete(msg.reqId);
-      handleFetchFilesResult(msg, agentInfo, pull).catch(() => {});
+      pendingNodeRestarts.delete(msg.reqId);
     }
 
     if (role === 'agent' && msg.type === 'resize') {
@@ -801,34 +632,6 @@ wss.on('connection', (ws) => {
       console.log(`[*] spawn_node forwarded to ${matchInfo.name} (client ${matchInfo.attrs && matchInfo.attrs.clientId}) screen=${msg.screenName} cmd=${msg.cmd || 'bash'}`);
     }
 
-    // --- Push-update: send this server's managed-file diffs to agents ---
-    // ALL of SERVER_FILES: agent machines keep
-    // on-disk copies of server.js/public/* too (install.sh layout), and stale
-    // copies there previously tripped the 待拉取 badge as false drift. The
-    // agent writes them all but only self-restarts when a file it actually
-    // RUNS changed. Content source is this server's own
-    // on-disk copies (read fresh per push, so out-of-band scp'd updates are
-    // picked up without a restart).
-    async function buildUpdatePayload(agentInfo) {
-      const files = [];
-      for (const name of SERVER_FILES) {
-        const want = serverManifest ? serverManifest[name] : null;
-        const have = agentInfo.fileHashes ? agentInfo.fileHashes[name] : null;
-        if (want && have === want) continue; // already up to date
-        let content;
-        try { content = fs.readFileSync(path.join(__dirname, name)); } catch { continue; }
-        files.push({ name, content: content.toString('base64'), sha256: crypto.createHash('sha256').update(content).digest('hex') });
-      }
-      return files;
-    }
-
-    function findAgentByClientId(clientId) {
-      for (const [aws, ainfo] of agents) {
-        if (aws.readyState === aws.OPEN && (ainfo.attrs || {}).clientId === clientId) return { aws, ainfo };
-      }
-      return null;
-    }
-
     // ALL live agents of a machine. Machines run one client process per screen
     // (monitor-1/2/3 share one clientId) — push/restart must reach every one of
     // them, not just the first match, or the badge stays stale for the rest.
@@ -838,77 +641,6 @@ wss.on('connection', (ws) => {
         if (aws.readyState === aws.OPEN && (ainfo.attrs || {}).clientId === clientId) matches.push({ aws, ainfo });
       }
       return matches;
-    }
-
-    async function pushToClient(ws, reqId, clientId) {
-      // Diff against a FRESH manifest, not the boot-time one: files may have
-      // been scp'd/deployed onto the server while it's running (that's the
-      // whole update flow — deploy.sh lands files, then pushes happen).
-      serverManifest = await buildFileManifest(SERVER_FILES);
-      const matches = findAllAgentsByClientId(clientId);
-      if (matches.length === 0) {
-        ws.send(JSON.stringify({ type: 'push_update_result', reqId, agentName: clientId, ok: false, error: 'agent offline', updated: [] }));
-        return;
-      }
-      const files = await buildUpdatePayload(matches[0].ainfo);
-      if (files.length === 0) {
-        ws.send(JSON.stringify({ type: 'push_update_result', reqId, agentName: matches[0].ainfo.name, ok: true, updated: [], message: 'already up to date' }));
-        return;
-      }
-      // Send to EVERY process of this machine: each one applies the files and
-      // replies with the same reqId; per-reqId replies after the first are
-      // ignored by pendingUpdateReqs (single-slot), so the browser sees one
-      // result — but every process has the work queued either way.
-      pendingUpdateReqs.set(reqId, ws);
-      for (const { aws, ainfo } of matches) {
-        aws.send(JSON.stringify({ type: 'update_files', reqId, files }));
-        console.log(`[*] push_update → ${ainfo.name}: ${files.map(f => f.name).join(', ')}`);
-      }
-    }
-
-    if (role === 'browser' && msg.type === 'push_update') {
-      const binfo = browsers.get(ws);
-      if (binfo && msg.clientId && msg.reqId) pushToClient(ws, msg.reqId, msg.clientId);
-    }
-
-    if (role === 'browser' && msg.type === 'push_update_all') {
-      const binfo = browsers.get(ws);
-      if (binfo && msg.reqId) {
-        const clientIds = new Set();
-        for (const [, ainfo] of agents) {
-          const cid = (ainfo.attrs || {}).clientId;
-          if (cid) clientIds.add(cid);
-        }
-        for (const cid of clientIds) pushToClient(ws, msg.reqId + '-' + cid, cid);
-      }
-    }
-
-    // --- Pull-update: treat the named agent as the version source ---
-    // Ask it to upload FETCHABLE_FILES, then overwrite our on-disk copies.
-    // The agent's hashes have ALREADY been compared against the agent's own
-    // manifest by the browser, so here we take everything it sends.
-    if (role === 'browser' && msg.type === 'pull_update') {
-      const binfo = browsers.get(ws);
-      if (binfo && msg.clientId && msg.reqId) {
-        const match = findAgentByClientId(msg.clientId);
-        if (!match) {
-          ws.send(JSON.stringify({ type: 'pull_update_result', reqId: msg.reqId, agentName: msg.clientId, ok: false, error: 'agent offline' }));
-        } else {
-          pendingPulls.set(msg.reqId, { ws, agentName: match.ainfo.name });
-          match.aws.send(JSON.stringify({ type: 'fetch_files', reqId: msg.reqId, names: FETCHABLE_FILES }));
-          console.log(`[*] pull_update → fetching source files from ${match.ainfo.name}`);
-        }
-      }
-    }
-
-    if (role === 'browser' && msg.type === 'restart_server') {
-      const binfo = browsers.get(ws);
-      if (binfo && msg.reqId) {
-        // Ack BEFORE initiating — the restart kills this WS mid-flight.
-        ws.send(JSON.stringify({ type: 'restart_server_result', reqId: msg.reqId, ok: true, message: '服务器将在1秒后重启' }));
-        console.log('[*] restart_server requested — restarting to apply on-disk files');
-        setTimeout(spawnRestartScript, 500);
-      }
     }
 
     // --- Restart a single agent's monitoring process (⏳ 待应用 fix) ---
@@ -925,7 +657,7 @@ wss.on('connection', (ws) => {
         if (matches.length === 0) {
           ws.send(JSON.stringify({ type: 'restart_node_result', reqId: msg.reqId, agentName: msg.clientId, ok: false, error: 'agent offline' }));
         } else {
-          pendingUpdateReqs.set(msg.reqId, ws); // reuse: agent replies with restart_node_result → forwarded as push_update_result
+          pendingNodeRestarts.set(msg.reqId, ws); // reuse: agent replies with restart_node_result → forwarded as push_update_result
           for (const { aws, ainfo } of matches) {
             aws.send(JSON.stringify({ type: 'restart_node', reqId: msg.reqId }));
             console.log("[*] restart_node sent to " + ainfo.name);
@@ -937,8 +669,7 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     cancelSocket(ws);
-    pendingUpdateReqs.forgetSocket(ws);
-    pendingPulls.forgetSocket(ws);
+    pendingNodeRestarts.forgetSocket(ws);
     releaseService.disconnected(ws);
     if (role === 'agent') {
       const info = agents.get(ws);
@@ -1032,35 +763,6 @@ function initSupervisor() {
   }
 }
 initSupervisor();
-
-// --- Start ---
-// Manifest + known-good backup are ready before (or shortly after) the first
-// agents register; agents re-register on reconnect, so a slightly late fill
-// self-corrects on the next 10s agents broadcast.
-buildFileManifest(SERVER_FILES).then(m => {
-  serverManifest = m;
-  console.log(`[*] server file manifest ready (${Object.keys(m).length}/${SERVER_FILES.length} files)`);
-  return ensureRestartBackup();
-}).then(() => {
-  console.log('[*] pre-restart backup verified');
-}).catch(e => console.log('[!] manifest/backup init failed:', e.message));
-
-// Periodic manifest refresh. The boot-time manifest goes stale when files are
-// deployed onto the server while it runs (e.g. deploying a new client.js and
-// restarting the AGENTS only — the server restarts later or never): the stale
-// hashes then make every freshly-updated agent show a bogus "有更新" badge.
-// Same tick asks each agent for fresh disk hashes (query_files) so the badge
-// sees current A (agent disk), not just the register-time snapshot.
-setInterval(() => {
-  buildFileManifest(SERVER_FILES).then(m => { serverManifest = m; })
-    .catch(e => console.log('[!] manifest refresh failed:', e.message));
-  const reqId = 'qf-' + Date.now().toString(36);
-  for (const [aws] of agents) {
-    if (aws.readyState === aws.OPEN) {
-      try { aws.send(JSON.stringify({ type: 'query_files', reqId })); } catch { /* ignore */ }
-    }
-  }
-}, 60 * 1000);
 
 const listenHost = config.server.host || '0.0.0.0';
 httpServer.listen(port, listenHost, () => {

@@ -2,7 +2,7 @@
  * Supervisor (overseer) module — server-side orchestrator.
  *
  * Responsibilities:
- *   1. Aggregate per-agent Claude session state (from `claude_state` messages).
+ *   1. Aggregate per-agent CLI session state (from `cli_state` messages).
  *   2. Count nodes per clientId (via list_screens round-trips).
  *   3. Periodically produce a human-readable summary of the whole fleet.
  *   4. Drive a designated "analyzer" Claude agent (a real Claude Code node) to
@@ -12,7 +12,7 @@
  *
  * Safety contract:
  *   - The analyzer is a real Claude Code with tools, so the supervisor auto-DENIES
- *     every permission prompt it raises (kind==='bash'). Physically it can never
+ *     every permission prompt it raises (status==='waiting_permission'). Physically it can never
  *     execute anything — pure analysis. Plus each cycle's prompt forbids tools.
  *   - The supervisor NEVER auto-injects into other agents' terminals. The
  *     analyzer's suggestions are advisory, shown in the panel; a human clicks to
@@ -31,7 +31,7 @@
 const http = require('http');
 const https = require('https');
 const { stripAnsi } = require('./terminal-text');
-const { legacyState, fromLegacy, needsInput } = require('./cli-state');
+const { needsInput, appLabel } = require('./cli-state');
 
 function createSupervisor(cfg, deps) {
   const { setInterval, clearInterval, setTimeout, clearTimeout } = deps.timers || globalThis;
@@ -54,7 +54,7 @@ function createSupervisor(cfg, deps) {
   const analyzerTimeout = (cfg.analyzerTimeout || 120) * 1000;
 
   // Per-agent state cache keyed by agentId
-  const agentState = new Map();   // id -> { claude, lastChange, lastStatus }
+  const agentState = new Map();   // id -> { cliState, lastChange, lastStatus }
   // Per-client node counts
   const clientNodeCounts = new Map(); // clientId -> count
 
@@ -66,10 +66,6 @@ function createSupervisor(cfg, deps) {
   let started = false;
 
   // ============ Aggregation ============
-
-  function onClaudeState(agentId, state) {
-    onCliState(agentId, fromLegacy(state));
-  }
 
   function onCliState(agentId, cliState) {
     const prev = agentState.get(agentId) || {
@@ -129,7 +125,6 @@ function createSupervisor(cfg, deps) {
       needsInput: a.needsInput,
       cliState,
       status: st ? st.lastStatus : 'UNKNOWN',
-      claude: cliState ? legacyState(cliState) : null,
       lastLines: last3.substring(0, 500)
     };
   }
@@ -153,9 +148,9 @@ function createSupervisor(cfg, deps) {
     }));
 
     const lines = summaries.map(s => {
-      const c = s.claude;
-      const cstr = c && c.running
-        ? `${c.app || 'claude'}:${c.kind}${c.prompt ? ' "' + stripAnsi(c.prompt).substring(0, 60) + '"' : ''}`
+      const c = s.cliState;
+      const cstr = c?.isCodeCli
+        ? `${appLabel(c)}:${c.status}${c.prompt ? ' "' + stripAnsi(c.prompt).substring(0, 60) + '"' : ''}`
         : 'terminal';
       return `  [${s.status}] ${s.name} (${s.screen}) — ${cstr}`;
     });
@@ -254,18 +249,19 @@ function createSupervisor(cfg, deps) {
 
   function buildSnapshot() {
     const agents = getAgents();
-    const claude = agents.filter(a => a.cliState?.isCodeCli);
-    const nonClaude = agents.filter(a => !a.cliState?.isCodeCli).map(a => a.name);
+    const codeCli = agents.filter(a => a.cliState?.isCodeCli);
+    const terminals = agents.filter(a => !a.cliState?.isCodeCli).map(a => a.name);
     return {
-      claude: claude.map(a => ({
+      codeCli: codeCli.map(a => ({
         name: a.name,
         screen: a.screen,
-        kind: legacyState(a.cliState).kind,
+        app: appLabel(a.cliState),
+        status: a.cliState.status,
         prompt: a.cliState.prompt,
         options: a.cliState.options,
         lastLine: (a.lastLines || '').split('\n').pop().substring(0, 200)
       })),
-      nonClaude
+      terminals
     };
   }
 
@@ -294,7 +290,7 @@ function createSupervisor(cfg, deps) {
     const snap = buildSnapshot();
     const prompt = buildAnalyzerPrompt(snap, analyzerCycle);
     sendToAgent(aid, prompt + '\r');
-    console.log(`[SUPERVISOR] analyzer cycle ${analyzerCycle}: sent snapshot (${snap.claude.length} claude agents) → ${aid}`);
+    console.log(`[SUPERVISOR] analyzer cycle ${analyzerCycle}: sent snapshot (${snap.codeCli.length} CLI agents) → ${aid}`);
 
     if (analyzerWatcher) clearInterval(analyzerWatcher);
     analyzerWatcher = setInterval(analyzerWatch, 3000);
@@ -355,7 +351,7 @@ function createSupervisor(cfg, deps) {
     screenQueryTimer = setInterval(refreshScreenCounts, 30000);
     if (analyzerName) {
       analyzerTimer = setInterval(runAnalyzerCycle, analyzerInterval);
-      // First cycle after a short grace period so agents register their claude_state
+      // First cycle after a short grace period so agents register their cli_state
       analyzerGraceTimer = setTimeout(runAnalyzerCycle, 15000);
     }
   }
@@ -376,7 +372,6 @@ function createSupervisor(cfg, deps) {
   return {
     start, stop,
     onAgentConnected, onAgentDisconnected,
-    onClaudeState,
     onCliState,
     buildSummary,
     runAnalyzerCycleNow: runAnalyzerCycle

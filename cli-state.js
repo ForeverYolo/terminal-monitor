@@ -23,15 +23,6 @@
         ? {hookSetup: {phase: value.hookSetup.phase, message: String(value.hookSetup.message || '').slice(0, 300)}} : {})
     };
   }
-  function legacyState(state) {
-    const s = normalizeState(state);
-    const kind = !s.isCodeCli ? 'none' : ({ working: 'working', idle: 'input', waiting_permission: 'bash', waiting_input: s.options.length ? 'option' : 'yesno', unknown: 'unknown' })[s.status];
-    return { running: s.isCodeCli, kind, prompt: s.prompt, options: s.options, app: s.app, source: s.source, lastLine: s.prompt, ...(s.appName ? {appName: s.appName} : {}) };
-  }
-  function fromLegacy(value) {
-    if (!value || !value.running) return emptyState();
-    return normalizeState({ isCodeCli: true, app: value.app || 'claude', appName: value.appName, status: ({ working: 'working', input: 'idle', done: 'idle', bash: 'waiting_permission', yesno: 'waiting_input', option: 'waiting_input' })[value.kind], prompt: value.prompt, options: value.options });
-  }
   function detectScreen(view) {
     const lines = (Array.isArray(view) ? view : String(view || '').split('\n')).slice(-300).map(l => String(l).trimEnd());
     while (lines.length && !lines.at(-1).trim()) lines.pop();
@@ -87,7 +78,7 @@
     return state?.isCodeCli ? `${stateLabel(state)} · ${appLabel(state)} · ${state.source === 'hooks' ? '事件' : '推断'}${hookHint(state) ? ' · ' + (setup[state.hookSetup.phase] || '事件待接通') : ''}` : '';
   }
   function needsInput(state) { return !!state?.isCodeCli && ['idle', 'waiting_input', 'waiting_permission'].includes(state.status); }
-  const api = { emptyState, normalizeState, legacyState, fromLegacy, detectScreen, stateLabel, appLabel, stateText, hookHint, needsInput };
+  const api = { emptyState, normalizeState, detectScreen, stateLabel, appLabel, stateText, hookHint, needsInput };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.CliState = api;
 })(globalThis);

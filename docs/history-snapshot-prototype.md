@@ -1,5 +1,7 @@
 # 历史快照原型
 
+> 历史原型记录。本文所述旧协议回退和旧文件更新器均已移除；当前实现见 [网页更新说明](web-release-updates.md) 与 [原生 TUI 模式](native-tui-mode.md)。
+
 状态：独立 worktree 中已实现并通过本地测试；尚未部署。
 
 agent 将经过共享过滤器的 PTY 输出同时送到 headless xterm 和 server。headless xterm 保留最近 5000 行历史。浏览器首次连接，或 `sinceSeq` 已不在服务器的连续缓冲中时，server 向 agent 请求快照；agent 等先前写入解析完成，在快照生成期间暂存新输出。server 以收到快照响应前的最后一个数据 `seq` 作为锚点，只把锚点之后的帧接到快照后面。连续的短暂断线仍直接补增量。

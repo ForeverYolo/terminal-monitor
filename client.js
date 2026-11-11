@@ -99,40 +99,7 @@ if (!config.client.clientId) {
 }
 const clientId = config.client.clientId;
 
-// --- Push-update: self file manifest ---
-// Server diffs these hashes against its own copies and pushes only what
-// differs (update_files). Whitelist is strict: only these names may ever be
-// written by the update path.
-const { CLIENT_FILES, FETCHABLE_FILES } = require('./managed-files');
-const { buildFileManifest, installFiles } = require('./file-update');
 const releaseClient = require('./file-update').createReleaseClient({root:__dirname,config,send:sendMsg});
-
-// {name: hash} of our FETCHABLE_FILES copies; missing files are omitted.
-// Deliberately wider than CLIENT_FILES: the server-side files (server.js,
-// public/* etc.) are hashed too so the four-state version badge can spot a
-// machine whose server-side copies drifted (i.e. someone edited them here to
-// publish via pull).
-//
-// RUNNING-VERSION SNAPSHOT (the R in the badge's S/A/R model): hashed ONCE at
-// process startup and cached for every register. The server treats these hashes
-// as "the version this process is running" — which is only true for a startup
-// snapshot. Rehashing at each connect (the old behaviour) silently reported
-// freshly-deployed disk files as the running version, so after any reconnect
-// (server restart, network blip) a stale process showed "✓ 最新" instead of
-// "⏳ 待应用" and the pending restart became invisible. Fresh DISK state (the
-// A channel) comes from query_files, which always rehashes on demand.
-let runningFileHashes = null;
-async function hashSelfFiles() {
-  if (runningFileHashes) return runningFileHashes;
-  return (runningFileHashes = await hashDiskFiles());
-}
-// Fresh DISK hashes (the A channel for the version badge): always rehashes,
-// never cached. query_files uses this — it must see files changed on disk
-// since this process started (deployed updates, local edits), which the
-// running-version snapshot above deliberately freezes out.
-async function hashDiskFiles() {
-  return buildFileManifest(__dirname, FETCHABLE_FILES);
-}
 
 // --- Debug byte-stream dump (toggle with --dump flag) ---
 // Dumps raw pty traffic to /tmp/swt-dump-<name>-{in,out}.bin so escape-sequence
@@ -233,8 +200,6 @@ function getShellCwd() {
   return readShellCwdFromProc() || staticFileRoot;
 }
 
-// Resolve a relative path against a base directory. Returns null if the result
-// escapes the base (which itself is constrained to $HOME for safety).
 function sendMsg(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     sendRawOrQueue(JSON.stringify(obj));
@@ -372,46 +337,9 @@ async function handleSpawnNode(msg) {
   });
 }
 
-// --- Pull-update: serve this machine's copies as the designated source ---
-// Mirror of handleUpdateFiles (push direction). Read-only; every name is
-// checked against the FETCHABLE_FILES whitelist before touching the disk.
-async function handleFetchFiles(msg) {
-  const reqId = msg.reqId;
-  const names = (Array.isArray(msg.names) ? msg.names : [])
-    .filter(n => typeof n === 'string' && FETCHABLE_FILES.includes(n));
-  const files = [];
-  for (const name of names) {
-    const buf = await fs.promises.readFile(path.join(__dirname, name));
-    files.push({
-      name,
-      content: buf.toString('base64'),
-      sha256: crypto.createHash('sha256').update(buf).digest('hex')
-    });
-  }
-  sendMsg({ type: 'fetch_files_result', reqId, ok: true, files });
-}
-
-// --- Push-update: apply pushed files, then self-restart if needed ---
-
-// Files we can receive via update_files: everything the server manages
-// (install.sh puts server.js/public/* copies on agent machines too). Only a
-// change to one we actually RUN triggers a restart.
-async function handleUpdateFiles(msg) {
-  const reqId = msg.reqId;
-  if (!Array.isArray(msg.files)) {
-    sendMsg({ type: 'update_files_result', reqId, ok: false, error: 'files must be an array', updated: [] });
-    return;
-  }
-  const updated = installFiles(__dirname, msg.files, FETCHABLE_FILES);
-  const ranFilesChanged = updated.some(name => CLIENT_FILES.includes(name));
-  console.log(`[update] applied: ${updated.join(', ')}${ranFilesChanged ? ' — scheduling self-restart' : ' (data-only, no restart needed)'}`);
-  sendMsg({ type: 'update_files_result', reqId, ok: true, updated });
-  if (ranFilesChanged) scheduleSelfRestart();
-}
-
 let selfRestartScheduled = false;
 
-// Restart THIS client process so the new files take effect. Only ever touches
+// Restart this monitoring process on explicit request. Only ever touches
 // our own service screen (swt-client-<screenName>) — the monitored task screen
 // <screenName> is not touched. Uses process.execPath (absolute node), never
 // bare `node` (ancient system node on some hosts can't parse the source).
@@ -520,10 +448,9 @@ function stopHeartbeat() {
 
 let ptyGeneration = 0;  // incremented on every spawn; stale respawn timers no-op
 
-// Register handshake is async (hashSelfFiles reads the managed files from disk). The
-// server closes any connection whose first message isn't register, and a
+// The server closes any connection whose first message is not register. A
 // freshly attached screen's initial redraw fires through onData immediately —
-// so outbound data/claude_state/ping that beat the register message must be
+// so outbound data/cli_state/ping that beat the register message must be
 // queued, not dropped or sent early.
 let registered = false;
 let pendingOutbound = [];
@@ -560,7 +487,6 @@ function connect() {
     getSocket: () => transferSocket, getShellCwd
   });
   ws.on('open', () => {
-    releaseClient.connected(ws);
     console.log('Connected to server');
     reconnectDelay = 1000;
     registered = false;
@@ -575,23 +501,20 @@ function connect() {
 
     // Register with server
     const sysInfo = collectSysInfo();
-    hashSelfFiles().then(files => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) { pendingOutbound = []; return; }
-      ws.send(JSON.stringify({
-        type: 'register',
-        token,
-        name,
-        screen: screenName,
-        attrs: { ...(attrs || {}), clientId },
-        sys: sysInfo,
-        files,
-        ...releaseClient.identity(),
-        protocolVersion: PROTOCOL_VERSION,
-        cols,
-        rows
-      }));
-      flushOutbound();
-    });
+    if (!ws || ws.readyState !== WebSocket.OPEN) { pendingOutbound = []; return; }
+    ws.send(JSON.stringify({
+      type: 'register',
+      token,
+      name,
+      screen: screenName,
+      attrs: { ...(attrs || {}), clientId },
+      sys: sysInfo,
+      ...releaseClient.identity(),
+      protocolVersion: PROTOCOL_VERSION,
+      cols,
+      rows
+    }));
+    flushOutbound();
   });
 
   function spawnPty() {
@@ -728,42 +651,12 @@ function connect() {
       shutdown();
     }
 
-    // --- Push-update: server sends diffs of the managed inventory ---
-    if (msg.type === 'update_files') {
-      handleUpdateFiles(msg).catch(e => {
-        console.error('[update] failed:', e.message);
-        sendMsg({ type: 'update_files_result', reqId: msg.reqId, ok: false, error: e.message, updated: [] });
-      });
-    }
-
-    if (msg.type === 'query_files') {
-      hashDiskFiles().then(files => {
-        sendMsg({ type: 'query_files_result', reqId: msg.reqId, ok: true, files });
-      });
-    }
-
-    // Explicit web-UI "restart monitoring process" (⏳ 待应用 fix): disk files
-    // are already current but the running process predates them. Same mechanics
-    // as the post-push self-restart — only touches swt-client-<screenName>,
-    // never the monitored task screen. Force past the once-guard: this is a
-    // deliberate user command, not an update side effect.
+    // Explicit monitoring-worker restart; the task Screen stays running.
     if (msg.type === 'restart_node') {
       console.log('[!] restart_node requested from web UI — scheduling self restart');
       selfRestartScheduled = false;
       sendRawOrQueue(JSON.stringify({ type: 'restart_node_result', reqId: msg.reqId, ok: true }));
       scheduleSelfRestart();
-    }
-
-    // --- Pull-update: server wants THIS agent's copies of whitelisted files ---
-    // Reverse direction of update_files: this machine is the designated update
-    // source, so we read files and ship them up. Read-only — nothing here ever
-    // writes to disk. Whitelist covers everything the server manages
-    // (its own server-side files too, since it will overwrite itself with them).
-    if (msg.type === 'fetch_files') {
-      handleFetchFiles(msg).catch(e => {
-        console.error('[fetch_files] failed:', e.message);
-        sendMsg({ type: 'fetch_files_result', reqId: msg.reqId, ok: false, error: e.message, files: [] });
-      });
     }
 
     // Heartbeat: server pong resets our timeout

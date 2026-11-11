@@ -22,7 +22,6 @@
   "release-package.js",
   "release-runtime.js",
   "release-transport.js",
-  "release-bridge.js",
   "file-transfer.js",
   "service-restart.js",
   "service-runtime.sh"
@@ -52,7 +51,6 @@
   const manifest = Object.freeze({
     CLIENT_FILES: Object.freeze(CLIENT_FILES),
     SERVER_FILES: Object.freeze(SERVER_FILES),
-    FETCHABLE_FILES: Object.freeze(SERVER_FILES),
     DEPLOY_FILES: Object.freeze(DEPLOY_FILES)
   });
   if (typeof module !== 'undefined' && module.exports) module.exports = manifest;

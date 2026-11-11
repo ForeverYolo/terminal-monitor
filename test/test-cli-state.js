@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('assert');
-const { detectScreen, normalizeState, legacyState, appLabel } = require('../cli-state');
+const { detectScreen, normalizeState, appLabel } = require('../cli-state');
 const { CliTracker } = require('../cli-tracker');
 const { TerminalState } = require('../terminal-state');
 const pad = text => [...Array(8).fill(''), ...text.split('\n')];
@@ -113,7 +113,6 @@ const ignored = new CliTracker();
 eq(ignored.event(event('Notification',{notificationType:'auth_success'}),proc),false,'unrelated notification ignored');
 eq(ignored.screen(['user@host:~$ '],null).isCodeCli,false,'ignored event cannot bind a CLI and mislabel a shell');
 eq(normalizeState({isCodeCli: true, app: 'bad'}).isCodeCli, false, 'wire identity validation');
-eq(legacyState({isCodeCli: true, app: 'qoder', status: 'unknown'}).kind, 'unknown', 'unknown is not converted to waiting');
 
 (async () => {
   const term = new TerminalState(100, 20, () => {});
